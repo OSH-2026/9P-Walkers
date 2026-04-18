@@ -49,7 +49,9 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
-    ${CMAKE_SOURCE_DIR}/User/fs
+    ${CMAKE_SOURCE_DIR}/User/fs/core
+    ${CMAKE_SOURCE_DIR}/User/fs/port
+    ${CMAKE_SOURCE_DIR}/User/drivers
 )
 
 # Add project symbols (macros)
