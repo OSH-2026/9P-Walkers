@@ -1,0 +1,11 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Flash STM32",
+      "type": "shell",
+      "command": "cmake --build \"${workspaceFolder}/build/Debug\" && \"/home/hb/.local/share/stm32cube/bundles/programmer/2.22.0+st.1/bin/STM32_Programmer_CLI\" -c port=SWD freq=4000 reset=HWrst -d \"${workspaceFolder}/build/Debug/pwos-slave.elf\" -v -rst",
+      "problemMatcher": []
+    }
+  ]
+}
