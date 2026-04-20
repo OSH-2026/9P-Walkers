@@ -24,6 +24,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "fs_selftest.h"
+#include "vofa_firewater.h"
+#include <stdio.h>
 
 /* USER CODE END Includes */
 
@@ -46,16 +49,48 @@
 
 /* USER CODE BEGIN PV */
 HAL_SD_CardInfoTypeDef SDCardInfo;
+FS_SelfTestReport g_fs_report;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
+static void UART_ReportEarlyBoot(void);
+static void FS_ReportBootStatus(void);
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static void UART_ReportEarlyBoot(void)
+{
+  (void)vofa_firewater_send_text("boot: uart2 ok");
+}
+
+static void FS_ReportBootStatus(void)
+{
+  char message[128];
+  int pass;
+
+  pass = (g_fs_report.init_status == 0) &&
+         (g_fs_report.mkdir_status == 0) &&
+         (g_fs_report.write_status == 0) &&
+         (g_fs_report.stat_status == 0) &&
+         (g_fs_report.read_status == 0) &&
+         (g_fs_report.dir_status == 0) &&
+         (g_fs_report.compare_status == 0);
+
+  (void)vofa_firewater_send_text("9P-Walkers FS self-test boot");
+  if (snprintf(message, sizeof(message),
+               "boot status=%s file_size=%lu read=%lu write=%lu sectors=%lu",
+               pass ? "PASS" : "FAIL",
+               (unsigned long)g_fs_report.file_size,
+               (unsigned long)g_fs_report.bytes_read,
+               (unsigned long)g_fs_report.bytes_written,
+               (unsigned long)g_fs_report.sector_count) > 0) {
+    (void)vofa_firewater_send_text(message);
+  }
+}
 
 /* USER CODE END 0 */
 
@@ -89,9 +124,22 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART2_UART_Init();
+  UART_ReportEarlyBoot();
   MX_SDIO_SD_Init();
   /* USER CODE BEGIN 2 */
-  HAL_SD_GetCardInfo(&hsd, &SDCardInfo);
+  (void)vofa_firewater_send_text("boot: sdio ok");
+  if (HAL_SD_GetCardInfo(&hsd, &SDCardInfo) == HAL_OK)
+  {
+    (void)vofa_firewater_send_text("boot: sd cardinfo ok");
+  }
+  else
+  {
+    (void)vofa_firewater_send_text("boot: sd cardinfo fail");
+  }
+  (void)vofa_firewater_send_text("boot: fs test start");
+  (void)fs_selftest_run(&g_fs_report);
+  (void)vofa_firewater_send_text("boot: fs test done");
+  FS_ReportBootStatus();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -101,6 +149,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    (void)vofa_firewater_send_fs_report(&g_fs_report, HAL_GetTick());
+    HAL_Delay(1000);
   }
   /* USER CODE END 3 */
 }
@@ -162,6 +212,11 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
+  {
+    const uint8_t error_message[] = "error: entered Error_Handler\n";
+    (void)HAL_UART_Transmit(&huart2, error_message,
+                            sizeof(error_message) - 1U, 100U);
+  }
   __disable_irq();
   while (1)
   {

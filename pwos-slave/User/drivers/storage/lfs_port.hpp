@@ -14,7 +14,15 @@
 
 #include "lfs.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 int lfs_port_init(void);
 lfs_t *lfs_port_fs(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

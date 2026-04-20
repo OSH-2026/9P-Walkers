@@ -152,6 +152,10 @@ int lfs_port_init(void)
         return -1;
     }
 
+    if (info.sector_size != SD_SECTOR_SIZE) {
+        return -1;
+    }
+
     memset(&g_cfg, 0, sizeof(g_cfg));
     g_cfg.read = lfs_sd_read;
     g_cfg.prog = lfs_sd_prog;

@@ -14,6 +14,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     uint32_t sector_size;
     uint32_t sector_count;
@@ -24,5 +28,9 @@ int sd_blockdev_get_info(PW_SD_BlockDevInfoTypeDef* info);
 int sd_blockdev_read(uint32_t sector, void *buffer, uint32_t sector_count);
 int sd_blockdev_write(uint32_t sector, const void *buffer, uint32_t sector_count);
 int sd_blockdev_sync(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
