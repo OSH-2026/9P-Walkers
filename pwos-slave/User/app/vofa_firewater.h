@@ -1,0 +1,20 @@
+#ifndef VOFA_FIREWATER_H
+#define VOFA_FIREWATER_H
+
+#include <stdint.h>
+
+#include "fs_selftest.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+int vofa_firewater_send_text(const char *text);
+int vofa_firewater_send_fs_report(const FS_SelfTestReport *report,
+                                  uint32_t uptime_ms);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
