@@ -44,15 +44,14 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-    ${CMAKE_SOURCE_DIR}/User/drivers/sd_blockdev.cpp
-    ${CMAKE_SOURCE_DIR}/User/fs/port/lfs_port.cpp
+    ${CMAKE_SOURCE_DIR}/User/drivers/storage/sd_blockdev.cpp
+    ${CMAKE_SOURCE_DIR}/User/drivers/storage/lfs_port.cpp
 )
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
-    ${CMAKE_SOURCE_DIR}/User/fs/core
-    ${CMAKE_SOURCE_DIR}/User/fs/port
-    ${CMAKE_SOURCE_DIR}/User/drivers
+    ${CMAKE_SOURCE_DIR}/User/fs
+    ${CMAKE_SOURCE_DIR}/User/drivers/storage
 )
 
 # Add project symbols (macros)

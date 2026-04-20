@@ -22,7 +22,7 @@ extern SD_HandleTypeDef hsd;
  * @param timeout_ms 
  * @return int 
  */
-static int sd_wait_ready(int32_t timeout_ms) {
+static int sd_wait_ready(uint32_t timeout_ms) {
     uint32_t start = HAL_GetTick();
 
     while (HAL_SD_GetCardState(&hsd) != HAL_SD_CARD_TRANSFER) {
