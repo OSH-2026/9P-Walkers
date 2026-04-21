@@ -4,6 +4,9 @@
 
 ![team logo](docs/figs/logo.png)
 
+## Poster
+![poster](docs/figs/poster.png)
+
 ## 项目成员
 
 - 董宇皓
