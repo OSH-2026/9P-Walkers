@@ -1,12 +1,28 @@
+/**
+ * @file vofa_firewater.c
+ * @author hb (huobin92@gmail.com)
+ * @brief 上位机 vofa 串口调试工具的 firewater 通信协议实现
+ * @version 0.1
+ * @date 2026-04-21
+ * 
+ * @copyright Copyright (c) 2026
+ * 
+ */
+
 #include "vofa_firewater.h"
-
 #include "usart.h"
-
 #include <stdio.h>
 #include <string.h>
 
 #define VOFA_UART_TIMEOUT_MS 100U
 
+/**
+ * @brief 发送字符串缓冲区到 UART
+ * 
+ * @param buffer 
+ * @param length 
+ * @return int 
+ */
 static int vofa_uart_send_buffer(const char *buffer, uint16_t length) {
     if ((buffer == NULL) || (length == 0U)) {
         return -1;
@@ -18,6 +34,12 @@ static int vofa_uart_send_buffer(const char *buffer, uint16_t length) {
                : -1;
 }
 
+/**
+ * @brief 发送文本到 VOFA
+ * 
+ * @param text 要发送的文本
+ * @return int 0 表示成功，非 0 表示失败
+ */
 int vofa_firewater_send_text(const char *text) {
     char frame[192];
     int length;
@@ -54,7 +76,7 @@ int vofa_firewater_send_fs_report(const FS_SelfTestReport *report,
 
     length = snprintf(
         frame, sizeof(frame),
-        "fs:%d,%lu,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%lu,%lu,%lu,%lu,%lu,%lu,%lu\n",
+        "fs:%d,%lu,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%lu,%lu,%lu,%lu\n",
         pass,
         (unsigned long)report->run_count,
         (long)report->init_status,
@@ -67,9 +89,6 @@ int vofa_firewater_send_fs_report(const FS_SelfTestReport *report,
         (unsigned long)report->file_size,
         (unsigned long)report->bytes_written,
         (unsigned long)report->bytes_read,
-        (unsigned long)report->dir_entries,
-        (unsigned long)report->sector_size,
-        (unsigned long)report->sector_count,
         (unsigned long)uptime_ms);
     if ((length <= 0) || ((size_t)length >= sizeof(frame))) {
         return -1;

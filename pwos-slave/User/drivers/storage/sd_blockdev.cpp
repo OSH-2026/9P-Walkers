@@ -46,6 +46,7 @@ int sd_blockdev_init(void) {
         return -1;
     }
 
+    (void)card_info;
     return sd_wait_ready(SD_BLOCKDEV_TIMEOUT_MS);
 }
 
@@ -81,12 +82,16 @@ int sd_blockdev_get_info(PW_SD_BlockDevInfoTypeDef* info) {
  * @return int 0 表示成功，-1 表示失败
  */
 int sd_blockdev_read(uint32_t sector, void *buffer, uint32_t sector_count) {
+    if (sd_wait_ready(SD_BLOCKDEV_TIMEOUT_MS) != 0) {
+        return -1;
+    }
+
     if (HAL_SD_ReadBlocks(&hsd, (uint8_t *)buffer, sector, sector_count,
                           SD_BLOCKDEV_TIMEOUT_MS) != HAL_OK) {
         return -1;
     }
 
-    return sd_wait_ready(SD_BLOCKDEV_TIMEOUT_MS);
+    return 0;
 }
 
 /**
@@ -98,12 +103,16 @@ int sd_blockdev_read(uint32_t sector, void *buffer, uint32_t sector_count) {
  * @return int 0 表示成功，-1 表示失败
  */
 int sd_blockdev_write(uint32_t sector, const void *buffer, uint32_t sector_count) {
+    if (sd_wait_ready(SD_BLOCKDEV_TIMEOUT_MS) != 0) {
+        return -1;
+    }
+
     if (HAL_SD_WriteBlocks(&hsd, (uint8_t *)buffer, sector, sector_count,
                            SD_BLOCKDEV_TIMEOUT_MS) != HAL_OK) {
         return -1;
     }
 
-    return sd_wait_ready(SD_BLOCKDEV_TIMEOUT_MS);
+    return 0;
 }
 
 int sd_blockdev_sync(void) {

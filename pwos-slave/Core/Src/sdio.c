@@ -49,7 +49,8 @@ void MX_SDIO_SD_Init(void)
   {
     Error_Handler();
   }
-  hsd.Init.ClockDiv = SDIO_TRANSFER_CLK_DIV;
+  /* Keep the transfer clock conservative for this board/card pair. */
+  hsd.Init.ClockDiv = 4U;
   if (HAL_SD_ConfigWideBusOperation(&hsd, SDIO_BUS_WIDE_4B) != HAL_OK)
   {
     Error_Handler();

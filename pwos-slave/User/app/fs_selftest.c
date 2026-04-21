@@ -1,7 +1,17 @@
+/**
+ * @file fs_selftest.c
+ * @author hb (huobin92@gmail.com)
+ * @brief GPT-Generated test bench for lfs
+ * @version 0.1
+ * @date 2026-04-21
+ * 
+ * @copyright Copyright (c) 2026
+ * 
+ */
+
 #include "fs_selftest.h"
 
 #include "lfs_port.hpp"
-#include "sd_blockdev.hpp"
 #include "lfs.h"
 
 #include <stdbool.h>
@@ -94,7 +104,7 @@ static int fs_selftest_read_file(lfs_t *lfs, FS_SelfTestReport *report,
     return lfs_file_close(lfs, &file);
 }
 
-static int fs_selftest_scan_dir(lfs_t *lfs, FS_SelfTestReport *report) {
+static int fs_selftest_scan_dir(lfs_t *lfs) {
     lfs_dir_t dir;
     struct lfs_info info;
     int err;
@@ -105,7 +115,6 @@ static int fs_selftest_scan_dir(lfs_t *lfs, FS_SelfTestReport *report) {
         return err;
     }
 
-    report->dir_entries = 0;
     while (1) {
         err = lfs_dir_read(lfs, &dir, &info);
         if (err < 0) {
@@ -117,7 +126,6 @@ static int fs_selftest_scan_dir(lfs_t *lfs, FS_SelfTestReport *report) {
             break;
         }
 
-        report->dir_entries++;
         if (strcmp(info.name, "fs_selftest.txt") == 0) {
             found_file = true;
         }
@@ -133,7 +141,6 @@ static int fs_selftest_scan_dir(lfs_t *lfs, FS_SelfTestReport *report) {
 
 int fs_selftest_run(FS_SelfTestReport *report) {
     lfs_t *lfs;
-    PW_SD_BlockDevInfoTypeDef blockdev_info;
     char readback_buffer[sizeof(g_fs_selftest_payload)];
 
     if (report == NULL) {
@@ -148,11 +155,6 @@ int fs_selftest_run(FS_SelfTestReport *report) {
         return report->init_status;
     }
 
-    if (sd_blockdev_get_info(&blockdev_info) == 0) {
-        report->sector_size = blockdev_info.sector_size;
-        report->sector_count = blockdev_info.sector_count;
-    }
-
     lfs = lfs_port_fs();
 
     report->mkdir_status = lfs_mkdir(lfs, FS_SELFTEST_DIR);
@@ -164,7 +166,7 @@ int fs_selftest_run(FS_SelfTestReport *report) {
     report->stat_status = fs_selftest_stat_file(lfs, report);
     report->read_status = fs_selftest_read_file(lfs, report, readback_buffer,
                                                 sizeof(readback_buffer));
-    report->dir_status = fs_selftest_scan_dir(lfs, report);
+    report->dir_status = fs_selftest_scan_dir(lfs);
 
     if (report->read_status == 0 &&
         memcmp(readback_buffer, g_fs_selftest_payload,

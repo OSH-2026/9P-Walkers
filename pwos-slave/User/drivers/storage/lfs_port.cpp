@@ -145,15 +145,19 @@ int lfs_port_init(void)
     int err_code;
 
     if (sd_blockdev_init() != 0) {
-        return -1;
+        return -10;
     }
 
     if (sd_blockdev_get_info(&info) != 0) {
-        return -1;
+        return -11;
     }
 
     if (info.sector_size != SD_SECTOR_SIZE) {
-        return -1;
+        return -12;
+    }
+
+    if (info.sector_count < (LFS_BLOCK_SIZE / SD_SECTOR_SIZE)) {
+        return -13;
     }
 
     memset(&g_cfg, 0, sizeof(g_cfg));
@@ -176,12 +180,14 @@ int lfs_port_init(void)
 
     err_code = lfs_mount(&g_lfs, &g_cfg);
     if (err_code != 0) {
-        if (lfs_format(&g_lfs, &g_cfg) != 0) {
-            return -1;
+        err_code = lfs_format(&g_lfs, &g_cfg);
+        if (err_code != 0) {
+            return err_code;
         }
 
-        if (lfs_mount(&g_lfs, &g_cfg) != 0) {
-            return -1;
+        err_code = lfs_mount(&g_lfs, &g_cfg);
+        if (err_code != 0) {
+            return err_code;
         }
     }
 

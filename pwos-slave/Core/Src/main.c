@@ -80,14 +80,13 @@ static void FS_ReportBootStatus(void)
          (g_fs_report.dir_status == 0) &&
          (g_fs_report.compare_status == 0);
 
-  (void)vofa_firewater_send_text("9P-Walkers FS self-test boot");
   if (snprintf(message, sizeof(message),
-               "boot status=%s file_size=%lu read=%lu write=%lu sectors=%lu",
+               "boot status=%s init=%ld file_size=%lu read=%lu write=%lu",
                pass ? "PASS" : "FAIL",
+               (long)g_fs_report.init_status,
                (unsigned long)g_fs_report.file_size,
                (unsigned long)g_fs_report.bytes_read,
-               (unsigned long)g_fs_report.bytes_written,
-               (unsigned long)g_fs_report.sector_count) > 0) {
+               (unsigned long)g_fs_report.bytes_written) > 0) {
     (void)vofa_firewater_send_text(message);
   }
 }
@@ -136,9 +135,7 @@ int main(void)
   {
     (void)vofa_firewater_send_text("boot: sd cardinfo fail");
   }
-  (void)vofa_firewater_send_text("boot: fs test start");
   (void)fs_selftest_run(&g_fs_report);
-  (void)vofa_firewater_send_text("boot: fs test done");
   FS_ReportBootStatus();
   /* USER CODE END 2 */
 

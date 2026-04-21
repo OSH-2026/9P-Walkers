@@ -1,3 +1,14 @@
+/**
+ * @file fs_selftest.h
+ * @author hb (huobin92@gmail.com)
+ * @brief GPT-Generated test bench for lfs
+ * @version 0.1
+ * @date 2026-04-21
+ * 
+ * @copyright Copyright (c) 2026
+ * 
+ */
+
 #ifndef FS_SELFTEST_H
 #define FS_SELFTEST_H
 
@@ -19,9 +30,6 @@ typedef struct {
     uint32_t file_size;
     uint32_t bytes_written;
     uint32_t bytes_read;
-    uint32_t dir_entries;
-    uint32_t sector_size;
-    uint32_t sector_count;
 } FS_SelfTestReport;
 
 int fs_selftest_run(FS_SelfTestReport *report);
