@@ -123,7 +123,6 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART2_UART_Init();
-  UART_ReportEarlyBoot();
   MX_SDIO_SD_Init();
   /* USER CODE BEGIN 2 */
   (void)vofa_firewater_send_text("boot: sdio ok");
