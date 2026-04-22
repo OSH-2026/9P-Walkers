@@ -1,0 +1,32 @@
+// 工作区配置，用于配置 ESP-IDF 工具链，在不同机器上注意修改路径
+{
+    "idf.currentSetup": "/home/hb/.espressif/v6.0/esp-idf",
+    "idf.openOcdConfigs": [
+        "board/esp32p4-builtin.cfg"
+    ],
+    "idf.customExtraVars": {
+        "IDF_TARGET": "esp32p4"
+    },
+    "idf.flashType": "UART",
+    "idf.port": "/dev/ttyACM0",
+    "cmake.generator": "Ninja",
+"cmake.configureEnvironment": {
+"IDF_PATH": "/home/hb/.espressif/v6.0/esp-idf",
+"IDF_TARGET": "esp32p4",
+"IDF_PYTHON_ENV_PATH": "/home/hb/.espressif/tools/python/v6.0/venv",
+"PYTHON": "/home/hb/.espressif/tools/python/v6.0/venv/bin/python",
+"PATH": "/home/hb/.espressif/tools/python/v6.0/venv/bin:/home/hb/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/bin:${env:PATH}"
+},
+"cmake.environment": {
+"IDF_PATH": "/home/hb/.espressif/v6.0/esp-idf",
+"IDF_TARGET": "esp32p4",
+"IDF_PYTHON_ENV_PATH": "/home/hb/.espressif/tools/python/v6.0/venv",
+"PYTHON": "/home/hb/.espressif/tools/python/v6.0/venv/bin/python",
+"PATH": "/home/hb/.espressif/tools/python/v6.0/venv/bin:/home/hb/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/bin:${env:PATH}"
+},
+"cmake.configureSettings": {
+  "CMAKE_C_COMPILER": "/home/hb/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/bin/riscv32-esp-elf-gcc",
+  "CMAKE_CXX_COMPILER": "/home/hb/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/bin/riscv32-esp-elf-g++",
+  "CMAKE_ASM_COMPILER": "/home/hb/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/bin/riscv32-esp-elf-gcc"
+}
+}
