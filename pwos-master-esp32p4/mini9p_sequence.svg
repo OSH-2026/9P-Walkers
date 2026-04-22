@@ -1,0 +1,188 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 920" width="900" height="920" font-family="system-ui, -apple-system, sans-serif" font-size="13">
+  <defs>
+    <style>
+      .title { font-size: 20px; font-weight: 700; fill: #1e293b; }
+      .entity-box { fill: #f8fafc; stroke: #334155; stroke-width: 2; rx: 6; }
+      .entity-text { font-size: 15px; font-weight: 600; fill: #0f172a; text-anchor: middle; }
+      .lifeline { stroke: #94a3b8; stroke-width: 1.5; stroke-dasharray: 6 4; }
+      .req-arrow { stroke: #2563eb; stroke-width: 2; fill: none; marker-end: url(#arrow-blue); }
+      .rsp-arrow { stroke: #16a34a; stroke-width: 2; fill: none; marker-end: url(#arrow-green); }
+      .req-label { fill: #1d4ed8; font-size: 13px; font-weight: 600; }
+      .rsp-label { fill: #15803d; font-size: 13px; font-weight: 600; }
+      .param { fill: #475569; font-size: 11px; }
+      .note-box { fill: #fef9c3; stroke: #ca8a04; stroke-width: 1; rx: 4; }
+      .note-text { fill: #713f12; font-size: 12px; }
+      .state-box { fill: #e0f2fe; stroke: #0284c7; stroke-width: 1; rx: 4; }
+      .state-text { fill: #0c4a6e; font-size: 11px; font-weight: 500; }
+      .legend-box { fill: #f1f5f9; stroke: #cbd5e1; stroke-width: 1; rx: 6; }
+      .legend-title { fill: #334155; font-size: 14px; font-weight: 700; }
+      .legend-text { fill: #475569; font-size: 12px; }
+    </style>
+    <marker id="arrow-blue" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 L2,4 z" fill="#2563eb"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 L2,4 z" fill="#16a34a"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="900" height="920" fill="#ffffff" rx="8"/>
+
+  <!-- Title -->
+  <text x="450" y="32" text-anchor="middle" class="title">Mini9P Client-Server Interaction Flow</text>
+
+  <!-- Entities -->
+  <rect x="60" y="52" width="120" height="38" class="entity-box"/>
+  <text x="120" y="77" class="entity-text">Client</text>
+
+  <rect x="720" y="52" width="120" height="38" class="entity-box"/>
+  <text x="780" y="77" class="entity-text">Server</text>
+
+  <!-- Lifelines -->
+  <line x1="120" y1="90" x2="120" y2="810" class="lifeline"/>
+  <line x1="780" y1="90" x2="780" y2="810" class="lifeline"/>
+
+  <!-- ========== Phase 1: Attach ========== -->
+  <text x="450" y="108" text-anchor="middle" font-size="12" font-weight="700" fill="#64748b">PHASE 1: Attach (建立会话)</text>
+
+  <!-- Tattach -->
+  <line x1="120" y1="122" x2="780" y2="122" class="req-arrow"/>
+  <text x="450" y="118" text-anchor="middle" class="req-label">Tattach (0x01)</text>
+  <text x="450" y="131" text-anchor="middle" class="param">fid=0, msize=512, inflight=4</text>
+
+  <!-- Activation bars -->
+  <rect x="776" y="122" width="8" height="30" fill="#dbeafe" rx="2"/>
+  <rect x="116" y="152" width="8" height="30" fill="#dcfce7" rx="2"/>
+
+  <!-- Rattach -->
+  <line x1="780" y1="152" x2="120" y2="152" class="rsp-arrow"/>
+  <text x="450" y="148" text-anchor="middle" class="rsp-label">Rattach (0x81)</text>
+  <text x="450" y="161" text-anchor="middle" class="param">root_qid={DIR, obj=1}, feature_bits=0x1</text>
+
+  <!-- State note: fid=0 mapped -->
+  <rect x="140" y="172" width="180" height="26" class="state-box"/>
+  <text x="230" y="189" text-anchor="middle" class="state-text">客户端: fid=0 ↔ 根目录 "/"</text>
+
+  <!-- ========== Phase 2: Walk ========== -->
+  <text x="450" y="222" text-anchor="middle" font-size="12" font-weight="700" fill="#64748b">PHASE 2: Walk (路径遍历)</text>
+
+  <!-- Twalk -->
+  <line x1="120" y1="236" x2="780" y2="236" class="req-arrow"/>
+  <text x="450" y="232" text-anchor="middle" class="req-label">Twalk (0x02)</text>
+  <text x="450" y="245" text-anchor="middle" class="param">fid=0 → newfid=1, path="dev/temp"</text>
+
+  <rect x="776" y="236" width="8" height="30" fill="#dbeafe" rx="2"/>
+  <rect x="116" y="266" width="8" height="30" fill="#dcfce7" rx="2"/>
+
+  <!-- Rwalk -->
+  <line x1="780" y1="266" x2="120" y2="266" class="rsp-arrow"/>
+  <text x="450" y="262" text-anchor="middle" class="rsp-label">Rwalk (0x82)</text>
+  <text x="450" y="275" text-anchor="middle" class="param">qid={obj=42}</text>
+
+  <!-- State note: fid=1 mapped -->
+  <rect x="140" y="286" width="210" height="26" class="state-box"/>
+  <text x="245" y="303" text-anchor="middle" class="state-text">客户端: fid=1 ↔ /dev/temp (obj=42)</text>
+
+  <!-- ========== Phase 3: Open ========== -->
+  <text x="450" y="336" text-anchor="middle" font-size="12" font-weight="700" fill="#64748b">PHASE 3: Open (打开文件)</text>
+
+  <!-- Topen -->
+  <line x1="120" y1="350" x2="780" y2="350" class="req-arrow"/>
+  <text x="450" y="346" text-anchor="middle" class="req-label">Topen (0x03)</text>
+  <text x="450" y="359" text-anchor="middle" class="param">fid=1, mode=OREAD (0x00)</text>
+
+  <rect x="776" y="350" width="8" height="30" fill="#dbeafe" rx="2"/>
+  <rect x="116" y="380" width="8" height="30" fill="#dcfce7" rx="2"/>
+
+  <!-- Ropen -->
+  <line x1="780" y1="380" x2="120" y2="380" class="rsp-arrow"/>
+  <text x="450" y="376" text-anchor="middle" class="rsp-label">Ropen (0x83)</text>
+  <text x="450" y="389" text-anchor="middle" class="param">qid={obj=42}, iounit=256</text>
+
+  <!-- State note: opened -->
+  <rect x="140" y="400" width="200" height="26" class="state-box"/>
+  <text x="240" y="417" text-anchor="middle" class="state-text">fid=1 已打开，可读写</text>
+
+  <!-- ========== Phase 4: Read/Write ========== -->
+  <text x="450" y="450" text-anchor="middle" font-size="12" font-weight="700" fill="#64748b">PHASE 4: Read / Write (数据交换)</text>
+
+  <!-- Tread -->
+  <line x1="120" y1="464" x2="780" y2="464" class="req-arrow"/>
+  <text x="450" y="460" text-anchor="middle" class="req-label">Tread (0x04)</text>
+  <text x="450" y="473" text-anchor="middle" class="param">fid=1, offset=0, count=128</text>
+
+  <rect x="776" y="464" width="8" height="30" fill="#dbeafe" rx="2"/>
+  <rect x="116" y="494" width="8" height="30" fill="#dcfce7" rx="2"/>
+
+  <!-- Rread -->
+  <line x1="780" y1="494" x2="120" y2="494" class="rsp-arrow"/>
+  <text x="450" y="490" text-anchor="middle" class="rsp-label">Rread (0x84)</text>
+  <text x="450" y="503" text-anchor="middle" class="param">count=5, data="25.3°C"</text>
+
+  <!-- Optional error branch (dotted) -->
+  <line x1="120" y1="530" x2="780" y2="530" stroke="#dc2626" stroke-width="1.5" stroke-dasharray="6 3" fill="none" marker-end="url(#arrow-red-err)"/>
+  <text x="450" y="526" text-anchor="middle" fill="#dc2626" font-size="12" font-weight="600">Rerror (0xFF) — optional</text>
+  <text x="450" y="539" text-anchor="middle" fill="#7f1d1d" font-size="11">code=ENOENT, msg="not found"</text>
+
+  <defs>
+    <marker id="arrow-red-err" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 L2,4 z" fill="#dc2626"/>
+    </marker>
+  </defs>
+
+  <!-- ========== Phase 5: Clunk ========== -->
+  <text x="450" y="570" text-anchor="middle" font-size="12" font-weight="700" fill="#64748b">PHASE 5: Clunk (释放句柄)</text>
+
+  <!-- Tclunk -->
+  <line x1="120" y1="584" x2="780" y2="584" class="req-arrow"/>
+  <text x="450" y="580" text-anchor="middle" class="req-label">Tclunk (0x07)</text>
+  <text x="450" y="593" text-anchor="middle" class="param">fid=1</text>
+
+  <rect x="776" y="584" width="8" height="30" fill="#dbeafe" rx="2"/>
+  <rect x="116" y="614" width="8" height="30" fill="#dcfce7" rx="2"/>
+
+  <!-- Rclunk -->
+  <line x1="780" y1="614" x2="120" y2="614" class="rsp-arrow"/>
+  <text x="450" y="610" text-anchor="middle" class="rsp-label">Rclunk (0x87)</text>
+  <text x="450" y="623" text-anchor="middle" class="param">(empty payload)</text>
+
+  <!-- State note: released -->
+  <rect x="140" y="634" width="200" height="26" class="state-box"/>
+  <text x="240" y="651" text-anchor="middle" class="state-text">fid=1 已释放，可重新分配</text>
+
+  <!-- ========== Concept Notes ========== -->
+  <g transform="translate(60, 680)">
+    <rect x="0" y="0" width="780" height="110" class="legend-box"/>
+    <text x="20" y="24" class="legend-title">Key Concepts</text>
+
+    <text x="20" y="48" class="legend-text">
+      <tspan font-weight="600" fill="#2563eb">fid (file identifier):</tspan> 客户端在会话内自己选数字句柄。Attach 后 fid=0 代表根目录，
+    </text>
+    <text x="20" y="64" class="legend-text">
+      Walk 后 newfid=1 代表目标文件。后续所有操作只传 fid，不再传完整路径。
+    </text>
+
+    <text x="20" y="86" class="legend-text">
+      <tspan font-weight="600" fill="#16a34a">qid (unique ID):</tspan> 服务器返回的全局唯一对象标识（类似 inode）。Attach 返回 root_qid，
+    </text>
+    <text x="20" y="102" class="legend-text">
+      Walk/Open 返回目标文件的 qid。客户端可用它做缓存判断（version 变化 = 文件已改）。
+    </text>
+  </g>
+
+  <!-- Legend at bottom -->
+  <g transform="translate(60, 810)">
+    <rect x="0" y="0" width="780" height="70" class="legend-box"/>
+    <text x="20" y="24" class="legend-title">Arrow Legend</text>
+
+    <line x1="20" y1="42" x2="80" y2="42" class="req-arrow"/>
+    <text x="90" y="46" class="legend-text">T-message (client request)</text>
+
+    <line x1="280" y1="42" x2="340" y2="42" class="rsp-arrow"/>
+    <text x="350" y="46" class="legend-text">R-message (server response)</text>
+
+    <line x1="540" y1="42" x2="600" y2="42" stroke="#dc2626" stroke-width="1.5" stroke-dasharray="6 3" fill="none"/>
+    <text x="610" y="46" class="legend-text">Error response (optional)</text>
+  </g>
+</svg>

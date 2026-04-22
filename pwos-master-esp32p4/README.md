@@ -1,53 +1,557 @@
-| Supported Targets | ESP32 | ESP32-C2 | ESP32-C3 | ESP32-C5 | ESP32-C6 | ESP32-C61 | ESP32-H2 | ESP32-H21 | ESP32-H4 | ESP32-P4 | ESP32-S2 | ESP32-S3 | Linux |
-| ----------------- | ----- | -------- | -------- | -------- | -------- | --------- | -------- | --------- | -------- | -------- | -------- | -------- | ----- |
+# mini9P 协议帧格式
 
-# Hello World Example
+![mini9p帧格式](mini9p_frame_structures.svg)
 
-Starts a FreeRTOS task to print "Hello World".
+## 通用帧头（所有帧共享）
 
-(See the README.md file in the upper level 'examples' directory for more information about examples.)
+任何帧的前 8 字节（偏移 0–7）都是固定头部，后面接 **Payload**，最后 2 字节是 **CRC**：
 
-## How to use example
+| 偏移 | 长度 | 字段 | 说明 |
+|:----:|:----:|------|------|
+| 0 | 1 | `Magic[0]` | 固定 `0x39`，即 ASCII `'9'` |
+| 1 | 1 | `Magic[1]` | 固定 `0x50`，即 ASCII `'P'` |
+| 2–3 | 2 | `frame_len_field` | 小端 uint16，值 = `4 + payload_len` |
+| 4 | 1 | `version` | 协议版本，固定 `0x01` |
+| 5 | 1 | `type` | 消息类型（如 `0x04` = Tread） |
+| 6–7 | 2 | `tag` | 小端 uint16，事务标签 |
+| 8 … 8+N–1 | N | `payload` | 业务数据（每种消息不同） |
+| 8+N … 8+N+1 | 2 | `CRC-16` | 小端 uint16，覆盖范围：**version 到 payload 末尾** |
 
-Follow detailed instructions provided specifically for this example.
+> 总长度恒为 `10 + payload_len` 字节。
 
-Select the instructions depending on Espressif chip installed on your development board:
+---
 
-- [ESP32 Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/stable/get-started/index.html)
-- [ESP32-S2 Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/latest/esp32s2/get-started/index.html)
+## 1. Tattach (0x01) — 客户端发起连接
 
+**作用**：客户端请求建立会话，协商传输参数。
 
-## Example folder contents
+**Payload 结构**（6 字节）：
 
-The project **hello_world** contains one source file in C language [hello_world_main.c](main/hello_world_main.c). The file is located in folder [main](main).
+| 字段 | 长度 | 说明 |
+|------|------|------|
+| `fid` | 2 | 客户端指定的根 fid（通常选 0） |
+| `requested_msize` | 2 | 建议的最大消息大小 |
+| `requested_inflight` | 1 | 建议的最大在途请求数 |
+| `attach_flags` | 1 | 附加标志位 |
 
-ESP-IDF projects are built using CMake. The project build configuration is contained in `CMakeLists.txt` files that provide set of directives and instructions describing the project's source files and targets (executable, library, or both).
-
-Below is short explanation of remaining files in the project folder.
+**实例**（总长 16 字节）：
 
 ```
-├── CMakeLists.txt
-├── pytest_hello_world.py      Python script used for automated testing
-├── main
-│   ├── CMakeLists.txt
-│   └── hello_world_main.c
-└── README.md                  This is the file you are currently reading
+39 50 0A 00 01 01 01 00 00 00 00 02 04 00 28 80
 ```
 
-For more information on structure and contents of ESP-IDF projects, please refer to Section [Build System](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-guides/build-system.html) of the ESP-IDF Programming Guide.
+逐段拆解：
 
-## Troubleshooting
+| 字节 | 值 | 含义 |
+|------|-----|------|
+| `39 50` | — | Magic `'9P'` |
+| `0A 00` | 10 | `frame_len_field = 4 + 6`，即 payload 6 字节 |
+| `01` | 1 | version |
+| `01` | 1 | type = Tattach |
+| `01 00` | 0x0001 | tag = 1 |
+| `00 00` | 0 | fid = 0 |
+| `00 02` | 512 | requested_msize = 512 |
+| `04` | 4 | requested_inflight = 4 |
+| `00` | 0 | attach_flags = 0 |
+| `28 80` | 0x8028 | CRC-16（覆盖 `01 01 01 00 ... 04 00`） |
 
-* Program upload failure
+---
 
-    * Hardware connection is not correct: run `idf.py -p PORT monitor`, and reboot your board to see if there are any output logs.
-    * The baud rate for downloading is too high: lower your baud rate in the `menuconfig` menu, and try again.
+## 2. Rattach (0x81) — 服务器确认连接
 
-## Technical support and feedback
+**作用**：服务器接受连接，返回协商结果和根目录 QID。
 
-Please use the following feedback channels:
+**Payload 结构**（16 字节）：
 
-* For technical queries, go to the [esp32.com](https://esp32.com/) forum
-* For a feature request or bug report, create a [GitHub issue](https://github.com/espressif/esp-idf/issues)
+| 字段 | 长度 | 说明 |
+|------|------|------|
+| `negotiated_msize` | 2 | 协商后的最大消息大小 |
+| `max_fids` | 1 | 服务器允许的最大 fid 数 |
+| `max_inflight` | 1 | 服务器允许的最大在途请求数 |
+| `feature_bits` | 4 | 协商后的特性位掩码 |
+| `root_qid` | 8 | 根目录的唯一标识 |
 
-We will get back to you as soon as possible.
+**实例**（总长 26 字节）：
+
+```
+39 50 14 00 01 81 01 00 00 02 10 04 01 00 00 00
+80 00 00 00 00 00 00 00 9B 0F
+```
+
+逐段拆解：
+
+| 字节 | 值 | 含义 |
+|------|-----|------|
+| `39 50` | — | Magic |
+| `14 00` | 20 | `frame_len_field = 4 + 16` |
+| `01` | 1 | version |
+| `81` | 0x81 | type = Rattach |
+| `01 00` | 1 | tag = 1（与请求对应） |
+| `00 02` | 512 | negotiated_msize = 512 |
+| `10` | 16 | max_fids = 16 |
+| `04` | 4 | max_inflight = 4 |
+| `01 00 00 00` | 0x00000001 | feature_bits = `M9P_FEATURE_DIRECTORY_READ` |
+| `80 00 00 00 00 00 00 00` | — | root_qid: type=`0x80`(DIR), reserved=0, version=0, object_id=0 |
+| `9B 0F` | 0x0F9B | CRC |
+
+---
+
+## 3. Twalk (0x02) — 客户端路径遍历
+
+**作用**：客户端要求把 `fid` 沿 `path` 走到 `newfid`。空路径表示直接克隆 fid。
+
+**Payload 结构**（5 + N 字节）：
+
+| 字段 | 长度 | 说明 |
+|------|------|------|
+| `fid` | 2 | 起始 fid |
+| `newfid` | 2 | 目标 fid |
+| `path_len` | 1 | 路径长度 |
+| `path` | N | 路径字符串（**无 `\0`**） |
+
+**实例**：`fid=0`, `newfid=1`, `path="dev"`（总长 18 字节）
+
+```
+39 50 0C 00 01 02 02 00 00 00 01 00 03 64 65 76
+EC 8A
+```
+
+逐段拆解：
+
+| 字节 | 值 | 含义 |
+|------|-----|------|
+| `39 50` | — | Magic |
+| `0C 00` | 12 | `4 + 8`（payload 8 字节） |
+| `01` | 1 | version |
+| `02` | 2 | type = Twalk |
+| `02 00` | 2 | tag = 2 |
+| `00 00` | 0 | fid = 0 |
+| `01 00` | 1 | newfid = 1 |
+| `03` | 3 | path_len = 3 |
+| `64 65 76` | "dev" | 路径内容 |
+| `EC 8A` | 0x8AEC | CRC |
+
+---
+
+## 4. Rwalk (0x82) — 服务器返回目标 QID
+
+**作用**：服务器告知 walk 成功，返回最终路径元素的 QID。
+
+**Payload 结构**（8 字节）：
+
+| 字段 | 长度 | 说明 |
+|------|------|------|
+| `qid` | 8 | 目标对象的唯一标识 |
+
+**实例**（总长 18 字节）：
+
+```
+39 50 0C 00 01 82 02 00 04 00 01 00 78 56 34 12
+28 EA
+```
+
+逐段拆解：
+
+| 字节 | 值 | 含义 |
+|------|-----|------|
+| `39 50` | — | Magic |
+| `0C 00` | 12 | `4 + 8` |
+| `01` | 1 | version |
+| `82` | 0x82 | type = Rwalk |
+| `02 00` | 2 | tag = 2 |
+| `04 00 01 00 78 56 34 12` | — | qid: type=`0x04`(DEVICE), reserved=0, version=1, object_id=`0x12345678` |
+| `28 EA` | 0xEA28 | CRC |
+
+---
+
+## 5. Topen (0x03) — 客户端打开文件
+
+**作用**：客户端要求打开指定 fid，声明访问模式。
+
+**Payload 结构**（3 字节）：
+
+| 字段 | 长度 | 说明 |
+|------|------|------|
+| `fid` | 2 | 要打开的文件 fid |
+| `mode` | 1 | 打开模式（`0x00`=只读, `0x01`=只写, `0x02`=读写, `0x10`=截断） |
+
+**实例**：`fid=1`, `mode=0x00 (OREAD)`（总长 13 字节）
+
+```
+39 50 07 00 01 03 03 00 01 00 00 AD 5E
+```
+
+逐段拆解：
+
+| 字节 | 值 | 含义 |
+|------|-----|------|
+| `39 50` | — | Magic |
+| `07 00` | 7 | `4 + 3` |
+| `01` | 1 | version |
+| `03` | 3 | type = Topen |
+| `03 00` | 3 | tag = 3 |
+| `01 00` | 1 | fid = 1 |
+| `00` | 0 | mode = `M9P_OREAD` |
+| `AD 5E` | 0x5EAD | CRC |
+
+---
+
+## 6. Ropen (0x83) — 服务器确认打开
+
+**作用**：返回被打开对象的 QID 和建议 I/O 单元大小。
+
+**Payload 结构**（10 字节）：
+
+| 字段 | 长度 | 说明 |
+|------|------|------|
+| `qid` | 8 | 对象的唯一标识 |
+| `iounit` | 2 | 建议最佳 I/O 块大小（0 表示默认） |
+
+**实例**：`qid={0}`, `iounit=256`（总长 20 字节）
+
+```
+39 50 0E 00 01 83 03 00 00 00 00 00 00 00 00 00
+00 01 B0 BD
+```
+
+逐段拆解：
+
+| 字节 | 值 | 含义 |
+|------|-----|------|
+| `39 50` | — | Magic |
+| `0E 00` | 14 | `4 + 10` |
+| `01` | 1 | version |
+| `83` | 0x83 | type = Ropen |
+| `03 00` | 3 | tag = 3 |
+| `00 00 00 00 00 00 00 00` | — | qid（全零，表示未知/未初始化对象） |
+| `00 01` | 256 | iounit = 256 |
+| `B0 BD` | 0xBDB0 | CRC |
+
+---
+
+## 7. Tread (0x04) — 客户端读数据
+
+**作用**：从指定 fid 的 offset 处读取最多 count 字节。
+
+**Payload 结构**（8 字节）：
+
+| 字段 | 长度 | 说明 |
+|------|------|------|
+| `fid` | 2 | 要读取的文件 fid |
+| `offset` | 4 | 文件偏移（小端 uint32） |
+| `count` | 2 | 请求读取的最大字节数 |
+
+**实例**：`fid=1`, `offset=0`, `count=128`（总长 18 字节）
+
+```
+39 50 0C 00 01 04 04 00 01 00 00 00 00 00 80 00
+B5 27
+```
+
+逐段拆解：
+
+| 字节 | 值 | 含义 |
+|------|-----|------|
+| `39 50` | — | Magic |
+| `0C 00` | 12 | `4 + 8` |
+| `01` | 1 | version |
+| `04` | 4 | type = Tread |
+| `04 00` | 4 | tag = 4 |
+| `01 00` | 1 | fid = 1 |
+| `00 00 00 00` | 0 | offset = 0 |
+| `80 00` | 128 | count = 128 |
+| `B5 27` | 0x27B5 | CRC |
+
+---
+
+## 8. Rread (0x84) — 服务器返回数据
+
+**作用**：返回实际读到的数据块。
+
+**Payload 结构**（2 + N 字节）：
+
+| 字段 | 长度 | 说明 |
+|------|------|------|
+| `count` | 2 | 实际返回的数据字节数 |
+| `data` | N | 原始数据（可能是文件内容，也可能是目录二进制流） |
+
+**实例**：返回 4 字节 `"ABCD"`（总长 16 字节）
+
+```
+39 50 0A 00 01 84 04 00 04 00 41 42 43 44 D7 9F
+```
+
+逐段拆解：
+
+| 字节 | 值 | 含义 |
+|------|-----|------|
+| `39 50` | — | Magic |
+| `0A 00` | 10 | `4 + 6` |
+| `01` | 1 | version |
+| `84` | 0x84 | type = Rread |
+| `04 00` | 4 | tag = 4 |
+| `04 00` | 4 | count = 4 |
+| `41 42 43 44` | "ABCD" | 数据内容 |
+| `D7 9F` | 0x9FD7 | CRC |
+
+> ⚠️ 如果这次读的是目录，`data` 不是文本，而是 `m9p_dirent` 的紧凑二进制数组，需要用 `m9p_parse_dirents()` 二次解析。
+
+---
+
+## 9. Twrite (0x05) — 客户端写数据
+
+**作用**：向指定 fid 的 offset 处写入数据。
+
+**Payload 结构**（8 + N 字节）：
+
+| 字段 | 长度 | 说明 |
+|------|------|------|
+| `fid` | 2 | 目标文件 fid |
+| `offset` | 4 | 写入偏移 |
+| `count` | 2 | 要写入的字节数 |
+| `data` | N | 原始数据（`N == count`，协议限制 `count <= 256`） |
+
+**实例**：`fid=1`, `offset=0`, 写入 4 字节 `"XYZ\n"`（总长 22 字节）
+
+```
+39 50 10 00 01 05 05 00 01 00 00 00 00 00 04 00
+58 59 5A 0A E9 04
+```
+
+逐段拆解：
+
+| 字节 | 值 | 含义 |
+|------|-----|------|
+| `39 50` | — | Magic |
+| `10 00` | 16 | `4 + 12` |
+| `01` | 1 | version |
+| `05` | 5 | type = Twrite |
+| `05 00` | 5 | tag = 5 |
+| `01 00` | 1 | fid = 1 |
+| `00 00 00 00` | 0 | offset = 0 |
+| `04 00` | 4 | count = 4 |
+| `58 59 5A 0A` | "XYZ\n" | 数据 |
+| `E9 04` | 0x04E9 | CRC |
+
+---
+
+## 10. Rwrite (0x85) — 服务器确认写入
+
+**作用**：返回服务器实际写入的字节数（可能少于请求）。
+
+**Payload 结构**（2 字节）：
+
+| 字段 | 长度 | 说明 |
+|------|------|------|
+| `count` | 2 | 确认写入的字节数 |
+
+**实例**：确认写入 4 字节（总长 12 字节）
+
+```
+39 50 06 00 01 85 05 00 04 00 B6 3A
+```
+
+逐段拆解：
+
+| 字节 | 值 | 含义 |
+|------|-----|------|
+| `39 50` | — | Magic |
+| `06 00` | 6 | `4 + 2` |
+| `01` | 1 | version |
+| `85` | 0x85 | type = Rwrite |
+| `05 00` | 5 | tag = 5 |
+| `04 00` | 4 | count = 4 |
+| `B6 3A` | 0x3AB6 | CRC |
+
+---
+
+## 11. Tstat (0x06) — 客户端查属性
+
+**作用**：请求获取指定 fid 的完整状态信息。
+
+**Payload 结构**（2 字节）：
+
+| 字段 | 长度 | 说明 |
+|------|------|------|
+| `fid` | 2 | 要查询的 fid |
+
+**实例**：`fid=1`（总长 12 字节）
+
+```
+39 50 06 00 01 06 06 00 01 00 9D 92
+```
+
+逐段拆解：
+
+| 字节 | 值 | 含义 |
+|------|-----|------|
+| `39 50` | — | Magic |
+| `06 00` | 6 | `4 + 2` |
+| `01` | 1 | version |
+| `06` | 6 | type = Tstat |
+| `06 00` | 6 | tag = 6 |
+| `01 00` | 1 | fid = 1 |
+| `9D 92` | 0x929D | CRC |
+
+---
+
+## 12. Rstat (0x86) — 服务器返回属性
+
+**作用**：返回 `m9p_stat` 结构描述的完整文件属性。
+
+**Payload 结构**（19 + N 字节）：
+
+| 字段 | 长度 | 说明 |
+|------|------|------|
+| `qid` | 8 | 对象 QID |
+| `perm` | 1 | 权限字节 |
+| `flags` | 1 | 状态标志（`M9P_STAT_*`） |
+| `size` | 4 | 文件大小（小端 uint32） |
+| `mtime` | 4 | 修改时间（小端 uint32） |
+| `name_len` | 1 | 名字长度 |
+| `name` | N | 名字字符串（**无 `\0`**） |
+
+**实例**：根目录，name="root"（总长 33 字节）
+
+```
+39 50 1B 00 01 86 06 00 80 00 00 00 00 00 00 00
+01 01 00 00 00 00 00 00 00 00 04 72 6F 6F 74 70
+C1
+```
+
+逐段拆解：
+
+| 字节 | 值 | 含义 |
+|------|-----|------|
+| `39 50` | — | Magic |
+| `1B 00` | 27 | `4 + 23` |
+| `01` | 1 | version |
+| `86` | 0x86 | type = Rstat |
+| `06 00` | 6 | tag = 6 |
+| `80 00 00 00 00 00 00 00` | — | qid: type=`0x80`(DIR) |
+| `01` | 1 | perm |
+| `01` | 1 | flags = `M9P_STAT_DIR` |
+| `00 00 00 00` | 0 | size = 0 |
+| `00 00 00 00` | 0 | mtime = 0 |
+| `04` | 4 | name_len = 4 |
+| `72 6F 6F 74` | "root" | 名字 |
+| `70 C1` | 0xC170 | CRC |
+
+---
+
+## 13. Tclunk (0x07) — 客户端释放 fid
+
+**作用**：告诉服务器"我不再使用这个 fid 了"，类似 `close()`。
+
+**Payload 结构**（2 字节）：
+
+| 字段 | 长度 | 说明 |
+|------|------|------|
+| `fid` | 2 | 要释放的 fid |
+
+**实例**：`fid=1`（总长 12 字节）
+
+```
+39 50 06 00 01 07 07 00 01 00 78 4E
+```
+
+逐段拆解：
+
+| 字节 | 值 | 含义 |
+|------|-----|------|
+| `39 50` | — | Magic |
+| `06 00` | 6 | `4 + 2` |
+| `01` | 1 | version |
+| `07` | 7 | type = Tclunk |
+| `07 00` | 7 | tag = 7 |
+| `01 00` | 1 | fid = 1 |
+| `78 4E` | 0x4E78 | CRC |
+
+---
+
+## 14. Rclunk (0x87) — 服务器确认释放
+
+**作用**：服务器确认 fid 已释放。**Payload 为空**。
+
+**Payload 结构**：无（0 字节）
+
+**实例**（总长 10 字节，这是 Mini9P 的最小帧）：
+
+```
+39 50 04 00 01 87 07 00 29 D5
+```
+
+逐段拆解：
+
+| 字节 | 值 | 含义 |
+|------|-----|------|
+| `39 50` | — | Magic |
+| `04 00` | 4 | `4 + 0`（最小合法的 `frame_len_field`） |
+| `01` | 1 | version |
+| `87` | 0x87 | type = Rclunk |
+| `07 00` | 7 | tag = 7 |
+| `29 D5` | 0xD529 | CRC（覆盖 `01 87 07 00` 共 4 字节） |
+
+> 这是唯一一种 **payload_len = 0** 的帧，总长度刚好等于 `M9P_FRAME_OVERHEAD`（10 字节）。
+
+---
+
+## 15. Rerror (0xFF) — 服务器返回错误
+
+**作用**：任何请求的响应都可以用 `Rerror` 代替，表示操作失败。
+
+**Payload 结构**（3 + N 字节）：
+
+| 字段 | 长度 | 说明 |
+|------|------|------|
+| `code` | 2 | 错误码（`enum m9p_error_code`） |
+| `msg_len` | 1 | 错误描述文本长度 |
+| `msg` | N | 错误描述文本（**无 `\0`**） |
+
+**实例**：`code=0x0002 (ENOENT)`, `msg="not found"`（总长 22 字节）
+
+```
+39 50 10 00 01 FF FF 00 02 00 09 6E 6F 74 20 66
+6F 75 6E 64 14 6E
+```
+
+逐段拆解：
+
+| 字节 | 值 | 含义 |
+|------|-----|------|
+| `39 50` | — | Magic |
+| `10 00` | 16 | `4 + 12` |
+| `01` | 1 | version |
+| `FF` | 0xFF | type = Rerror |
+| `FF 00` | 0x00FF | tag = 255（与请求的 tag 对应） |
+| `02 00` | 0x0002 | code = `M9P_ERR_ENOENT`（无此文件） |
+| `09` | 9 | msg_len = 9 |
+| `6E 6F 74 20 66 6F 75 6E 64` | "not found" | 错误文本 |
+| `14 6E` | 0x6E14 | CRC |
+
+---
+
+## 速查表：所有帧的最小/固定长度
+
+| 消息 | Type | Payload 长度 | 总帧长 |
+|------|:----:|:------------:|:------:|
+| Tattach | 0x01 | 6 | 16 |
+| Rattach | 0x81 | 16 | 26 |
+| Twalk | 0x02 | 5 + N | 15 + N |
+| Rwalk | 0x82 | 8 | 18 |
+| Topen | 0x03 | 3 | 13 |
+| Ropen | 0x83 | 10 | 20 |
+| Tread | 0x04 | 8 | 18 |
+| Rread | 0x84 | 2 + N | 12 + N |
+| Twrite | 0x05 | 8 + N | 18 + N |
+| Rwrite | 0x85 | 2 | 12 |
+| Tstat | 0x06 | 2 | 12 |
+| Rstat | 0x86 | 19 + N | 29 + N |
+| Tclunk | 0x07 | 2 | 12 |
+| Rclunk | 0x87 | 0 | **10** |
+| Rerror | 0xFF | 3 + N | 13 + N |
+
+验证帧合法性的三步：
+1. 前两个字节是否为 `39 50`
+2. `frame_len_field + 6` 是否等于实际接收长度
+3. 计算 `version(1) + type(1) + tag(2) + payload(N)` 的 CRC-16/CCITT-FALSE，与最后 2 字节比对
