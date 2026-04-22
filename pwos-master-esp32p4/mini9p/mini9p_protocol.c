@@ -2,12 +2,24 @@
 
 #include <string.h>
 
+/**
+ * @brief 小端序编码两个字节
+ * 
+ * @param dst 
+ * @param value 
+ */
 static void put_le16(uint8_t *dst, uint16_t value)
 {
     dst[0] = (uint8_t)(value & 0xFFu);
     dst[1] = (uint8_t)((value >> 8) & 0xFFu);
 }
 
+/**
+ * @brief 小端序编码四个字节
+ * 
+ * @param dst 
+ * @param value 
+ */
 static void put_le32(uint8_t *dst, uint32_t value)
 {
     dst[0] = (uint8_t)(value & 0xFFu);
@@ -16,11 +28,23 @@ static void put_le32(uint8_t *dst, uint32_t value)
     dst[3] = (uint8_t)((value >> 24) & 0xFFu);
 }
 
+/**
+ * @brief 小端序解码两个字节
+ * 
+ * @param src 
+ * @return uint16_t 
+ */
 static uint16_t get_le16(const uint8_t *src)
 {
     return (uint16_t)src[0] | (uint16_t)((uint16_t)src[1] << 8);
 }
 
+/**
+ * @brief 小端序解码四个字节
+ * 
+ * @param src 
+ * @return uint32_t 
+ */
 static uint32_t get_le32(const uint8_t *src)
 {
     return (uint32_t)src[0] |
@@ -29,6 +53,12 @@ static uint32_t get_le32(const uint8_t *src)
         ((uint32_t)src[3] << 24);
 }
 
+/**
+ * @brief 编码 m9p_qid 结构体到字节数组
+ * 
+ * @param dst 
+ * @param qid 
+ */
 static void encode_qid(uint8_t *dst, const struct m9p_qid *qid)
 {
     dst[0] = qid->type;
@@ -37,6 +67,12 @@ static void encode_qid(uint8_t *dst, const struct m9p_qid *qid)
     put_le32(dst + 4, qid->object_id);
 }
 
+/**
+ * @brief 解码字节数组到 m9p_qid 结构体
+ * 
+ * @param src 
+ * @param qid 
+ */
 static void decode_qid(const uint8_t *src, struct m9p_qid *qid)
 {
     qid->type = src[0];
@@ -45,6 +81,19 @@ static void decode_qid(const uint8_t *src, struct m9p_qid *qid)
     qid->object_id = get_le32(src + 4);
 }
 
+/**
+ * @brief 将 payload 编码成完整的 9P 帧
+ * 
+ * @param type 
+ * @param tag 
+ * @param payload 
+ * @param payload_len 
+ * @param out_frame 
+ * @param out_cap 
+ * @param out_len 
+ * @return true 
+ * @return false 
+ */
 static bool payload_to_frame(
     uint8_t type,
     uint16_t tag,
@@ -57,6 +106,13 @@ static bool payload_to_frame(
     return m9p_encode_frame(type, tag, payload, payload_len, out_frame, out_cap, out_len);
 }
 
+/**
+ * @brief CRC 16-CCITT-FALSE 校验算法
+ * 
+ * @param data 
+ * @param len 
+ * @return uint16_t 
+ */
 uint16_t m9p_crc16_ccitt_false(const uint8_t *data, size_t len)
 {
     uint16_t crc = 0xFFFFu;
@@ -78,6 +134,19 @@ uint16_t m9p_crc16_ccitt_false(const uint8_t *data, size_t len)
     return crc;
 }
 
+/**
+ * @brief 解码完整 m9p 帧到 m9p_frame_view 结构体
+ * 
+ * @param type 类型
+ * @param tag 标签
+ * @param payload 有效负载
+ * @param payload_len 有效负载长度
+ * @param out_frame 输出帧缓冲区
+ * @param out_cap 输出缓冲区容量
+ * @param out_len 输出帧长度
+ * @return true 
+ * @return false 
+ */
 bool m9p_encode_frame(
     uint8_t type,
     uint16_t tag,
@@ -116,6 +185,15 @@ bool m9p_encode_frame(
     return true;
 }
 
+/**
+ * @brief 解码完整 m9p 帧到 m9p_frame_view 结构体
+ * 
+ * @param frame 输入帧缓冲区
+ * @param frame_len 输入帧长度
+ * @param out_view 输出帧视图结构体
+ * @return true 解码成功
+ * @return false 解码失败
+ */
 bool m9p_decode_frame(const uint8_t *frame, size_t frame_len, struct m9p_frame_view *out_view)
 {
     uint16_t frame_len_field;
@@ -151,6 +229,20 @@ bool m9p_decode_frame(const uint8_t *frame, size_t frame_len, struct m9p_frame_v
     return true;
 }
 
+/**
+ * @brief 构造 TATTACH 请求帧
+ * 
+ * @param tag 标签
+ * @param fid 文件标识符
+ * @param requested_msize 请求的最大消息大小
+ * @param requested_inflight 请求的最大未完成请求数
+ * @param attach_flags 附加标志
+ * @param out_frame 输出帧缓冲区
+ * @param out_cap 输出缓冲区容量
+ * @param out_len 输出帧长度
+ * @return true 构造成功
+ * @return false 构造失败
+ */
 bool m9p_build_tattach(
     uint16_t tag,
     uint16_t fid,
@@ -170,6 +262,19 @@ bool m9p_build_tattach(
     return payload_to_frame(M9P_TATTACH, tag, payload, sizeof(payload), out_frame, out_cap, out_len);
 }
 
+/**
+ * @brief 构造 TWALK 请求帧
+ * 
+ * @param tag 标签
+ * @param fid 文件标识符
+ * @param newfid 新文件标识符
+ * @param path 路径
+ * @param out_frame 输出帧缓冲区
+ * @param out_cap 输出缓冲区容量
+ * @param out_len 输出帧长度
+ * @return true 构造成功
+ * @return false 构造失败
+ */
 bool m9p_build_twalk(
     uint16_t tag,
     uint16_t fid,
@@ -205,6 +310,18 @@ bool m9p_build_twalk(
         out_len);
 }
 
+/**
+ * @brief 构造 TOPEN 请求帧
+ * 
+ * @param tag 标签
+ * @param fid 文件标识符
+ * @param mode 打开模式
+ * @param out_frame 输出帧缓冲区
+ * @param out_cap 输出缓冲区容量
+ * @param out_len 输出帧长度
+ * @return true 构造成功
+ * @return false 构造失败
+ */
 bool m9p_build_topen(
     uint16_t tag,
     uint16_t fid,
@@ -220,6 +337,19 @@ bool m9p_build_topen(
     return payload_to_frame(M9P_TOPEN, tag, payload, sizeof(payload), out_frame, out_cap, out_len);
 }
 
+/**
+ * @brief 构造 TREAD 请求帧
+ * 
+ * @param tag 标签
+ * @param fid 文件标识符
+ * @param offset 偏移量
+ * @param count 读取字节数
+ * @param out_frame 输出帧缓冲区
+ * @param out_cap 输出缓冲区容量
+ * @param out_len 输出帧长度
+ * @return true 构造成功
+ * @return false 构造失败
+ */
 bool m9p_build_tread(
     uint16_t tag,
     uint16_t fid,
@@ -237,6 +367,20 @@ bool m9p_build_tread(
     return payload_to_frame(M9P_TREAD, tag, payload, sizeof(payload), out_frame, out_cap, out_len);
 }
 
+/**
+ * @brief 构造 TWRITE 请求帧
+ * 
+ * @param tag 标签
+ * @param fid 文件标识符
+ * @param offset 偏移量
+ * @param data 数据
+ * @param count 数据长度
+ * @param out_frame 输出帧缓冲区
+ * @param out_cap 输出缓冲区容量
+ * @param out_len 输出帧长度
+ * @return true 构造成功
+ * @return false 构造失败
+ */
 bool m9p_build_twrite(
     uint16_t tag,
     uint16_t fid,
@@ -272,6 +416,17 @@ bool m9p_build_twrite(
         out_len);
 }
 
+/**
+ * @brief 构造 TSTAT 请求帧
+ * 
+ * @param tag 标签
+ * @param fid 文件标识符
+ * @param out_frame 输出帧缓冲区
+ * @param out_cap 输出缓冲区容量
+ * @param out_len 输出帧长度
+ * @return true 构造成功
+ * @return false 构造失败
+ */
 bool m9p_build_tstat(
     uint16_t tag,
     uint16_t fid,
@@ -285,6 +440,17 @@ bool m9p_build_tstat(
     return payload_to_frame(M9P_TSTAT, tag, payload, sizeof(payload), out_frame, out_cap, out_len);
 }
 
+/**
+ * @brief 构造 TCLUNK 请求帧
+ * 
+ * @param tag 标签
+ * @param fid 文件标识符
+ * @param out_frame 输出帧缓冲区
+ * @param out_cap 输出缓冲区容量
+ * @param out_len 输出帧长度
+ * @return true 构造成功
+ * @return false 构造失败
+ */
 bool m9p_build_tclunk(
     uint16_t tag,
     uint16_t fid,
@@ -298,6 +464,14 @@ bool m9p_build_tclunk(
     return payload_to_frame(M9P_TCLUNK, tag, payload, sizeof(payload), out_frame, out_cap, out_len);
 }
 
+/**
+ * @brief 解析 RATTACH 响应帧
+ * 
+ * @param frame 响应帧视图
+ * @param out_result 输出解析结果
+ * @return true 解析成功
+ * @return false 解析失败
+ */
 bool m9p_parse_rattach(const struct m9p_frame_view *frame, struct m9p_attach_result *out_result)
 {
     if (frame == NULL || out_result == NULL || frame->type != M9P_RATTACH || frame->payload_len < 16u) {
@@ -312,6 +486,14 @@ bool m9p_parse_rattach(const struct m9p_frame_view *frame, struct m9p_attach_res
     return true;
 }
 
+/**
+ * @brief 解析 RWALK 响应帧
+ * 
+ * @param frame 响应帧视图
+ * @param out_qid 输出解析结果
+ * @return true 解析成功
+ * @return false 解析失败
+ */
 bool m9p_parse_rwalk(const struct m9p_frame_view *frame, struct m9p_qid *out_qid)
 {
     if (frame == NULL || out_qid == NULL || frame->type != M9P_RWALK || frame->payload_len < 8u) {
@@ -322,6 +504,14 @@ bool m9p_parse_rwalk(const struct m9p_frame_view *frame, struct m9p_qid *out_qid
     return true;
 }
 
+/**
+ * @brief 解析 ROPEN 响应帧
+ * 
+ * @param frame 响应帧视图
+ * @param out_result 输出解析结果
+ * @return true 解析成功
+ * @return false 解析失败
+ */
 bool m9p_parse_ropen(const struct m9p_frame_view *frame, struct m9p_open_result *out_result)
 {
     if (frame == NULL || out_result == NULL || frame->type != M9P_ROPEN || frame->payload_len < 10u) {
@@ -333,6 +523,16 @@ bool m9p_parse_ropen(const struct m9p_frame_view *frame, struct m9p_open_result 
     return true;
 }
 
+/**
+ * @brief 解析 RREAD 响应帧
+ * 
+ * @param frame 响应帧视图
+ * @param out_data 输出数据缓冲区
+ * @param out_cap 输出缓冲区容量
+ * @param out_count 输出数据长度
+ * @return true 解析成功
+ * @return false 解析失败
+ */
 bool m9p_parse_rread(
     const struct m9p_frame_view *frame,
     uint8_t *out_data,
@@ -360,6 +560,14 @@ bool m9p_parse_rread(
     return true;
 }
 
+/**
+ * @brief 解析 RWRITE 响应帧
+ * 
+ * @param frame 响应帧视图
+ * @param out_count 输出写入的数据长度
+ * @return true 解析成功
+ * @return false 解析失败
+ */
 bool m9p_parse_rwrite(const struct m9p_frame_view *frame, uint16_t *out_count)
 {
     if (frame == NULL || out_count == NULL || frame->type != M9P_RWRITE || frame->payload_len < 2u) {
@@ -370,6 +578,14 @@ bool m9p_parse_rwrite(const struct m9p_frame_view *frame, uint16_t *out_count)
     return true;
 }
 
+/**
+ * @brief 解析 RSTAT 响应帧
+ * 
+ * @param frame 响应帧视图
+ * @param out_stat 输出解析结果
+ * @return true 解析成功
+ * @return false 解析失败
+ */
 bool m9p_parse_rstat(const struct m9p_frame_view *frame, struct m9p_stat *out_stat)
 {
     size_t name_len;
@@ -395,6 +611,14 @@ bool m9p_parse_rstat(const struct m9p_frame_view *frame, struct m9p_stat *out_st
     return true;
 }
 
+/**
+ * @brief 解析 RERROR 响应帧
+ * 
+ * @param frame 响应帧视图
+ * @param out_error 输出解析结果
+ * @return true 解析成功
+ * @return false 解析失败
+ */
 bool m9p_parse_rerror(const struct m9p_frame_view *frame, struct m9p_error *out_error)
 {
     size_t msg_len;
@@ -416,6 +640,15 @@ bool m9p_parse_rerror(const struct m9p_frame_view *frame, struct m9p_error *out_
     return true;
 }
 
+/**
+ * @brief 解析目录条目
+ * 
+ * @param data 目录条目数据
+ * @param data_len 数据长度
+ * @param entries 输出目录条目数组
+ * @param max_entries 最大输出条目数
+ * @return size_t 实际解析的条目数
+ */
 size_t m9p_parse_dirents(
     const uint8_t *data,
     size_t data_len,
@@ -450,6 +683,12 @@ size_t m9p_parse_dirents(
     return produced;
 }
 
+/**
+ * @brief 输出错误代码对应的错误名称
+ * 
+ * @param code 错误代码
+ * @return const char* 错误名称
+ */
 const char *m9p_error_name(uint16_t code)
 {
     switch (code) {

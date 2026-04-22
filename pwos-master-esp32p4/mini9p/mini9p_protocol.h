@@ -11,12 +11,14 @@
 #define M9P_MAX_ERROR_TEXT 64u
 #define M9P_FRAME_OVERHEAD 10u
 
-#define M9P_QID_DIR 0x80u
-#define M9P_QID_VIRTUAL 0x08u
-#define M9P_QID_DEVICE 0x04u
-#define M9P_QID_COMPUTE 0x02u
-#define M9P_QID_READONLY 0x01u
+// QID
+#define M9P_QID_DIR 0x80u       // 目录
+#define M9P_QID_VIRTUAL 0x08u   // 虚拟文件
+#define M9P_QID_DEVICE 0x04u    // 设备文件
+#define M9P_QID_COMPUTE 0x02u   // 计算文件
+#define M9P_QID_READONLY 0x01u  // 只读文件
 
+// STAT
 #define M9P_STAT_DIR 0x01u
 #define M9P_STAT_VIRTUAL 0x02u
 #define M9P_STAT_DEVICE 0x04u
@@ -68,6 +70,7 @@ enum m9p_error_code {
     M9P_ERR_EAGAIN = 0x000D
 };
 
+// qid 数据结构，每个对象都有一个唯一的 qid 来标识它
 struct m9p_qid {
     uint8_t type;
     uint8_t reserved;
@@ -75,6 +78,7 @@ struct m9p_qid {
     uint32_t object_id;
 };
 
+// 解码后帧的只读视图
 struct m9p_frame_view {
     uint8_t version;
     uint8_t type;
@@ -83,6 +87,7 @@ struct m9p_frame_view {
     uint16_t payload_len;
 };
 
+// attach 响应的结果
 struct m9p_attach_result {
     uint16_t negotiated_msize;
     uint8_t max_fids;
@@ -91,32 +96,37 @@ struct m9p_attach_result {
     struct m9p_qid root_qid;
 };
 
+// open 响应的结果
 struct m9p_open_result {
     struct m9p_qid qid;
     uint16_t iounit;
 };
 
+// stat 响应的结果
 struct m9p_stat {
     struct m9p_qid qid;
-    uint8_t perm;
-    uint8_t flags;
-    uint32_t size;
-    uint32_t mtime;
+    uint8_t perm;       // 权限
+    uint8_t flags;      // 标志
+    uint32_t size;      // 文件大小
+    uint32_t mtime;     // 最后修改时间
     char name[M9P_MAX_NAME_LEN + 1u];
 };
 
+// 错误响应的结果
 struct m9p_error {
     uint16_t code;
     char msg[M9P_MAX_ERROR_TEXT + 1u];
 };
 
+// 目录项
 struct m9p_dirent {
     struct m9p_qid qid;
-    uint8_t perm;
-    uint8_t flags;
+    uint8_t perm;       // 权限
+    uint8_t flags;      // 标志
     char name[M9P_MAX_NAME_LEN + 1u];
 };
 
+// 编解码
 uint16_t m9p_crc16_ccitt_false(const uint8_t *data, size_t len);
 bool m9p_encode_frame(
     uint8_t type,
@@ -128,6 +138,7 @@ bool m9p_encode_frame(
     size_t *out_len);
 bool m9p_decode_frame(const uint8_t *frame, size_t frame_len, struct m9p_frame_view *out_view);
 
+// 请求构造
 bool m9p_build_tattach(
     uint16_t tag,
     uint16_t fid,
@@ -182,6 +193,7 @@ bool m9p_build_tclunk(
     size_t out_cap,
     size_t *out_len);
 
+    // 响应解析
 bool m9p_parse_rattach(const struct m9p_frame_view *frame, struct m9p_attach_result *out_result);
 bool m9p_parse_rwalk(const struct m9p_frame_view *frame, struct m9p_qid *out_qid);
 bool m9p_parse_ropen(const struct m9p_frame_view *frame, struct m9p_open_result *out_result);
