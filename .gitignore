@@ -2,3 +2,4 @@ build/
 pwos-master/
 .vscode/
 !pwos-master-esp32p4/.vscode
+.codex
