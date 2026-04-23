@@ -2,6 +2,16 @@
 
 #include <string.h>
 
+/**
+ * @brief 发送请求帧并接收响应帧
+ *
+ * @param client 客户端
+ * @param tx_len 发送长度
+ * @param expected_tag 期望的响应标签
+ * @param expected_type 期望的响应类型
+ * @param out_frame 输出的响应帧
+ * @return int 0表示成功，非0表示错误码
+ */
 static int request_with_frame(
     struct m9p_client *client,
     size_t tx_len,
@@ -18,6 +28,7 @@ static int request_with_frame(
         return -(int)M9P_ERR_ENOTSUP;
     }
 
+    // 调用客户端实例的传输函数发送请求并接收响应
     rc = client->transport(
         client->transport_ctx,
         client->tx_buffer,
@@ -25,6 +36,8 @@ static int request_with_frame(
         client->rx_buffer,
         sizeof(client->rx_buffer),
         &rx_len);
+        
+    // 返回各种情况的错误码
     if (rc != 0) {
         return rc;
     }
@@ -51,6 +64,13 @@ static int request_with_frame(
     return 0;
 }
 
+/**
+ * @brief 客户端初始化
+ * 
+ * @param client 客户端实例指针
+ * @param transport 传输函数指针
+ * @param transport_ctx 传输层上下文指针
+ */
 void m9p_client_init(struct m9p_client *client, m9p_transport_fn transport, void *transport_ctx)
 {
     if (client == NULL) {
@@ -65,6 +85,12 @@ void m9p_client_init(struct m9p_client *client, m9p_transport_fn transport, void
     client->negotiated_msize = 256u;
 }
 
+/**
+ * @brief 客户端 fid 分配函数
+ * 
+ * @param client 客户端实例指针
+ * @return uint16_t 分配的 fid
+ */
 uint16_t m9p_client_alloc_fid(struct m9p_client *client)
 {
     uint16_t fid;
@@ -75,12 +101,21 @@ uint16_t m9p_client_alloc_fid(struct m9p_client *client)
 
     fid = client->next_fid;
     ++client->next_fid;
-    if (client->next_fid == 0u || client->next_fid == M9P_ROOT_FID) {
+    if (client->next_fid < M9P_FIRST_DYNAMIC_FID || client->next_fid == M9P_ROOT_FID) {
         client->next_fid = M9P_FIRST_DYNAMIC_FID;
     }
     return fid;
 }
 
+/**
+ * @brief 客户端 ATTACH 操作
+ * 
+ * @param client 客户端实例指针
+ * @param requested_msize 请求的最大消息大小
+ * @param requested_inflight 请求的最大未完成请求数
+ * @param attach_flags ATTACH 标志
+ * @return int 0表示成功，非0表示错误码
+ */
 int m9p_client_attach(
     struct m9p_client *client,
     uint16_t requested_msize,
@@ -129,6 +164,16 @@ int m9p_client_attach(
     return 0;
 }
 
+/**
+ * @brief 客户端 WALK 操作
+ * 
+ * @param client 客户端实例指针
+ * @param fid 当前 fid
+ * @param newfid 新 fid
+ * @param path 路径
+ * @param out_qid 输出 qid
+ * @return int 0表示成功，非0表示错误码
+ */
 int m9p_client_walk(struct m9p_client *client, uint16_t fid, uint16_t newfid, const char *path, struct m9p_qid *out_qid)
 {
     struct m9p_frame_view frame;
@@ -156,6 +201,15 @@ int m9p_client_walk(struct m9p_client *client, uint16_t fid, uint16_t newfid, co
     return 0;
 }
 
+/**
+ * @brief 客户端 OPEN 操作
+ * 
+ * @param client 客户端实例指针
+ * @param fid fid
+ * @param mode 打开模式
+ * @param out_result 输出结果
+ * @return int 0表示成功，非0表示错误码
+ */
 int m9p_client_open(struct m9p_client *client, uint16_t fid, uint8_t mode, struct m9p_open_result *out_result)
 {
     struct m9p_frame_view frame;
@@ -183,6 +237,16 @@ int m9p_client_open(struct m9p_client *client, uint16_t fid, uint8_t mode, struc
     return 0;
 }
 
+/**
+ * @brief 客户端 READ 操作
+ * 
+ * @param client 客户端实例指针
+ * @param fid fid
+ * @param offset 偏移量
+ * @param data 数据缓冲区
+ * @param in_out_count 输入为请求的字节数，输出为实际读取的字节数
+ * @return int 0表示成功，非0表示错误码
+ */
 int m9p_client_read(
     struct m9p_client *client,
     uint16_t fid,
@@ -222,6 +286,17 @@ int m9p_client_read(
     return 0;
 }
 
+/**
+ * @brief 客户端 WRITE 操作
+ * 
+ * @param client 客户端实例指针
+ * @param fid fid
+ * @param offset 偏移量
+ * @param data 数据缓冲区
+ * @param count 写入的字节数
+ * @param out_written 实际写入的字节数
+ * @return int 0表示成功，非0表示错误码
+ */
 int m9p_client_write(
     struct m9p_client *client,
     uint16_t fid,
@@ -263,6 +338,14 @@ int m9p_client_write(
     return 0;
 }
 
+/**
+ * @brief 客户端 STAT 操作
+ * 
+ * @param client 客户端实例指针
+ * @param fid fid
+ * @param out_stat 输出的文件状态信息
+ * @return int 0表示成功，非0表示错误码
+ */
 int m9p_client_stat(struct m9p_client *client, uint16_t fid, struct m9p_stat *out_stat)
 {
     struct m9p_frame_view frame;
@@ -290,6 +373,13 @@ int m9p_client_stat(struct m9p_client *client, uint16_t fid, struct m9p_stat *ou
     return 0;
 }
 
+/**
+ * @brief 客户端 CLUNK 操作
+ * 
+ * @param client 客户端实例指针
+ * @param fid fid
+ * @return int 0表示成功，非0表示错误码
+ */
 int m9p_client_clunk(struct m9p_client *client, uint16_t fid)
 {
     struct m9p_frame_view frame;
@@ -314,6 +404,15 @@ int m9p_client_clunk(struct m9p_client *client, uint16_t fid)
     return 0;
 }
 
+/**
+ * @brief 客户端 WALK 路径操作
+ * 
+ * @param client 客户端实例指针
+ * @param path 路径
+ * @param out_fid 输出的 fid
+ * @param out_qid 输出的 qid
+ * @return int 0表示成功，非0表示错误码
+ */
 int m9p_client_walk_path(struct m9p_client *client, const char *path, uint16_t *out_fid, struct m9p_qid *out_qid)
 {
     uint16_t fid;
@@ -326,7 +425,7 @@ int m9p_client_walk_path(struct m9p_client *client, const char *path, uint16_t *
     }
 
     fid = m9p_client_alloc_fid(client);
-    if (fid == 0u) {
+    if (fid < M9P_FIRST_DYNAMIC_FID) {
         return -(int)M9P_ERR_EFID;
     }
     {
@@ -341,6 +440,16 @@ int m9p_client_walk_path(struct m9p_client *client, const char *path, uint16_t *
     return 0;
 }
 
+/**
+ * @brief 客户端 OPEN 路径操作
+ * 
+ * @param client 客户端实例指针
+ * @param path 路径
+ * @param mode 打开模式
+ * @param out_fid 输出的 fid
+ * @param out_result 输出的打开结果
+ * @return int 0表示成功，非0表示错误码
+ */
 int m9p_client_open_path(
     struct m9p_client *client,
     const char *path,
