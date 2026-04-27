@@ -1,52 +1,47 @@
-/*
- * SPDX-FileCopyrightText: 2010-2022 Espressif Systems (Shanghai) CO LTD
- *
- * SPDX-License-Identifier: CC0-1.0
- */
-
-#include <stdio.h>
 #include <inttypes.h>
-#include "sdkconfig.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
+#include <stdio.h>
+
 #include "esp_chip_info.h"
 #include "esp_flash.h"
+#include "esp_heap_caps.h"
 #include "esp_system.h"
+#include "lua_port.h"
+#include "sdkconfig.h"
+#include "shell.h"
+
+// 打印系统初始信息
+static void print_chip_banner(void)
+{
+    esp_chip_info_t chip_info;
+    uint32_t flash_size = 0u;
+
+    // 获取 chip info
+    esp_chip_info(&chip_info);
+    printf("pwos master booting on %s\n", CONFIG_IDF_TARGET);
+    printf("cpu cores: %d, revision: %d\n", chip_info.cores, chip_info.revision);
+
+    if (esp_flash_get_size(NULL, &flash_size) == ESP_OK) {
+        printf("flash size: %" PRIu32 " MB\n", flash_size / (uint32_t)(1024u * 1024u));
+    }
+
+    printf("free heap: %u bytes\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
+}
 
 void app_main(void)
 {
-    printf("Hello world!\n");
+    // 禁用 stdin 和 stdout 的缓冲，以确保输出立即显示
+    setvbuf(stdin, NULL, _IONBF, 0);
+    setvbuf(stdout, NULL, _IONBF, 0);
 
-    /* Print chip information */
-    esp_chip_info_t chip_info;
-    uint32_t flash_size;
-    esp_chip_info(&chip_info);
-    printf("This is %s chip with %d CPU core(s), %s%s%s%s, ",
-           CONFIG_IDF_TARGET,
-           chip_info.cores,
-           (chip_info.features & CHIP_FEATURE_WIFI_BGN) ? "WiFi/" : "",
-           (chip_info.features & CHIP_FEATURE_BT) ? "BT" : "",
-           (chip_info.features & CHIP_FEATURE_BLE) ? "BLE" : "",
-           (chip_info.features & CHIP_FEATURE_IEEE802154) ? ", 802.15.4 (Zigbee/Thread)" : "");
+    print_chip_banner();
 
-    unsigned major_rev = chip_info.revision / 100;
-    unsigned minor_rev = chip_info.revision % 100;
-    printf("silicon revision v%d.%d, ", major_rev, minor_rev);
-    if(esp_flash_get_size(NULL, &flash_size) != ESP_OK) {
-        printf("Get flash size failed");
+    // 初始化 Lua 环境
+    if (!pw_lua_init()) {
+        puts("fatal: Lua init failed");
         return;
     }
 
-    printf("%" PRIu32 "MB %s flash\n", flash_size / (uint32_t)(1024 * 1024),
-           (chip_info.features & CHIP_FEATURE_EMB_FLASH) ? "embedded" : "external");
-
-    printf("Minimum free heap size: %" PRIu32 " bytes\n", esp_get_minimum_free_heap_size());
-
-    for (int i = 10; i >= 0; i--) {
-        printf("Restarting in %d seconds...\n", i);
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
-    }
-    printf("Restarting now.\n");
-    fflush(stdout);
-    esp_restart();
+    // 启动 demo shell
+    shell_run_boot_demo();
+    shell_start();
 }

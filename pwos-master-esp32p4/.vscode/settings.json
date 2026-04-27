@@ -5,7 +5,8 @@
         "board/esp32p4-builtin.cfg"
     ],
     "idf.customExtraVars": {
-        "IDF_TARGET": "esp32p4"
+        "IDF_TARGET": "esp32p4",
+        "OPENOCD_USB_ADAPTER_LOCATION": "5-1.1"
     },
     "idf.flashType": "UART",
     "idf.port": "/dev/ttyACM0",
