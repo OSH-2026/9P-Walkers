@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>9P-Walkers Web Shell</title>
+    <!-- xterm.js for Terminal -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+    <!-- FontAwesome for Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <style>
+        :root {
+            --bg-color: #1e1e1e;
+            --sidebar-bg: #252526;
+            --text-color: #cccccc;
+            --accent-color: #007acc;
+            --border-color: #3c3c3c;
+            --hover-bg: #2a2d2e;
+            --active-bg: #37373d;
+        }
+
+        * { box-sizing: border-width; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* Sidebar */
+        .sidebar {
+            width: 250px;
+            background-color: var(--sidebar-bg);
+            border-right: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header {
+            padding: 20px;
+            font-size: 1.2rem;
+            font-weight: bold;
+            color: #fff;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .nav-items {
+            list-style: none;
+            flex-grow: 1;
+        }
+
+        .nav-item {
+            padding: 15px 20px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            transition: background 0.2s;
+            border-left: 3px solid transparent;
+        }
+
+        .nav-item:hover { background-color: var(--hover-bg); }
+        .nav-item.active {
+            background-color: var(--active-bg);
+            border-left-color: var(--accent-color);
+            color: #fff;
+        }
+
+        /* Content Area */
+        .content {
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+        }
+
+        .tab-pane {
+            display: none;
+            padding: 20px;
+            height: 100%;
+            overflow-y: auto;
+        }
+        .tab-pane.active { display: block; }
+
+        /* Terminal Specific */
+        #terminal-container {
+            width: 100%;
+            height: 100%;
+            background: #000;
+            padding: 0;
+            overflow: hidden;
+        }
+
+        /* Basic Forms */
+        .form-group { margin-bottom: 15px; }
+        .form-group label { display: block; margin-bottom: 5px; }
+        .form-group input, .form-group select {
+            width: 100%; max-width: 400px;
+            padding: 8px;
+            background: var(--bg-color);
+            border: 1px solid var(--border-color);
+            color: white;
+        }
+        button {
+            padding: 8px 15px;
+            background: var(--accent-color);
+            color: white;
+            border: none;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        button:hover { background: #005f9e; }
+
+        /* Lua Editor */
+        #lua-editor {
+            width: 100%; height: calc(100% - 50px);
+            background: var(--bg-color); color: #fff;
+            border: 1px solid var(--border-color);
+            padding: 10px; font-family: monospace;
+            resize: none;
+        }
+
+        /* Connection Settings Layout */
+        .settings-card {
+            background: var(--sidebar-bg);
+            padding: 20px; margin-bottom: 20px;
+            border: 1px solid var(--border-color);
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Sidebar Navigation -->
+    <div class="sidebar">
+        <div class="header">
+            <i class="fa-solid fa-server"></i>
+            9P-Walkers
+        </div>
+        <ul class="nav-items">
+            <li class="nav-item active" onclick="switchTab('terminal')">
+                <i class="fa-solid fa-terminal"></i>终端 (Terminal)
+            </li>
+            <li class="nav-item" onclick="switchTab('files')">
+                <i class="fa-solid fa-folder-tree"></i>文件管理 (Files)
+            </li>
+            <li class="nav-item" onclick="switchTab('monitor')">
+                <i class="fa-solid fa-chart-line"></i>设备监控 (Monitor)
+            </li>
+            <li class="nav-item" onclick="switchTab('lua')">
+                <i class="fa-solid fa-code"></i>Lua脚本 (Scripts)
+            </li>
+            <li class="nav-item" onclick="switchTab('settings')">
+                <i class="fa-solid fa-gear"></i>设置 (Settings)
+            </li>
+        </ul>
+        <div style="padding: 20px; font-size: 0.8rem; color: #888;">
+            WebSocket: <span id="ws-status" style="color: red;">Disconnected</span>
+        </div>
+    </div>
+
+    <!-- Main Content Area -->
+    <div class="content">
+
+        <!-- 1. Terminal Tab -->
+        <div id="terminal" class="tab-pane active" style="padding: 0;">
+            <div id="terminal-container"></div>
+        </div>
+
+        <!-- 2. File Manager Tab -->
+        <div id="files" class="tab-pane">
+            <h2>虚拟文件系统 (VFS)</h2>
+            <p>通过 m9p_client_walk_path 列出远程文件树。</p>
+            <div style="margin-top: 15px;">
+                <button onclick="sendCommand('ls /')"><i class="fa-solid fa-rotate-right"></i> 刷新根目录</button>
+            </div>
+            <pre id="file-tree-output" style="margin-top: 20px; padding: 15px; background: var(--sidebar-bg); border: 1px solid var(--border-color);"></pre>
+        </div>
+
+        <!-- 3. Device Monitor Tab -->
+        <div id="monitor" class="tab-pane">
+            <h2>设备工作状态监控</h2>
+            <div class="settings-card" style="margin-top: 15px;">
+                <h3>Master_ESP32-P4 状态</h3>
+                <p>Heap Free: <span id="master-heap">---</span></p>
+                <button onclick="sendCommand('heap')" style="margin-top: 10px;">读取实时堆空间</button>
+            </div>
+            <div class="settings-card">
+                <h3>pwos-slave 连接节点</h3>
+                <p>使用 /mcu1, /mcu2 通信测试</p>
+                <button onclick="sendCommand('m9p_attach')">测试 mini9p Attach 到从机</button>
+            </div>
+        </div>
+
+        <!-- 4. Lua Scripts Tab -->
+        <div id="lua" class="tab-pane">
+            <h2>Lua 编排脚本编辑器</h2>
+            <p style="margin-bottom: 10px;">通过 shell 的 lua &lt;chunk&gt; 命令执行代码：</p>
+            <textarea id="lua-editor">-- 编写用于控制多个从机的 Lua 脚本
+print("Hello pwos-slave from Lua Web Shell!")
+
+-- 读取模拟电机数据 (伪代码)
+-- result = read("/mcu1/motor/speed")
+-- print("Motor speed is: " .. result)
+</textarea>
+            <br>
+            <button onclick="runLuaScript()"><i class="fa-solid fa-play"></i> 执行脚本</button>
+        </div>
+
+        <!-- 5. Settings Tab -->
+        <div id="settings" class="tab-pane">
+            <h2>向 MCU 从机发起连接设置 (mini9P Base Transport)</h2>
+            <p style="margin-bottom: 20px;">配置主节点 ESP32 究竟以什么硬件接口同 STM32 从机进行 mini9P RPC 协议建链。</p>
+            
+            <div class="settings-card">
+                <h3><i class="fa-solid fa-plug"></i> UART 串口连接</h3>
+                <div class="form-group text-sm">配置波特率以使用基于 UART 的串行数据流传 9P 数据包。</div>
+                <div class="form-group">
+                    <label>波特率 (Baudrate)</label>
+                    <select id="uart-baud">
+                        <option value="115200">115200</option>
+                        <option value="921600">921600</option>
+                    </select>
+                </div>
+                <button onclick="sendCommand('set_transport uart ' + document.getElementById('uart-baud').value)">应用 UART 设置</button>
+            </div>
+
+            <div class="settings-card">
+                <h3><i class="fa-solid fa-microchip"></i> SPI 连接</h3>
+                <div class="form-group text-sm">选择 SPI 频道以获取更高吞吐量。</div>
+                <div class="form-group">
+                    <label>SPI 频率 (SPI Freq)</label>
+                    <select id="spi-freq">
+                        <option value="1mhz">1 MHz</option>
+                        <option value="10mhz">10 MHz</option>
+                    </select>
+                </div>
+                <button onclick="sendCommand('set_transport spi ' + document.getElementById('spi-freq').value)">应用 SPI 设置</button>
+            </div>
+
+            <div class="settings-card">
+                <h3><i class="fa-solid fa-wifi"></i> WiFi Mesh 连接</h3>
+                <div class="form-group text-sm">配置基于 IP/UDP 包的局域网 mini9P 链接。</div>
+                <div class="form-group">
+                    <label>目标 Slave IP</label>
+                    <input type="text" id="wifi-ip" value="192.168.4.2" placeholder="192.168.4.2">
+                </div>
+                <button onclick="sendCommand('set_transport wifi ' + document.getElementById('wifi-ip').value)">应用 WiFi 设置</button>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Scripts -->
+    <script>
+        // --- UI Tab Switching ---
+        function switchTab(tabId) {
+            document.querySelectorAll('.tab-pane').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+            document.getElementById(tabId).classList.add('active');
+            event.currentTarget.classList.add('active');
+            
+            if(tabId === 'terminal' && termFitAddon) {
+                setTimeout(() => termFitAddon.fit(), 100);
+            }
+        }
+
+        // --- Terminal Initialization ---
+        const term = new Terminal({
+            theme: { background: '#000000', foreground: '#cccccc' },
+            fontFamily: 'Consolas, "Courier New", monospace',
+            cursorBlink: true
+        });
+        const termFitAddon = new FitAddon.FitAddon();
+        term.loadAddon(termFitAddon);
+        term.open(document.getElementById('terminal-container'));
+        termFitAddon.fit();
+        term.writeln('\x1b[1;32m=== 9P-Walkers Web Shell ===\x1b[0m');
+        term.writeln('Waiting for WebSocket connection to Master MCU...\r\n');
+
+        // Window resize handler
+        window.addEventListener('resize', () => termFitAddon.fit());
+
+        // --- WebSocket Communication ---
+        let ws;
+        function connectWebSocket() {
+            const host = window.location.hostname || '192.168.4.1'; // fallback IP 
+            const wsUri = `ws://${host}/ws`;
+            
+            ws = new WebSocket(wsUri);
+            
+            ws.onopen = function() {
+                document.getElementById('ws-status').textContent = 'Connected';
+                document.getElementById('ws-status').style.color = '#4CAF50';
+                term.writeln('\x1b[1;32m[Connected to ' + wsUri + ']\x1b[0m\r\n');
+            };
+
+            ws.onmessage = function(event) {
+                // Incoming text from ESP32 shell stdout hook
+                term.write(event.data);
+                
+                // Simple parsing to update Monitor / File UI logically if this was an API-like response
+                // For a fully unified channel, the frontend intercepts known string outputs.
+                console.log("WebSocket Recv:", event.data);
+                document.getElementById('file-tree-output').textContent += event.data + "\n";
+            };
+
+            ws.onclose = function() {
+                document.getElementById('ws-status').textContent = 'Disconnected';
+                document.getElementById('ws-status').style.color = 'red';
+                term.writeln('\r\n\x1b[1;31m[WebSocket Disconnected. Reconnecting in 3s...]\x1b[0m\r\n');
+                setTimeout(connectWebSocket, 3000);
+            };
+
+            ws.onerror = function(err) {
+                console.error('WebSocket Error: ', err);
+            };
+        }
+
+        // --- Input Handling ---
+        // Basic terminal keystroke forwarding
+        let inputBuffer = '';
+        term.onData(data => {
+            if (data === '\r') {
+                term.write('\r\n');
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(inputBuffer + '\n');
+                }
+                inputBuffer = '';
+            } else if (data === '\x7f') { // Backspace
+                if (inputBuffer.length > 0) {
+                    inputBuffer = inputBuffer.substr(0, inputBuffer.length - 1);
+                    term.write('\b \b');
+                }
+            } else {
+                inputBuffer += data;
+                term.write(data);
+            }
+        });
+
+        // Programmatic command sending from UI buttons
+        function sendCommand(cmd) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                term.writeln(`\x1b[1;34m[UI >] ${cmd}\x1b[0m`);
+                ws.send(cmd + '\n');
+            } else {
+                alert("WebSocket 未连接 / Not Connected!");
+            }
+        }
+
+        // Lua Editor Execution
+        function runLuaScript() {
+            const code = document.getElementById('lua-editor').value;
+            // Compress code into a single line for simple shell forwarding
+            const inlineCode = code.replace(/\n/g, ' '); 
+            sendCommand('lua ' + inlineCode);
+        }
+
+        // Only start connecting if not explicitly prevented
+        connectWebSocket();
+    </script>
+</body>
+</html>
