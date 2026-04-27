@@ -1,0 +1,532 @@
+%!TEX program = xelatex
+\documentclass[aspectratio=169]{ctexbeamer}
+\usepackage[bluetheme]{ustcbeamer}
+\input{ustctheme.tex}
+
+\title[9P-Walkers 中期汇报]{
+  9P-Walkers\\
+  基于 mini9P 的 MCU 集群分布式系统\\
+  中期汇报
+}
+\author[9P-Walkers]{
+  报告人：霍斌\\
+  项目组成员：董宇皓、霍斌、刘亦航、刘子源、武文韬
+}
+\institute[USTC]{
+  中国科学技术大学\\
+  OSH-2026 课程项目
+}
+\date{2026年4月27日}
+
+\begin{document}
+
+\maketitleframe
+
+\begin{frame}
+  \frametitle{大纲}
+  \tableofcontents[hideallsubsections]
+\end{frame}
+
+\AtBeginSection[]{
+\setbeamertemplate{footline}[footlineoff]
+  \begin{frame}
+    \frametitle{大纲}
+    \tableofcontents[currentsection,subsectionstyle=show/show/hide]
+  \end{frame}
+\setbeamertemplate{footline}[footlineon]
+}
+
+\section{What：我们到底要做什么}
+
+\begin{frame}
+  \frametitle{What-1：问题定义与项目边界}
+  \begin{block}{我们要解决的不是“单机 RTOS”，而是“多 MCU 的统一资源视图”}
+    \small
+    \begin{itemize}
+      \item 单个 MCU 上的调度、驱动和文件系统已经较成熟，但多 MCU 协同时往往接口分裂、控制入口分散。
+      \item 真正困难的不是某个设备怎么读写，而是\alert{多个节点上的设备、存储和计算任务如何被统一命名、统一访问、统一调度}。
+      \item 因此，本项目关注的是一个\alert{轻量级分布式系统原型}，而不是再做一个单板 OS。
+    \end{itemize}
+  \end{block}
+  \pause
+  \begin{alertblock}{项目边界}
+    \small
+    我们的目标不是复刻完整 Plan 9、Inferno 或 ROS 2，而是在 MCU 资源约束和课程周期内，验证“\alert{统一命名空间 + 轻量远程文件协议 + 主从协同}”这条路线能否跑通。
+  \end{alertblock}
+\end{frame}
+
+\begin{frame}
+  \frametitle{What-2：最终系统要交付什么闭环}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{用户最终看到的系统}
+        \small
+        \begin{itemize}
+          \item \texttt{cat /mcu1/dev/temperature}
+          \item \texttt{echo 100 > /mcu2/dev/motor/speed}
+          \item \texttt{cat /mcu3/compute/jacobi/result}
+        \end{itemize}
+      \end{block}
+      \begin{block}{要交付的核心能力}
+        \small
+        \begin{itemize}
+          \item 统一路径访问
+          \item 跨节点设备读写
+          \item 固定计算任务触发与取回结果
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{系统形态}
+        \small
+        \begin{itemize}
+          \item Master 负责命名空间、Shell、Lua、后续 Web
+          \item Slave 负责设备访问、本地存储、计算执行
+          \item 节点间通过 mini9P 做远程文件访问
+        \end{itemize}
+      \end{block}
+      \begin{alertblock}{明确的非目标}
+        \small
+        \begin{itemize}
+          \item 不实现完整 9P2000
+          \item 不引入完整 ROS 2 图与消息系统
+          \item 不在当前阶段追求完全去中心式架构
+        \end{itemize}
+      \end{alertblock}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\section{Why：为什么这样设计是合理的}
+
+\begin{frame}
+  \frametitle{Why-1：为什么这个问题值得做}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{课程价值}
+        \small
+        \begin{itemize}
+          \item 资源抽象与统一命名空间
+          \item 本地文件系统与远程访问协议协同
+          \item 多节点通信与任务调度裁剪实现
+          \item 受限系统中的分层与边界控制
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{工程价值}
+        \small
+        \begin{itemize}
+          \item 机器人和嵌入式系统中，本来就存在“上层控制器 + 多个 MCU 执行节点”的常见形态。
+          \item 如果接口仍是专用串口命令，系统会随节点数增长迅速失控。
+          \item 因此，需要一个比“设备私有 RPC”更统一、更可扩展的资源视图。
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Why-2：为什么采用“一切皆文件”而不是专用 RPC}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{调研结论：Plan 9 / Inferno 给出的启发}
+        \small
+        \begin{itemize}
+          \item 设备与服务都可以被稳定地抽象为文件。
+          \item 远程访问可以围绕少数通用操作展开，而不是为每类设备单独设计协议。
+          \item 用户应看到聚合后的命名空间，而不是散乱的控制接口。
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{工程后果}
+        \small
+        \begin{itemize}
+          \item Shell 直接可用，演示和调试都直观。
+          \item 外设文件、状态文件、计算任务文件可以共用一套访问语义。
+          \item 接口数量随节点增长更可控，不会演化成一堆专用命令集合。
+        \end{itemize}
+      \end{block}
+      \begin{alertblock}{结论}
+        \small
+        文件抽象不是“为了好看”，而是为了让\alert{设备控制、状态查询和任务执行}都落到统一接口上。
+      \end{alertblock}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Why-3：为什么不是 ROS、完整 9P 或完全去中心式}
+  \begin{block}{调研不是罗列名词，而是用于排除不合适的路线}
+    \small
+    \begin{itemize}
+      \item \textbf{ROS / micro-ROS：}适合作为上层分层和现实部署形态的参考，但它们擅长的是消息图与编排，不是“统一文件命名空间”。
+      \item \textbf{完整 9P2000：}语义值得借鉴，但对 MCU 的 RAM、Flash、无 MMU 环境来说过重；我们只保留当前闭环需要的操作集合。
+      \item \textbf{完全去中心式：}理论上更分布式，但会把发现、路由、一致性和故障恢复的复杂度过早引入系统。
+    \end{itemize}
+  \end{block}
+  \pause
+  \begin{alertblock}{因此当前选择是}
+    \small
+    逻辑上采用\alert{主控集中、从机确定执行}；协议上采用\alert{mini9P}；物理链路上先从\alert{UART 单链路闭环}出发，后续再考虑总线或环形演进。
+  \end{alertblock}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Why-4：为什么判断这个方案在课程周期内可行}
+  \begin{columns}[T]
+    \begin{column}{0.31\textwidth}
+      \begin{block}{依据 1：代码底座已存在}
+        \small
+        \begin{itemize}
+          \item mini9P 协议规范已成文
+          \item 主控 client 已实现编解码和 API
+          \item 主控已能启动 Lua 和 shell
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.31\textwidth}
+      \begin{block}{依据 2：从机基础已具备}
+        \small
+        \begin{itemize}
+          \item USART2 / SDIO 初始化已完成
+          \item littlefs 自检已能建目录、写读、校验
+          \item 能周期输出启动与状态报告
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.31\textwidth}
+      \begin{block}{依据 3：验证路径清晰}
+        \small
+        \begin{itemize}
+          \item 先协议层自测
+          \item 再单节点主从闭环
+          \item 再统一命名空间
+          \item 最后扩展展示层
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+  \vspace{0.2cm}
+  \begin{alertblock}{可行性的核心不是“理想很美”，而是“现有基础足以支撑下一步闭环”}
+    \small
+    我们现在面对的主要问题是\alert{工程补完与联调}，而不是“这条路线是否根本不可做”。
+  \end{alertblock}
+\end{frame}
+
+\section{How：准备怎样把它做成}
+
+\begin{frame}
+  \frametitle{How-1：系统分层与职责划分}
+  \begin{columns}[T]
+    \begin{column}{0.46\textwidth}
+      \begin{block}{Master：控制平面}
+        \small
+        \begin{itemize}
+          \item Shell / Lua / 后续 Web 作为统一入口
+          \item cluster\_vfs 负责 \texttt{/mcuN/...} 命名空间聚合
+          \item mini9P client 负责远程访问协议收发
+          \item 调度逻辑和复杂状态主要留在主控侧
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.08\textwidth}
+      \vspace{1.5cm}
+      \centerline{\Large $\Longleftrightarrow$}
+      \centerline{\small UART}
+    \end{column}
+    \begin{column}{0.42\textwidth}
+      \begin{block}{Slave：执行平面}
+        \small
+        \begin{itemize}
+          \item mini9P server 解析请求
+          \item 虚拟文件树路由到设备或计算节点
+          \item littlefs 提供本地持久化基底
+          \item 从机侧坚持静态、确定、可预测
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{How-2：路径、协议与任务是如何落地的}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{路径模型}
+        \small
+        \begin{itemize}
+          \item 主控对外暴露统一路径：\texttt{/mcu1/dev/temperature}
+          \item mini9P 只处理节点本地路径：\texttt{/dev/temperature}
+          \item 也就是说，\texttt{/mcuN} 这一层聚合由 Master 完成
+        \end{itemize}
+      \end{block}
+      \begin{block}{协议模型}
+        \small
+        \begin{itemize}
+          \item 保留 attach / walk / open / read / write / stat / clunk
+          \item 帧头 + 长度 + CRC 便于串口同步与恢复
+          \item 不把消息集合扩得超过当前闭环需求
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{任务模型}
+        \small
+        \begin{itemize}
+          \item 长任务不走阻塞式 RPC
+          \item 向命令文件写参数，立即返回
+          \item 通过状态文件轮询执行进度
+          \item 通过结果文件读取最终输出
+        \end{itemize}
+      \end{block}
+      \begin{alertblock}{原因}
+        \small
+        这样可以避免在没有复杂会话控制和 \texttt{flush} 的前提下，把链路做成难以恢复的长事务。
+      \end{alertblock}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{How-3：分阶段推进，而不是一次把系统做满}
+  \small
+  \begin{tabular}{p{0.19\textwidth}p{0.25\textwidth}p{0.23\textwidth}p{0.23\textwidth}}
+    \hline
+    阶段 & 目标 & 当前状态 & 验收标准 \\
+    \hline
+    协议基线 & 协议规范、编解码、client API & 已完成大半 & 请求与响应语义稳定 \\
+    单节点闭环 & UART + server + 最小文件树 & 当前重点 & 主控可 attach/stat/read/write 从机 \\
+    统一命名空间 & \texttt{/mcuN/...} 聚合访问 & 待接入 & Shell 能按统一路径访问资源 \\
+    展示层扩展 & 计算 demo、Lua、Web & 后续增强 & 完成课程展示闭环 \\
+    \hline
+  \end{tabular}
+  \vspace{0.25cm}
+  \begin{alertblock}{分阶段的意义}
+    \small
+    每一阶段都要有独立可验证的结果，这样即使后续增强项未全部完成，核心闭环也能成立。
+  \end{alertblock}
+\end{frame}
+
+\begin{frame}
+  \frametitle{How-4：当前进展与剩余缺口}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{已完成的底座}
+        \small
+        \begin{itemize}
+          \item 主控侧已完成 mini9P 帧编解码与 client 接口
+          \item 主控入口已能启动 Lua、boot demo shell 与 REPL
+          \item Shell 已支持 \texttt{help}、\texttt{heap}、\texttt{lua}、\texttt{m9p}、\texttt{reboot}
+          \item 从机已完成启动、自检、littlefs 基础验证与状态上报
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{尚待补齐的关键点}
+        \small
+        \begin{itemize}
+          \item 真实 UART transport 还未接到主控 client
+          \item 从机 mini9P server 仍是骨架，尚未完成请求分发
+          \item cluster\_vfs 与统一路径映射尚未真正落地
+          \item 设备文件树和计算文件接口还未进入端到端联调
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{How-5：主要风险与应对策略}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{风险}
+        \small
+        \begin{itemize}
+          \item 方案过度膨胀，偏离最小闭环
+          \item 协议可靠性与联调问题拖慢节奏
+          \item 多节点场景过早引入，导致定位困难
+          \item 从机资源受限，复杂逻辑压垮系统
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{应对}
+        \small
+        \begin{itemize}
+          \item 坚持先单节点、再统一路径、最后扩展示层
+          \item 先补 transport、server、最小文件树，不扩消息集合
+          \item 多节点在单节点稳定后再引入
+          \item 把复杂状态留在 Master，从机侧坚持静态缓冲区与固定表项
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+  \vspace{0.2cm}
+  \begin{alertblock}{答辩时最关键的一句话}
+    \small
+    我们并不是在追求一个“什么都做”的系统，而是在\alert{受限资源 + 有限时间}下，证明这条架构路线的最小闭环是可实现、可验证、可扩展的。
+  \end{alertblock}
+\end{frame}
+
+\begin{frame}
+  \frametitle{How-6：下一阶段要拿出的硬证据}
+  \begin{block}{第一组证据：主从真实通信闭环}
+    \small
+    主控通过真实 UART 链路，对单个从机完成 attach、stat、read、write 的端到端访问。
+  \end{block}
+  \pause
+  \begin{block}{第二组证据：统一路径闭环}
+    \small
+    用户在 Shell 中通过 \texttt{/mcu1/...} 路径读写远端资源，而不是调用专用命令。
+  \end{block}
+  \pause
+  \begin{block}{第三组证据：展示闭环}
+    \small
+    至少拿出一个设备文件 demo 和一个计算文件 demo，证明“文件抽象 + 远程访问 + 主从协同”不是停留在设计图上。
+  \end{block}
+\end{frame}
+
+\section{总结}
+
+\begin{frame}
+  \frametitle{总结：what、why、how 的收束}
+  \begin{itemize}
+    \item \textbf{What：}我们要做的是一个面向 MCU 集群的轻量级分布式系统原型，核心是统一命名空间下的跨节点资源访问。
+    \item \textbf{Why：}调研表明，Plan 9 / Inferno 解释了为什么资源应统一为文件，ROS / micro-ROS 和现实机器人系统说明了主控协同多 MCU 节点的工程合理性；可行性分析则证明当前仓库基础足以支撑下一阶段闭环。
+    \item \textbf{How：}我们采用主控集中、从机确定执行、mini9P 极简协议、分阶段验收的路线，先把单节点闭环打通，再扩展到统一路径和展示层。
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{致谢}
+  \centerline{\Large 谢谢！}
+  \vspace{0.4cm}
+  \centerline{\normalsize 欢迎老师和同学提出问题}
+\end{frame}
+
+\end{document}
+%目录页
+%--------------------
+%beamer 101
+\begin{frame}%
+	\frametitle{大纲}%
+	\tableofcontents[hideallsubsections]%仅显示节
+	%\tableofcontents%显示所节和子节
+\end{frame}%
+%--------------------
+%节目录页
+%--------------------
+\AtBeginSection[]{
+\setbeamertemplate{footline}[footlineoff]%取消页脚
+  \begin{frame}%
+    \frametitle{大纲}
+	%\tableofcontents[currentsection,subsectionstyle=show/hide/hide]%高亮当前节，不显示子节
+    \tableofcontents[currentsection,subsectionstyle=show/show/hide]%show,shaded,hide
+  \end{frame}
+\setbeamertemplate{footline}[footlineon]%添加页脚
+}
+%--------------------
+%子节目录页
+%--------------------
+\AtBeginSubsection[]{
+\setbeamertemplate{footline}[footlineoff]%取消页脚
+  \begin{frame}%
+    \frametitle{大纲}
+	%\tableofcontents[currentsection,subsectionstyle=show/hide/hide]%高亮当前节，不显示子节
+    \tableofcontents[currentsection,subsectionstyle=show/shaded/hide]%show,shaded,hide
+  \end{frame}
+\setbeamertemplate{footline}[footlineon]%添加页脚
+}
+
+\section{研究背景}
+\begin{frame}
+  \frametitle{研究背景}
+  研究背景：
+  \begin{itemize}
+    \item 一
+    \item 二
+    \item 三
+  \end{itemize}
+
+\end{frame}
+
+
+\section{理论模型}
+\subsection{模型1}
+\begin{frame}
+  \frametitle{理论模型1}
+  考虑开放系统主方程
+  \begin{equation*}
+    \frac{d\rho}{d t}=-i \left[H,\rho\right]+\kappa\left(2a\rho a^{\dagger}-a^{\dagger}a\rho-\rho a^{\dagger}a\right)
+  \end{equation*}
+  \pause
+  由此得到……
+
+\end{frame}
+\subsection{模型2}
+\begin{frame}
+  \frametitle{理论模型2}
+  近似条件
+  \begin{equation*}
+    \rho\left(t\right)\approx\rho_{\rm S}\left(t\right)\otimes\rho_{\rm B}
+  \end{equation*}
+  \pause
+  于是……
+  \begin{equation*}
+    \frac{d\rho}{d t}=\cdots
+  \end{equation*}
+  
+\end{frame}
+
+
+\section{研究方法}
+
+\begin{frame}
+  \frametitle{研究方法}
+  \begin{block}{方法一}
+    \begin{itemize}
+      \item abc
+      \item def
+    \end{itemize}
+  \end{block}
+  \pause
+  \begin{block}{方法二}
+    \begin{itemize}
+      \item abc
+      \item def
+    \end{itemize}
+  \end{block}
+\end{frame}
+
+
+\section{总结展望}
+
+\begin{frame}
+  \frametitle{总结展望}
+  \begin{columns}
+    \begin{column}{0.50\textwidth}
+      \begin{figure}
+        \includegraphics[width=0.8\textwidth]{figures/ustc_logo.pdf}
+        \caption{标题}
+      \end{figure}
+    \end{column}
+    \begin{column}{0.50\textwidth}
+      \begin{block}{结论}
+        \begin{itemize}
+          \item 结论 1
+          \item 结论 2
+          \item 结论 3
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{致谢}
+  \centerline{\Large 谢谢!}
+\end{frame}
+
+\end{document}
