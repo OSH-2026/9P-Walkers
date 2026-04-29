@@ -8,6 +8,8 @@
 #include "mini9p_protocol.h"
 
 #define M9P_CLIENT_BUFFER_CAP 512u
+#define M9P_DEFAULT_MSIZE 512u
+#define M9P_DEFAULT_INFLIGHT 4u
 #define M9P_ROOT_FID 0u
 #define M9P_FIRST_DYNAMIC_FID 1u
 
