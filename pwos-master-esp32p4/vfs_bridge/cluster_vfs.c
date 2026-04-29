@@ -28,6 +28,37 @@ static struct cluster_vfs_file *alloc_open_file(void)
     return NULL;
 }
 
+static struct cluster_vfs_route *find_route(const char *target)
+{
+    if (!target)
+    {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < CLUSTER_VFS_MAX_ROUTES; ++i)
+    {
+        if (g_routes[i].state != CLUSTER_VFS_ROUTE_EMPTY &&
+            strcmp(g_routes[i].target, target) == 0)
+        {
+            return &g_routes[i];
+        }
+    }
+
+    return NULL;
+}
+
+static bool mode_allows_read(uint8_t mode)
+{
+    uint8_t access = mode & 0x03u;
+    return access == M9P_OREAD || access == M9P_ORDWR;
+}
+
+static bool mode_allows_write(uint8_t mode)
+{
+    uint8_t access = mode & 0x03u;
+    return access == M9P_OWRITE || access == M9P_ORDWR;
+}
+
 static int resolve_path(const char *path,
                         struct cluster_vfs_route **out_route,
                         char *remote_path,
@@ -109,6 +140,11 @@ int cluster_vfs_add_direct(const char *target,
         return -(int)M9P_ERR_EINVAL;
     }
 
+    if (find_route(target))
+    {
+        return -(int)M9P_ERR_EBUSY;
+    }
+
     struct cluster_vfs_route *route = alloc_route();
     if (!route)
     {
@@ -141,6 +177,7 @@ int cluster_vfs_remove_route(const char *target)
             for (size_t j = 0; j < CLUSTER_VFS_MAX_OPEN; ++j)
             {
                 if (g_open_files[j].used &&
+                    g_open_files[j].route &&
                     strcmp(g_open_files[j].route->target, target) == 0)
                 {
                     return -(int)M9P_ERR_EBUSY;
@@ -227,6 +264,7 @@ int cluster_vfs_open(const char *path, uint8_t mode, uint16_t *out_fd)
     file->used = true;
     file->local_fd = (uint16_t)(file - g_open_files); // 计算 local_fd，即 open_files 数组中的索引
     file->route = route;
+    file->qid = result.qid;
     file->mode = mode;
     file->offset = 0;
     *out_fd = file->local_fd; // 返回文件描述符，即 open_files 数组中的索引
@@ -243,7 +281,7 @@ int cluster_vfs_read(uint16_t fd,
     }
 
     struct cluster_vfs_file *file = &g_open_files[fd];
-    if (!file->used || !(file->mode & M9P_OREAD))
+    if (!file->used || !mode_allows_read(file->mode))
     {
         return -(int)M9P_ERR_EFID;
     }
@@ -271,7 +309,7 @@ int cluster_vfs_write(uint16_t fd,
     }
 
     struct cluster_vfs_file *file = &g_open_files[fd];
-    if (!file->used || !(file->mode & M9P_OWRITE))
+    if (!file->used || !mode_allows_write(file->mode))
     {
         return -(int)M9P_ERR_EFID;
     }
@@ -296,6 +334,15 @@ int cluster_vfs_stat(const char *path,
         return -(int)M9P_ERR_EINVAL;
     }
 
+    if (strcmp(path, "/") == 0)
+    {
+        memset(out_stat, 0, sizeof(*out_stat));
+        out_stat->qid.type = M9P_QID_DIR | M9P_QID_VIRTUAL;
+        out_stat->flags = M9P_STAT_DIR | M9P_STAT_VIRTUAL;
+        strcpy(out_stat->name, "/");
+        return 0;
+    }
+
     struct cluster_vfs_route *route;
     char remote_path[M9P_MAX_PATH_LEN + 1u];
     int ret = resolve_path(path, &route, remote_path, sizeof(remote_path));
@@ -315,10 +362,10 @@ int cluster_vfs_stat(const char *path,
     ret = m9p_client_stat(client, fid, out_stat);
     if (ret < 0)
     {
+        (void)m9p_client_clunk(client, fid);
         return ret;
     }
-    m9p_client_clunk(client, fid); // 释放临时 fid
-    return 0;
+    return m9p_client_clunk(client, fid); // 释放临时 fid
 }
 
 int cluster_vfs_close(uint16_t fd){
@@ -332,6 +379,5 @@ int cluster_vfs_close(uint16_t fd){
         return -(int)M9P_ERR_EFID;
     }
     file->used = false;
-    m9p_client_clunk(file->route->client, file->remote_fid); // 释放远端 fid
-    return 0;
+    return m9p_client_clunk(file->route->client, file->remote_fid); // 释放远端 fid
 }
