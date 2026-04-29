@@ -25,8 +25,10 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "fs_selftest.h"
+#include "mini9p_server.h"
 #include "vofa_firewater.h"
 #include <stdio.h>
+#include <string.h>
 
 /* USER CODE END Includes */
 
@@ -50,6 +52,9 @@
 /* USER CODE BEGIN PV */
 HAL_SD_CardInfoTypeDef SDCardInfo;
 FS_SelfTestReport g_fs_report;
+static struct m9p_server g_m9p_server;
+static uint8_t g_m9p_rx_buffer[M9P_SERVER_FRAME_CAP];
+static size_t g_m9p_rx_len;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -57,6 +62,10 @@ void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 static void UART_ReportEarlyBoot(void);
 static void FS_ReportBootStatus(void);
+static void M9P_ResetRxState(void);
+static void M9P_ResyncRxState(void);
+static void M9P_ProcessRxByte(uint8_t byte);
+static void M9P_PollUart(void);
 
 /* USER CODE END PFP */
 
@@ -88,6 +97,120 @@ static void FS_ReportBootStatus(void)
                (unsigned long)g_fs_report.bytes_read,
                (unsigned long)g_fs_report.bytes_written) > 0) {
     (void)vofa_firewater_send_text(message);
+  }
+}
+
+static void M9P_ResetRxState(void)
+{
+  g_m9p_rx_len = 0u;
+}
+
+static void M9P_ResyncRxState(void)
+{
+  size_t offset;
+
+  for (offset = 1u; offset + 1u < g_m9p_rx_len; ++offset)
+  {
+    if ((g_m9p_rx_buffer[offset] == (uint8_t)'9') &&
+        (g_m9p_rx_buffer[offset + 1u] == (uint8_t)'P'))
+    {
+      memmove(g_m9p_rx_buffer, g_m9p_rx_buffer + offset, g_m9p_rx_len - offset);
+      g_m9p_rx_len -= offset;
+      return;
+    }
+  }
+
+  if ((g_m9p_rx_len > 0u) && (g_m9p_rx_buffer[g_m9p_rx_len - 1u] == (uint8_t)'9'))
+  {
+    g_m9p_rx_buffer[0] = (uint8_t)'9';
+    g_m9p_rx_len = 1u;
+    return;
+  }
+
+  M9P_ResetRxState();
+}
+
+static void M9P_ProcessRxByte(uint8_t byte)
+{
+  if (g_m9p_rx_len == 0u)
+  {
+    if (byte == (uint8_t)'9')
+    {
+      g_m9p_rx_buffer[g_m9p_rx_len++] = byte;
+    }
+    return;
+  }
+
+  if (g_m9p_rx_len == 1u)
+  {
+    if (byte == (uint8_t)'P')
+    {
+      g_m9p_rx_buffer[g_m9p_rx_len++] = byte;
+      return;
+    }
+    g_m9p_rx_buffer[0] = byte;
+    g_m9p_rx_len = (byte == (uint8_t)'9') ? 1u : 0u;
+    return;
+  }
+
+  if (g_m9p_rx_len >= sizeof(g_m9p_rx_buffer))
+  {
+    M9P_ResyncRxState();
+  }
+  if (g_m9p_rx_len >= sizeof(g_m9p_rx_buffer))
+  {
+    M9P_ResetRxState();
+  }
+
+  g_m9p_rx_buffer[g_m9p_rx_len++] = byte;
+  if (g_m9p_rx_len >= 4u)
+  {
+    const uint16_t frame_len_field =
+        (uint16_t)g_m9p_rx_buffer[2] |
+        (uint16_t)((uint16_t)g_m9p_rx_buffer[3] << 8);
+    const size_t expected_len = (size_t)frame_len_field + 6u;
+
+    if ((expected_len < M9P_FRAME_OVERHEAD) || (expected_len > sizeof(g_m9p_rx_buffer)))
+    {
+      M9P_ResyncRxState();
+      return;
+    }
+    if (g_m9p_rx_len < expected_len)
+    {
+      return;
+    }
+    if (g_m9p_rx_len == expected_len)
+    {
+      uint8_t response_frame[M9P_SERVER_FRAME_CAP];
+      size_t response_len = 0u;
+
+      if (m9p_server_handle_frame(&g_m9p_server,
+                                  g_m9p_rx_buffer,
+                                  g_m9p_rx_len,
+                                  response_frame,
+                                  sizeof(response_frame),
+                                  &response_len))
+      {
+        if (response_len > 0u)
+        {
+          (void)HAL_UART_Transmit(&huart2, response_frame, (uint16_t)response_len, 20u);
+        }
+      }
+      M9P_ResetRxState();
+      return;
+    }
+
+    M9P_ResyncRxState();
+  }
+}
+
+static void M9P_PollUart(void)
+{
+  uint8_t byte;
+
+  while (HAL_UART_Receive(&huart2, &byte, 1u, 0u) == HAL_OK)
+  {
+    M9P_ProcessRxByte(byte);
   }
 }
 
@@ -125,6 +248,7 @@ int main(void)
   MX_USART2_UART_Init();
   MX_SDIO_SD_Init();
   /* USER CODE BEGIN 2 */
+  UART_ReportEarlyBoot();
   (void)vofa_firewater_send_text("boot: sdio ok");
   if (HAL_SD_GetCardInfo(&hsd, &SDCardInfo) == HAL_OK)
   {
@@ -136,17 +260,27 @@ int main(void)
   }
   (void)fs_selftest_run(&g_fs_report);
   FS_ReportBootStatus();
+  m9p_server_init(&g_m9p_server);
+  M9P_ResetRxState();
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  {
+    uint32_t last_report_tick = HAL_GetTick();
+
   while (1)
   {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    (void)vofa_firewater_send_fs_report(&g_fs_report, HAL_GetTick());
-    HAL_Delay(1000);
+    M9P_PollUart();
+    if ((HAL_GetTick() - last_report_tick) >= 1000u)
+    {
+      (void)vofa_firewater_send_fs_report(&g_fs_report, HAL_GetTick());
+      last_report_tick = HAL_GetTick();
+    }
+  }
   }
   /* USER CODE END 3 */
 }

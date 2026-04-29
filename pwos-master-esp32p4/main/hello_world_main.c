@@ -7,6 +7,7 @@
 #include "esp_system.h"
 #include "lua_port.h"
 #include "sdkconfig.h"
+#include "http_server.h"
 #include "shell.h"
 
 // 打印系统初始信息
@@ -40,6 +41,8 @@ void app_main(void)
         puts("fatal: Lua init failed");
         return;
     }
+
+    web_server_start();
 
     // 启动 demo shell
     shell_run_boot_demo();

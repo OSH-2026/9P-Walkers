@@ -1,4 +1,7 @@
 #include "http_server.h"
+
+#include <stdlib.h>
+
 #include <esp_http_server.h>
 #include <esp_log.h>
 #include <string.h>
@@ -86,6 +89,31 @@ static const httpd_uri_t ws = {
 
 static httpd_handle_t server = NULL;
 
+void web_server_broadcast_text(const char *text)
+{
+    size_t client_count = 8u;
+    int client_fds[8];
+    httpd_ws_frame_t frame;
+    size_t idx;
+
+    if (server == NULL || text == NULL || text[0] == '\0') {
+        return;
+    }
+    if (httpd_get_client_list(server, &client_count, client_fds) != ESP_OK) {
+        return;
+    }
+
+    memset(&frame, 0, sizeof(frame));
+    frame.type = HTTPD_WS_TYPE_TEXT;
+    frame.payload = (uint8_t *)text;
+    frame.len = strlen(text);
+    for (idx = 0u; idx < client_count; ++idx) {
+        if (httpd_ws_get_fd_info(server, client_fds[idx]) == HTTPD_WS_CLIENT_WEBSOCKET) {
+            (void)httpd_ws_send_frame_async(server, client_fds[idx], &frame);
+        }
+    }
+}
+
 void web_server_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
@@ -95,6 +123,10 @@ void web_server_start(void)
 
     ESP_LOGI(TAG, "Starting HTTP server on port: '%d'", config.server_port);
 
+    if (server != NULL) {
+        ESP_LOGI(TAG, "HTTP server already running");
+        return;
+    }
     if (httpd_start(&server, &config) == ESP_OK) {
         ESP_LOGI(TAG, "Registering URI handlers");
         httpd_register_uri_handler(server, &uri_get);

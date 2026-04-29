@@ -7,6 +7,8 @@ extern "C" {
 
 /* 初始化并启动可承载 Web Shell 前端的 HTTP 与 WebSocket 服务器 */
 void web_server_start(void);
+/* 向所有活跃 WebSocket 客户端广播文本。 */
+void web_server_broadcast_text(const char *text);
 
 #ifdef __cplusplus
 }

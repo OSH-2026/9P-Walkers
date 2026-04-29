@@ -3,10 +3,13 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <string.h>
 
+#include "driver/uart.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lua_port.h"
@@ -16,10 +19,83 @@
 #define SHELL_TASK_STACK_SIZE 4096
 #define SHELL_TASK_PRIORITY 5
 #define SHELL_LINE_CAP 256
+#define SHELL_PRINT_CAP 320
+#define SHELL_UART_PORT UART_NUM_1
+#define SHELL_UART_DEFAULT_TX_PIN 17
+#define SHELL_UART_DEFAULT_RX_PIN 18
+#define SHELL_UART_DEFAULT_BAUD 1000000
+#define SHELL_UART_DEFAULT_TIMEOUT_MS 50u
+#define SHELL_UART_DRIVER_BUFFER 1024
 
-/* 用于测试 Shell 命令操作的模拟 m9p 客户端环境 */
+enum shell_transport_kind {
+    SHELL_TRANSPORT_UART = 0,
+    SHELL_TRANSPORT_MOCK,
+};
+
+struct shell_uart_transport {
+    uart_port_t port;
+    int tx_pin;
+    int rx_pin;
+    int baud_rate;
+    uint32_t timeout_ms;
+    bool initialized;
+};
+
 static struct m9p_client shell_m9p_client;
 static bool shell_m9p_initialized = false;
+static enum shell_transport_kind shell_transport_kind = SHELL_TRANSPORT_UART;
+static struct shell_uart_transport shell_uart_transport = {
+    .port = SHELL_UART_PORT,
+    .tx_pin = SHELL_UART_DEFAULT_TX_PIN,
+    .rx_pin = SHELL_UART_DEFAULT_RX_PIN,
+    .baud_rate = SHELL_UART_DEFAULT_BAUD,
+    .timeout_ms = SHELL_UART_DEFAULT_TIMEOUT_MS,
+    .initialized = false,
+};
+static shell_output_fn shell_output_hook = NULL;
+static void *shell_output_hook_ctx = NULL;
+
+static void shell_emit_text(const char *text)
+{
+    if (text == NULL) {
+        return;
+    }
+
+    fputs(text, stdout);
+    if (shell_output_hook != NULL) {
+        shell_output_hook(shell_output_hook_ctx, text);
+    }
+}
+
+static void shell_printf(const char *fmt, ...)
+{
+    char buffer[SHELL_PRINT_CAP];
+    va_list args;
+    int len;
+
+    va_start(args, fmt);
+    len = vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
+    if (len <= 0) {
+        return;
+    }
+
+    shell_emit_text(buffer);
+}
+
+static void shell_puts(const char *text)
+{
+    if (text != NULL) {
+        shell_emit_text(text);
+    }
+    shell_emit_text("\n");
+}
+
+void shell_set_output_hook(shell_output_fn hook, void *ctx)
+{
+    shell_output_hook = hook;
+    shell_output_hook_ctx = ctx;
+}
 
 /**
  * @brief 模拟的传输层回调函数 (Transport Callback)
@@ -32,21 +108,197 @@ static int mock_transport(void *transport_ctx, const uint8_t *tx_data, size_t tx
     (void)tx_data;
     (void)rx_data;
     (void)rx_cap;
-    printf("[mock m9p] Transmitting %u bytes...\n", (unsigned)tx_len);
+    shell_printf("[mock m9p] tx=%u bytes\n", (unsigned)tx_len);
     *rx_len = 0; /* 伪造空的返回数据 */
-    return 0;    /* 返回成功 */
+    return -(int)M9P_ERR_EIO;
 }
 
 /**
- * @brief 确保模拟的 m9p 客户端已经初始化
- * 以免在输入 shell 命令时出现未分配内存被访问的宕机问题
+ * @brief 释放并重建 m9p 客户端实例，使 transport 切换后状态一致。
  */
-static void ensure_m9p_mock_client(void)
+static void reset_m9p_client(void)
 {
-    if (!shell_m9p_initialized) {
-        m9p_client_init(&shell_m9p_client, mock_transport, NULL);
-        shell_m9p_initialized = true;
+    memset(&shell_m9p_client, 0, sizeof(shell_m9p_client));
+    shell_m9p_initialized = false;
+}
+
+static void resync_serial_frame(uint8_t *buffer, size_t *len)
+{
+    size_t offset;
+
+    for (offset = 1u; offset + 1u < *len; ++offset) {
+        if (buffer[offset] == (uint8_t)'9' && buffer[offset + 1u] == (uint8_t)'P') {
+            memmove(buffer, buffer + offset, *len - offset);
+            *len -= offset;
+            return;
+        }
     }
+
+    if (*len > 0u && buffer[*len - 1u] == (uint8_t)'9') {
+        buffer[0] = (uint8_t)'9';
+        *len = 1u;
+        return;
+    }
+
+    *len = 0u;
+}
+
+static bool ensure_uart_transport_ready(void)
+{
+    const uart_config_t config = {
+        .baud_rate = shell_uart_transport.baud_rate,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT,
+    };
+
+    if (shell_uart_transport.initialized) {
+        return true;
+    }
+    if (uart_driver_install(shell_uart_transport.port, SHELL_UART_DRIVER_BUFFER, 0, 0, NULL, 0) != ESP_OK) {
+        return false;
+    }
+    if (uart_param_config(shell_uart_transport.port, &config) != ESP_OK) {
+        (void)uart_driver_delete(shell_uart_transport.port);
+        return false;
+    }
+    if (uart_set_pin(
+            shell_uart_transport.port,
+            shell_uart_transport.tx_pin,
+            shell_uart_transport.rx_pin,
+            UART_PIN_NO_CHANGE,
+            UART_PIN_NO_CHANGE) != ESP_OK) {
+        (void)uart_driver_delete(shell_uart_transport.port);
+        return false;
+    }
+
+    shell_uart_transport.initialized = true;
+    return true;
+}
+
+static int uart_transport(
+    void *transport_ctx,
+    const uint8_t *tx_data,
+    size_t tx_len,
+    uint8_t *rx_data,
+    size_t rx_cap,
+    size_t *rx_len)
+{
+    struct shell_uart_transport *transport = (struct shell_uart_transport *)transport_ctx;
+    int written;
+    int64_t deadline_us;
+    size_t received = 0u;
+
+    if (transport == NULL || tx_data == NULL || rx_data == NULL || rx_len == NULL) {
+        return -(int)M9P_ERR_EINVAL;
+    }
+    if (!ensure_uart_transport_ready()) {
+        return -(int)M9P_ERR_EIO;
+    }
+
+    *rx_len = 0u;
+    (void)uart_flush_input(transport->port);
+    written = uart_write_bytes(transport->port, tx_data, tx_len);
+    if (written < 0 || (size_t)written != tx_len) {
+        return -(int)M9P_ERR_EIO;
+    }
+    if (uart_wait_tx_done(transport->port, pdMS_TO_TICKS(transport->timeout_ms)) != ESP_OK) {
+        return -(int)M9P_ERR_EIO;
+    }
+
+    deadline_us = esp_timer_get_time() + ((int64_t)transport->timeout_ms * 1000);
+    while (esp_timer_get_time() < deadline_us) {
+        uint8_t byte = 0u;
+        int read_len = uart_read_bytes(transport->port, &byte, 1u, pdMS_TO_TICKS(5u));
+
+        if (read_len <= 0) {
+            continue;
+        }
+
+        if (received == 0u) {
+            if (byte == (uint8_t)'9') {
+                rx_data[received++] = byte;
+            }
+            continue;
+        }
+        if (received == 1u) {
+            if (byte == (uint8_t)'P') {
+                rx_data[received++] = byte;
+            } else {
+                rx_data[0] = byte;
+                received = byte == (uint8_t)'9' ? 1u : 0u;
+            }
+            continue;
+        }
+        if (received >= rx_cap) {
+            resync_serial_frame(rx_data, &received);
+        }
+        if (received >= rx_cap) {
+            received = 0u;
+        }
+
+        rx_data[received++] = byte;
+        if (received >= 4u) {
+            uint16_t frame_len_field = (uint16_t)rx_data[2] | (uint16_t)((uint16_t)rx_data[3] << 8);
+            size_t expected_len = (size_t)frame_len_field + 6u;
+
+            if (expected_len < M9P_FRAME_OVERHEAD || expected_len > rx_cap) {
+                if (expected_len > rx_cap) {
+                    return -(int)M9P_ERR_EMSIZE;
+                }
+                resync_serial_frame(rx_data, &received);
+                continue;
+            }
+            if (received == expected_len) {
+                *rx_len = received;
+                return 0;
+            }
+            if (received > expected_len) {
+                resync_serial_frame(rx_data, &received);
+            }
+        }
+    }
+
+    return -(int)M9P_ERR_EAGAIN;
+}
+
+static int ensure_m9p_client_initialized(void)
+{
+    if (shell_m9p_initialized) {
+        return 0;
+    }
+
+    if (shell_transport_kind == SHELL_TRANSPORT_UART) {
+        if (!ensure_uart_transport_ready()) {
+            return -(int)M9P_ERR_EIO;
+        }
+        m9p_client_init(&shell_m9p_client, uart_transport, &shell_uart_transport);
+    } else {
+        m9p_client_init(&shell_m9p_client, mock_transport, NULL);
+    }
+    shell_m9p_initialized = true;
+    return 0;
+}
+
+static int ensure_m9p_session(void)
+{
+    int rc = ensure_m9p_client_initialized();
+
+    if (rc != 0) {
+        return rc;
+    }
+    if (shell_m9p_client.attached) {
+        return 0;
+    }
+
+    rc = m9p_client_attach(&shell_m9p_client, M9P_CLIENT_BUFFER_CAP, 1u, 0u);
+    if (rc != 0) {
+        return rc;
+    }
+
+    return 0;
 }
 
 /**
@@ -86,20 +338,90 @@ static void trim_line(char *line)
  */
 static void print_banner(void)
 {
-    puts("");
-    puts("pwos shell");
-    puts("  help      显示命令菜单(show commands)");
-    puts("  heap      打印可用堆内存信息(print free heap)");
-    puts("  echo ...  回显输入文本(print text)");
-    puts("  ls <dir>  模拟枚举目录节点内容(list directory - mock m9p)");
-    puts("  cat <file>模拟打印节点文件(read file - mock m9p)");
-    puts("  lua       执行内置测试用Lua剧本(run built-in Lua demo)");
-    puts("  lua ...   执行随后输入的一行Lua语句(execute inline Lua chunk)");
-    puts("  m9p_attach 测试向客户端服务端发起链接(test mini9p attach)");
-    puts("  m9p_walk  测试根据路径分配ID(test mini9p walk)");
-    puts("  m9p N     查阅 mini9p 状态码名称(print mini9p error name)");
-    puts("  reboot    系统重启(restart the board)");
-    puts("");
+    shell_puts("");
+    shell_puts("pwos shell");
+    shell_puts("  help                 显示命令菜单(show commands)");
+    shell_puts("  heap                 打印可用堆内存信息(print free heap)");
+    shell_puts("  echo ...             回显输入文本(print text)");
+    shell_puts("  ls <dir>             枚举远端目录(list remote directory)");
+    shell_puts("  cat <file>           读取远端文本文件(read remote file)");
+    shell_puts("  write <path> <text>  写入远端节点(write remote file)");
+    shell_puts("  stat <path>          打印远端节点元信息(print remote stat)");
+    shell_puts("  lua                  执行内置测试用Lua剧本(run built-in Lua demo)");
+    shell_puts("  lua ...              执行随后输入的一行Lua语句(execute inline Lua chunk)");
+    shell_puts("  m9p_attach           测试向从机发起 attach(test mini9p attach)");
+    shell_puts("  m9p_walk <path>      测试路径 walk(test mini9p walk)");
+    shell_puts("  set_transport ...    切换 transport(set uart/mock)");
+    shell_puts("  m9p N                查阅 mini9p 状态码名称(print mini9p error name)");
+    shell_puts("  reboot               系统重启(restart the board)");
+    shell_puts("  支持 /mcu1/... 映射到当前单从机节点");
+    shell_puts("");
+}
+
+static void print_m9p_result(const char *op, int rc)
+{
+    if (rc == 0) {
+        shell_printf("%s: ok\n", op);
+        return;
+    }
+
+    shell_printf("%s: rc=%d (%s)\n", op, rc, m9p_error_name((uint16_t)(rc < 0 ? -rc : rc)));
+}
+
+static const char *normalize_remote_path(const char *path, char *buffer, size_t buffer_cap)
+{
+    const char *normalized = path;
+
+    if (path == NULL || buffer == NULL || buffer_cap == 0u) {
+        return path;
+    }
+
+    if (strncmp(path, "/mcu1", 5u) == 0 && (path[5] == '\0' || path[5] == '/')) {
+        normalized = path[5] == '\0' ? "/" : path + 5;
+    } else if (strncmp(path, "mcu1/", 5u) == 0) {
+        normalized = path + 4;
+    }
+
+    snprintf(buffer, buffer_cap, "%s", normalized);
+    return buffer;
+}
+
+static char *next_token(char **cursor)
+{
+    char *token = *cursor;
+
+    if (token == NULL) {
+        return NULL;
+    }
+
+    token = skip_spaces(token);
+    if (*token == '\0') {
+        *cursor = token;
+        return NULL;
+    }
+
+    *cursor = token;
+    while (**cursor != '\0' && **cursor != ' ' && **cursor != '\t') {
+        ++(*cursor);
+    }
+    if (**cursor != '\0') {
+        *(*cursor)++ = '\0';
+    }
+
+    return token;
+}
+
+static void print_qid(const struct m9p_qid *qid)
+{
+    if (qid == NULL) {
+        return;
+    }
+
+    shell_printf(
+        "qid: type=0x%02x version=%u object=%lu\n",
+        (unsigned)qid->type,
+        (unsigned)qid->version,
+        (unsigned long)qid->object_id);
 }
 
 /**
@@ -126,17 +448,17 @@ static int handle_m9p(const char *args)
     long code;
 
     if (args == NULL || *args == '\0') {
-        puts("usage: m9p <code>");
+        shell_puts("usage: m9p <code>");
         return -1;
     }
 
     code = strtol(args, &end, 0);
     if (end == args) {
-        puts("invalid code");
+        shell_puts("invalid code");
         return -1;
     }
 
-    printf("m9p[%ld] = %s\n", code, m9p_error_name((uint16_t)code));
+    shell_printf("m9p[%ld] = %s\n", code, m9p_error_name((uint16_t)code));
     return 0;
 }
 
@@ -147,75 +469,326 @@ static int handle_m9p(const char *args)
 static int handle_echo(const char *args)
 {
     if (args == NULL) {
-        puts("");
+        shell_puts("");
         return 0;
     }
-    puts(args);
+    shell_puts(args);
     return 0;
+}
+
+static int handle_set_transport(const char *args)
+{
+    char buffer[SHELL_LINE_CAP];
+    char *cursor;
+    char *kind;
+    char *baud_text;
+    char *tx_text;
+    char *rx_text;
+
+    if (args == NULL || *args == '\0') {
+        shell_puts("usage: set_transport <uart [baud [tx rx]]|mock|spi|wifi>");
+        return -1;
+    }
+
+    snprintf(buffer, sizeof(buffer), "%s", args);
+    cursor = buffer;
+    kind = next_token(&cursor);
+    if (kind == NULL) {
+        shell_puts("usage: set_transport <uart [baud [tx rx]]|mock|spi|wifi>");
+        return -1;
+    }
+    if (strcmp(kind, "mock") == 0) {
+        shell_transport_kind = SHELL_TRANSPORT_MOCK;
+        reset_m9p_client();
+        shell_puts("transport set to mock");
+        return 0;
+    }
+    if (strcmp(kind, "uart") == 0) {
+        long baud_rate = shell_uart_transport.baud_rate;
+        long tx_pin = shell_uart_transport.tx_pin;
+        long rx_pin = shell_uart_transport.rx_pin;
+
+        baud_text = next_token(&cursor);
+        tx_text = next_token(&cursor);
+        rx_text = next_token(&cursor);
+        if (baud_text != NULL) {
+            baud_rate = strtol(baud_text, NULL, 10);
+        }
+        if (tx_text != NULL) {
+            tx_pin = strtol(tx_text, NULL, 10);
+        }
+        if (rx_text != NULL) {
+            rx_pin = strtol(rx_text, NULL, 10);
+        }
+        if (baud_rate <= 0 || tx_pin < 0 || rx_pin < 0) {
+            shell_puts("invalid uart settings");
+            return -1;
+        }
+
+        if (shell_uart_transport.initialized) {
+            (void)uart_driver_delete(shell_uart_transport.port);
+            shell_uart_transport.initialized = false;
+        }
+        shell_transport_kind = SHELL_TRANSPORT_UART;
+        shell_uart_transport.baud_rate = (int)baud_rate;
+        shell_uart_transport.tx_pin = (int)tx_pin;
+        shell_uart_transport.rx_pin = (int)rx_pin;
+        reset_m9p_client();
+        shell_printf(
+            "transport set to uart baud=%d tx=%d rx=%d\n",
+            shell_uart_transport.baud_rate,
+            shell_uart_transport.tx_pin,
+            shell_uart_transport.rx_pin);
+        return 0;
+    }
+    if (strcmp(kind, "spi") == 0 || strcmp(kind, "wifi") == 0) {
+        shell_printf("transport %s not implemented yet\n", kind);
+        return -(int)M9P_ERR_ENOTSUP;
+    }
+
+    shell_puts("unknown transport");
+    return -1;
 }
 
 /**
  * @brief 列表(ls)命令处理器示例
- * 模拟获取目录结构的操作。在此测试阶段中：
- *  1. 保证了在未连接从机的情况下，初始化本地 Mock 传输层；
- *  2. 构造一次 `m9p_client_open_path` (使用 M9P_OREAD 只读标志)，
- *     向目标文件描述符发起申请。
- *  3. 操作结束后如果通过，则关闭释放该 fid。
+ * 读取目录节点并解析远端返回的 dirent 列表。
  */
 static int handle_ls(const char *args)
 {
+    char normalized_path[SHELL_LINE_CAP];
+    struct m9p_open_result open_result;
+    struct m9p_dirent entries[16];
+    uint8_t raw[256];
+    uint16_t fid;
+    uint16_t count = sizeof(raw);
+    size_t entry_count;
+    int rc;
+    size_t idx;
+
     if (args == NULL || *args == '\0') {
-        puts("usage: ls <path>");
+        shell_puts("usage: ls <path>");
         return -1;
     }
-    printf("Listing path %s...\n", args);
-    ensure_m9p_mock_client();
-    
-    /* 仅仅为了测试执行目录开启的打包请求流程 */
-    uint16_t fid;
-    struct m9p_open_result out_res;
-    int rc = m9p_client_open_path(&shell_m9p_client, args, M9P_OREAD, &fid, &out_res);
-    
-    if (rc == 0) {
-        printf("Successfully opened path: %s (fid=%u)\n", args, fid);
-        m9p_client_clunk(&shell_m9p_client, fid);
-    } else {
-        printf("Mock ls failed (expected without real transport): rc=%d\n", rc);
+
+    rc = ensure_m9p_session();
+    if (rc != 0) {
+        print_m9p_result("attach", rc);
+        return rc;
     }
-    return 0;
+
+    rc = m9p_client_open_path(
+        &shell_m9p_client,
+        normalize_remote_path(args, normalized_path, sizeof(normalized_path)),
+        M9P_OREAD,
+        &fid,
+        &open_result);
+    if (rc != 0) {
+        print_m9p_result("ls open", rc);
+        return rc;
+    }
+
+    rc = m9p_client_read(&shell_m9p_client, fid, 0u, raw, &count);
+    if (rc != 0) {
+        (void)m9p_client_clunk(&shell_m9p_client, fid);
+        print_m9p_result("ls read", rc);
+        return rc;
+    }
+
+    entry_count = m9p_parse_dirents(raw, count, entries, sizeof(entries) / sizeof(entries[0]));
+    if (entry_count == 0u) {
+        shell_puts("(empty or not a directory)");
+    }
+    for (idx = 0u; idx < entry_count; ++idx) {
+        shell_printf(
+            "%s%s\n",
+            entries[idx].name,
+            (entries[idx].qid.type & M9P_QID_DIR) != 0u ? "/" : "");
+    }
+
+    rc = m9p_client_clunk(&shell_m9p_client, fid);
+    print_m9p_result("ls", rc);
+    return rc;
 }
 
 /**
  * @brief 查看文本(cat)命令处理器示例
- * 发起模拟的文件内容读取操作。在此阶段中：
- *  1. 发送文件句柄 open 请求；
- *  2. 发起基于该 `fid` 以 0 个字节偏移去发起的 `read` 请求，同时准备接收最多 64B 的模拟缓冲区；
- *  3. 当所有流程完成后执行 clunk 取消挂接。
+ * 打印远端文本节点内容。
  */
 static int handle_cat(const char *args)
 {
+    char normalized_path[SHELL_LINE_CAP];
+    uint8_t chunk[65];
+    struct m9p_open_result open_result;
+    uint16_t fid;
+    uint32_t offset = 0u;
+    int rc;
+    bool saw_data = false;
+
     if (args == NULL || *args == '\0') {
-        puts("usage: cat <path>");
+        shell_puts("usage: cat <path>");
         return -1;
     }
-    printf("Reading file %s...\n", args);
-    ensure_m9p_mock_client();
 
-    uint16_t fid;
-    struct m9p_open_result out_res;
-    int rc = m9p_client_open_path(&shell_m9p_client, args, M9P_OREAD, &fid, &out_res);
-    if (rc == 0) {
-        uint8_t buf[64];
-        uint16_t count = sizeof(buf);
-        rc = m9p_client_read(&shell_m9p_client, fid, 0, buf, &count);
-        if (rc == 0) {
-            printf("Mock cat read %u bytes.\n", count);
-        }
-        m9p_client_clunk(&shell_m9p_client, fid);
-    } else {
-         printf("Mock cat failed (expected without real transport): rc=%d\n", rc);
+    rc = ensure_m9p_session();
+    if (rc != 0) {
+        print_m9p_result("attach", rc);
+        return rc;
     }
-    return 0;
+
+    rc = m9p_client_open_path(
+        &shell_m9p_client,
+        normalize_remote_path(args, normalized_path, sizeof(normalized_path)),
+        M9P_OREAD,
+        &fid,
+        &open_result);
+    if (rc != 0) {
+        print_m9p_result("cat open", rc);
+        return rc;
+    }
+
+    do {
+        uint16_t count = 64u;
+
+        rc = m9p_client_read(&shell_m9p_client, fid, offset, chunk, &count);
+        if (rc != 0) {
+            (void)m9p_client_clunk(&shell_m9p_client, fid);
+            print_m9p_result("cat read", rc);
+            return rc;
+        }
+        if (count == 0u) {
+            break;
+        }
+        chunk[count] = '\0';
+        shell_emit_text((const char *)chunk);
+        saw_data = true;
+        offset += count;
+        if (count < 64u) {
+            break;
+        }
+    } while (true);
+
+    if (saw_data && offset > 0u && chunk[(offset - 1u) % 64u] != '\n') {
+        shell_emit_text("\n");
+    }
+
+    rc = m9p_client_clunk(&shell_m9p_client, fid);
+    print_m9p_result("cat", rc);
+    return rc;
+}
+
+static int handle_write(const char *args)
+{
+    char buffer[SHELL_LINE_CAP];
+    char normalized_path[SHELL_LINE_CAP];
+    char *path;
+    char *value;
+    struct m9p_open_result open_result;
+    uint16_t fid;
+    uint16_t written = 0u;
+    int rc;
+
+    if (args == NULL || *args == '\0') {
+        shell_puts("usage: write <path> <text>");
+        return -1;
+    }
+
+    snprintf(buffer, sizeof(buffer), "%s", args);
+    path = skip_spaces(buffer);
+    value = path;
+    while (*value != '\0' && *value != ' ' && *value != '\t') {
+        ++value;
+    }
+    if (*value == '\0') {
+        shell_puts("usage: write <path> <text>");
+        return -1;
+    }
+    *value++ = '\0';
+    value = skip_spaces(value);
+    if (*value == '\0') {
+        shell_puts("usage: write <path> <text>");
+        return -1;
+    }
+
+    rc = ensure_m9p_session();
+    if (rc != 0) {
+        print_m9p_result("attach", rc);
+        return rc;
+    }
+
+    rc = m9p_client_open_path(
+        &shell_m9p_client,
+        normalize_remote_path(path, normalized_path, sizeof(normalized_path)),
+        M9P_ORDWR,
+        &fid,
+        &open_result);
+    if (rc != 0) {
+        print_m9p_result("write open", rc);
+        return rc;
+    }
+
+    rc = m9p_client_write(
+        &shell_m9p_client,
+        fid,
+        0u,
+        (const uint8_t *)value,
+        (uint16_t)strlen(value),
+        &written);
+    if (rc != 0) {
+        (void)m9p_client_clunk(&shell_m9p_client, fid);
+        print_m9p_result("write data", rc);
+        return rc;
+    }
+
+    rc = m9p_client_clunk(&shell_m9p_client, fid);
+    shell_printf("write: wrote %u bytes\n", (unsigned)written);
+    print_m9p_result("write", rc);
+    return rc;
+}
+
+static int handle_stat(const char *args)
+{
+    char normalized_path[SHELL_LINE_CAP];
+    struct m9p_open_result open_result;
+    struct m9p_stat stat_info;
+    uint16_t fid;
+    int rc;
+
+    if (args == NULL || *args == '\0') {
+        shell_puts("usage: stat <path>");
+        return -1;
+    }
+
+    rc = ensure_m9p_session();
+    if (rc != 0) {
+        print_m9p_result("attach", rc);
+        return rc;
+    }
+
+    rc = m9p_client_open_path(
+        &shell_m9p_client,
+        normalize_remote_path(args, normalized_path, sizeof(normalized_path)),
+        M9P_OREAD,
+        &fid,
+        &open_result);
+    if (rc != 0) {
+        print_m9p_result("stat open", rc);
+        return rc;
+    }
+
+    rc = m9p_client_stat(&shell_m9p_client, fid, &stat_info);
+    if (rc == 0) {
+        shell_printf(
+            "name=%s size=%lu perm=0x%02x flags=0x%02x\n",
+            stat_info.name,
+            (unsigned long)stat_info.size,
+            (unsigned)stat_info.perm,
+            (unsigned)stat_info.flags);
+        print_qid(&stat_info.qid);
+    }
+    (void)m9p_client_clunk(&shell_m9p_client, fid);
+    print_m9p_result("stat", rc);
+    return rc;
 }
 
 /**
@@ -224,12 +797,26 @@ static int handle_cat(const char *args)
  */
 static int handle_m9p_attach(const char *args)
 {
-    printf("Attaching to mock mini9p server...\n");
-    ensure_m9p_mock_client();
+    int rc;
+
     (void)args;
-    
-    int rc = m9p_client_attach(&shell_m9p_client, 256, 1, 0);
-    printf("mock attach result: %d\n", rc);
+
+    rc = ensure_m9p_client_initialized();
+    if (rc != 0) {
+        print_m9p_result("init", rc);
+        return rc;
+    }
+
+    rc = m9p_client_attach(&shell_m9p_client, M9P_CLIENT_BUFFER_CAP, 1u, 0u);
+    if (rc == 0) {
+        shell_printf(
+            "attach: msize=%u max_fids=%u feature_bits=0x%08lx\n",
+            (unsigned)shell_m9p_client.negotiated_msize,
+            (unsigned)shell_m9p_client.max_fids,
+            (unsigned long)shell_m9p_client.feature_bits);
+        print_qid(&shell_m9p_client.root_qid);
+    }
+    print_m9p_result("attach", rc);
     return rc;
 }
 
@@ -239,18 +826,35 @@ static int handle_m9p_attach(const char *args)
  */
 static int handle_m9p_walk(const char *args)
 {
+    char normalized_path[SHELL_LINE_CAP];
     if (args == NULL || *args == '\0') {
-        puts("usage: m9p_walk <path>");
+        shell_puts("usage: m9p_walk <path>");
         return -1;
     }
-    printf("Walking to %s via mock mini9p...\n", args);
-    ensure_m9p_mock_client();
 
-    uint16_t fid;
-    struct m9p_qid qid;
-    int rc = m9p_client_walk_path(&shell_m9p_client, args, &fid, &qid);
-    printf("mock walk path rc=%d, matched fid=%u\n", rc, fid);
-    return rc;
+    {
+        uint16_t fid = 0u;
+        struct m9p_qid qid;
+        int rc = ensure_m9p_session();
+
+        if (rc != 0) {
+            print_m9p_result("attach", rc);
+            return rc;
+        }
+
+        rc = m9p_client_walk_path(
+            &shell_m9p_client,
+            normalize_remote_path(args, normalized_path, sizeof(normalized_path)),
+            &fid,
+            &qid);
+        if (rc == 0) {
+            shell_printf("walk: fid=%u\n", (unsigned)fid);
+            print_qid(&qid);
+            (void)m9p_client_clunk(&shell_m9p_client, fid);
+        }
+        print_m9p_result("walk", rc);
+        return rc;
+    }
 }
 
 /**
@@ -298,6 +902,12 @@ int shell_execute_line(const char *line)
     if (strcmp(command, "cat") == 0) {
         return handle_cat(args);
     }
+    if (strcmp(command, "write") == 0) {
+        return handle_write(args);
+    }
+    if (strcmp(command, "stat") == 0) {
+        return handle_stat(args);
+    }
     if (strcmp(command, "echo") == 0) {
         return handle_echo(args);
     }
@@ -307,12 +917,15 @@ int shell_execute_line(const char *line)
     if (strcmp(command, "m9p_walk") == 0) {
         return handle_m9p_walk(args);
     }
+    if (strcmp(command, "set_transport") == 0) {
+        return handle_set_transport(args);
+    }
     if (strcmp(command, "help") == 0) {
         print_banner();
         return 0;
     }
     if (strcmp(command, "heap") == 0) {
-        printf("free heap: %u bytes\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
+        shell_printf("free heap: %u bytes\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
         return 0;
     }
     if (strcmp(command, "lua") == 0) {
@@ -322,13 +935,13 @@ int shell_execute_line(const char *line)
         return handle_m9p(args);
     }
     if (strcmp(command, "reboot") == 0) {
-        puts("restarting...");
+        shell_puts("restarting...");
         fflush(stdout);
         esp_restart();
         return 0;
     }
 
-    printf("unknown command: %s\n", command);
+    shell_printf("unknown command: %s\n", command);
     return -1;
 }
 
@@ -342,9 +955,9 @@ void shell_run_boot_demo(void)
      * so a fresh boot already demonstrates useful behavior.
      */
     print_banner();
-    puts("[boot] running Lua demo...");
+    shell_puts("[boot] running Lua demo...");
     (void)shell_execute_line("lua");
-    puts("");
+    shell_puts("");
 }
 
 /**
@@ -361,7 +974,7 @@ static void shell_task(void *arg)
      * 因此这个无限循环可以非常符合经典终端的表现，阻塞态地等待 I/O 到来。
      */
     for (;;) {
-        printf("pwos> ");
+        shell_printf("pwos> ");
         fflush(stdout);
 
         if (fgets(line, sizeof(line), stdin) == NULL) {

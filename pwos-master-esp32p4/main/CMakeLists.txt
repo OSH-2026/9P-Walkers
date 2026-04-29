@@ -17,12 +17,19 @@ idf_component_register(
         "../mini9p/mini9p_client.c"
         "../mini9p/mini9p_protocol.c"
         "../shell/shell.c"
+        "../web/http_server.c"
+        "../web/websocket_shell.c"
         ${LUA_SRCS}
     PRIV_REQUIRES
+        driver
+        esp_http_server
         esp_timer
         spi_flash
+    EMBED_TXTFILES
+        "../web/index.html"
     INCLUDE_DIRS
         "."
         "../lua"
         "../mini9p"
-        "../shell")
+        "../shell"
+        "../web")

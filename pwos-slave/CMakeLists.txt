@@ -50,6 +50,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/User/drivers/storage/lfs_port.cpp
     ${CMAKE_SOURCE_DIR}/User/app/fs_selftest.c
     ${CMAKE_SOURCE_DIR}/User/app/vofa_firewater.c
+    ${CMAKE_SOURCE_DIR}/User/mini9p/mini9p_protocol.c
+    ${CMAKE_SOURCE_DIR}/User/mini9p/mini9p_server.c
 )
 
 # Add include paths
@@ -57,6 +59,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/User/fs
     ${CMAKE_SOURCE_DIR}/User/drivers/storage
     ${CMAKE_SOURCE_DIR}/User/app
+    ${CMAKE_SOURCE_DIR}/User/mini9p
 )
 
 # Add project symbols (macros)
