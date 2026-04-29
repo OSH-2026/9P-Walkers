@@ -4,6 +4,9 @@ pwos-master/
 !pwos-master-esp32p4/.vscode
 .codex
 
-#
-venv/
+# Personal AI assistant / notes
 CLAUDE.md
+pwos-master-esp32p4/vfs_bridge/mini9p.md
+
+# Local development files
+venv/

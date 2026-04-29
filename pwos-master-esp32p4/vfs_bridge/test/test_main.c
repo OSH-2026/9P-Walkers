@@ -8,6 +8,8 @@
 
 static int g_failures;
 
+typedef void (*test_fn)(void);
+
 /* mock_ctx 既保存模拟服务端的可控错误，也记录 cluster_vfs 实际发出的请求。
  * 测试用这些字段确认路径映射、fid 生命周期和错误处理是否符合预期。
  */
@@ -311,6 +313,22 @@ static void expect_mem(const char *name, const uint8_t *actual, const uint8_t *e
     }
 }
 
+static void run_test(const char *name, test_fn fn)
+{
+    int failures_before = g_failures;
+
+    printf("RUN  %s\n", name);
+    fn();
+    if (g_failures == failures_before)
+    {
+        printf("PASS %s\n", name);
+    }
+    else
+    {
+        printf("FAIL %s (%d new failure(s))\n", name, g_failures - failures_before);
+    }
+}
+
 /* 每个需要远端访问的测试都先建立一条 mcu1 直连路由，并完成 attach。
  * 这样 case 本身可以专注验证 open/stat/read/write/close 的行为。
  */
@@ -452,14 +470,14 @@ int main(void)
 {
     printf("cluster_vfs test runner start\n");
 
-    test_duplicate_route();
-    test_root_stat();
-    test_path_boundary();
-    test_open_read_close();
-    test_write_ordwr();
-    test_stat_success_clunks();
-    test_stat_error_clunks();
-    test_close_returns_clunk_error();
+    run_test("test_duplicate_route", test_duplicate_route);
+    run_test("test_root_stat", test_root_stat);
+    run_test("test_path_boundary", test_path_boundary);
+    run_test("test_open_read_close", test_open_read_close);
+    run_test("test_write_ordwr", test_write_ordwr);
+    run_test("test_stat_success_clunks", test_stat_success_clunks);
+    run_test("test_stat_error_clunks", test_stat_error_clunks);
+    run_test("test_close_returns_clunk_error", test_close_returns_clunk_error);
 
     if (g_failures != 0)
     {
