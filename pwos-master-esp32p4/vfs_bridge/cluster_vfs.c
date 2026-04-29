@@ -97,7 +97,7 @@ static int resolve_path(const char *path,
         const char *mapped_path = path;
         if (strcmp(g_routes[i].target, g_routes[i].next_hop) == 0)
         {
-            mapped_path = path_target + target_len;
+            mapped_path = path_target + target_len;// 路径映射：去掉 "/mcuN" 前缀
             if (mapped_path[0] == '\0')
             {
                 mapped_path = "/";
