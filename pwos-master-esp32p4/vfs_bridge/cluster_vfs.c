@@ -325,6 +325,53 @@ int cluster_vfs_write(uint16_t fd,
     return 0;
 }
 
+int cluster_vfs_read_path(const char *path,
+                          uint8_t *buf,
+                          uint16_t *in_out_len)
+{
+    uint16_t fd;
+    int ret;
+    int close_ret;
+
+    ret = cluster_vfs_open(path, M9P_OREAD, &fd);
+    if (ret < 0)
+    {
+        return ret;
+    }
+
+    ret = cluster_vfs_read(fd, buf, in_out_len);
+    close_ret = cluster_vfs_close(fd);
+    if (ret < 0)
+    {
+        return ret;
+    }
+    return close_ret;
+}
+
+int cluster_vfs_write_path(const char *path,
+                           const uint8_t *data,
+                           uint16_t len,
+                           uint16_t *out_written)
+{
+    uint16_t fd;
+    int ret;
+    int close_ret;
+
+    ret = cluster_vfs_open(path, M9P_OWRITE, &fd);
+    if (ret < 0)
+    {
+        return ret;
+    }
+
+    ret = cluster_vfs_write(fd, data, len, out_written);
+    close_ret = cluster_vfs_close(fd);
+    if (ret < 0)
+    {
+        return ret;
+    }
+    return close_ret;
+}
+
 int cluster_vfs_stat(const char *path,
                      struct m9p_stat *out_stat)
 {

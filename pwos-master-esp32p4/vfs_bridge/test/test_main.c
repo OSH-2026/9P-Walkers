@@ -443,6 +443,42 @@ static void test_write_ordwr(void)
     expect_int("write close", cluster_vfs_close(fd), 0);
 }
 
+/* read_path 是 open/read/close 的便捷封装，应复用同一套路径映射和 fid 生命周期。 */
+static void test_read_path_helper(void)
+{
+    static const uint8_t expected[] = {'d', 'a', 't', 'a'};
+    struct mock_ctx ctx;
+    struct m9p_client client;
+    uint8_t buf[8] = {0};
+    uint16_t len = sizeof(buf);
+
+    setup_attached_route(&ctx, &client);
+    expect_int("read_path", cluster_vfs_read_path("/mcu1/dev/temp", buf, &len), 0);
+    expect_str("read_path mapped path", ctx.last_walk_path, "/dev/temp");
+    expect_u16("read_path len", len, (uint16_t)sizeof(expected));
+    expect_mem("read_path data", buf, expected, sizeof(expected));
+    expect_int("read_path clunk count", ctx.clunk_count, 1);
+    expect_u16("read_path clunk fid", ctx.last_clunk_fid, ctx.last_open_fid);
+}
+
+/* write_path 是 open/write/close 的便捷封装，应使用写模式打开并自动释放 fid。 */
+static void test_write_path_helper(void)
+{
+    static const uint8_t data[] = {'o', 'k', '\n'};
+    struct mock_ctx ctx;
+    struct m9p_client client;
+    uint16_t written = 0u;
+
+    setup_attached_route(&ctx, &client);
+    expect_int("write_path", cluster_vfs_write_path("/mcu1/dev/temp", data, (uint16_t)sizeof(data), &written), 0);
+    expect_str("write_path mapped path", ctx.last_walk_path, "/dev/temp");
+    expect_int("write_path open mode", ctx.last_open_mode, M9P_OWRITE);
+    expect_u16("write_path count", written, (uint16_t)sizeof(data));
+    expect_u16("write_path fid", ctx.last_write_fid, ctx.last_open_fid);
+    expect_int("write_path clunk count", ctx.clunk_count, 1);
+    expect_u16("write_path clunk fid", ctx.last_clunk_fid, ctx.last_open_fid);
+}
+
 /* stat 成功后使用的是临时 fid，必须在返回前 clunk 掉。 */
 static void test_stat_success_clunks(void)
 {
@@ -496,6 +532,8 @@ int main(void)
     run_test("test_path_boundary", test_path_boundary);
     run_test("test_open_read_close", test_open_read_close);
     run_test("test_write_ordwr", test_write_ordwr);
+    run_test("test_read_path_helper", test_read_path_helper);
+    run_test("test_write_path_helper", test_write_path_helper);
     run_test("test_stat_success_clunks", test_stat_success_clunks);
     run_test("test_stat_error_clunks", test_stat_error_clunks);
     run_test("test_close_returns_clunk_error", test_close_returns_clunk_error);

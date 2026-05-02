@@ -165,6 +165,38 @@ int cluster_vfs_write(uint16_t fd,
                       uint16_t *out_written);
 
 /**
+ * @brief 读取集群路径对应文件的一段内容。
+ *
+ * 这是 open -> read -> close 的便捷封装，供 Shell/Lua/Web 这类上层模块
+ * 直接按路径读取，不需要自己管理本地 fd 和远端 fid。
+ *
+ * @param path 集群绝对路径，例如 "/mcu1/dev/temp"。
+ * @param buf 输出缓冲区。
+ * @param in_out_len 输入为期望读取字节数，输出为实际读取字节数。
+ * @return 0 表示成功；负错误码表示打开、读取或关闭失败。
+ */
+int cluster_vfs_read_path(const char *path,
+                          uint8_t *buf,
+                          uint16_t *in_out_len);
+
+/**
+ * @brief 向集群路径对应文件写入一段内容。
+ *
+ * 这是 open -> write -> close 的便捷封装，供 Shell/Lua/Web 这类上层模块
+ * 直接按路径写入，不需要自己管理本地 fd 和远端 fid。
+ *
+ * @param path 集群绝对路径，例如 "/mcu1/dev/led"。
+ * @param data 待写入数据缓冲区。
+ * @param len 期望写入字节数。
+ * @param out_written 输出远端确认写入的字节数。
+ * @return 0 表示成功；负错误码表示打开、写入或关闭失败。
+ */
+int cluster_vfs_write_path(const char *path,
+                           const uint8_t *data,
+                           uint16_t len,
+                           uint16_t *out_written);
+
+/**
  * @brief 查询集群路径对应对象的属性。
  *
  * 解析路径并转发到对应 Mini9P peer，返回远端 m9p_stat。
