@@ -399,6 +399,12 @@ int cluster_vfs_write_path(const char *path,
         return ret;
     }
 
+    if ((g_open_files[fd].qid.type & M9P_QID_DIR) != 0u)
+    {
+        (void)cluster_vfs_close(fd);
+        return -(int)M9P_ERR_EISDIR;
+    }
+
     ret = cluster_vfs_write(fd, data, len, out_written);
     close_ret = cluster_vfs_close(fd);
     if (ret < 0)

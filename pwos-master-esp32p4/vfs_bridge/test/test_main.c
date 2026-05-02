@@ -585,6 +585,23 @@ static void test_write_path_helper(void)
     expect_u16("write_path clunk fid", ctx.last_clunk_fid, ctx.last_open_fid);
 }
 
+/* 对目录执行 write_path 应返回 EISDIR，而不是向目录发起 write。 */
+static void test_write_path_dir_returns_eisdir(void)
+{
+    static const uint8_t data[] = {'o', 'k', '\n'};
+    struct mock_ctx ctx;
+    struct m9p_client client;
+    uint16_t written = 0u;
+
+    setup_attached_route(&ctx, &client);
+    expect_int("write_path dir",
+               cluster_vfs_write_path("/mcu1/dev", data, (uint16_t)sizeof(data), &written),
+               -(int)M9P_ERR_EISDIR);
+    expect_int("write_path dir no write", ctx.write_count, 0);
+    expect_int("write_path dir clunk count", ctx.clunk_count, 1);
+    expect_u16("write_path dir clunk fid", ctx.last_clunk_fid, ctx.last_open_fid);
+}
+
 /* 根目录列表由 cluster_vfs 本地合成，展示已注册的集群挂载点。 */
 static void test_list_root_mounts(void)
 {
@@ -734,6 +751,7 @@ int main(void)
     run_test("test_read_path_helper", test_read_path_helper);
     run_test("test_read_path_dir_returns_eisdir", test_read_path_dir_returns_eisdir);
     run_test("test_write_path_helper", test_write_path_helper);
+    run_test("test_write_path_dir_returns_eisdir", test_write_path_dir_returns_eisdir);
     run_test("test_list_root_mounts", test_list_root_mounts);
     run_test("test_list_remote_dir", test_list_remote_dir);
     run_test("test_list_file_returns_enotdir", test_list_file_returns_enotdir);
