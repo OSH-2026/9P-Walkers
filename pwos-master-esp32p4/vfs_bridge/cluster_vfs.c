@@ -227,11 +227,41 @@ int cluster_vfs_detach(const char *target)
         if (g_routes[i].state == CLUSTER_VFS_ROUTE_ATTACHED &&
             strcmp(g_routes[i].target, target) == 0)
         {
+            for (size_t j = 0; j < CLUSTER_VFS_MAX_OPEN; ++j)
+            {
+                if (g_open_files[j].used &&
+                    g_open_files[j].route &&
+                    strcmp(g_open_files[j].route->target, target) == 0)
+                {
+                    return -(int)M9P_ERR_EBUSY;
+                }
+            }
+
             g_routes[i].state = CLUSTER_VFS_ROUTE_READY;
             return 0;
         }
     }
     return -(int)M9P_ERR_ENOENT;
+}
+
+int cluster_vfs_get_route_state(const char *target,
+                                enum cluster_vfs_route_state *out_state)
+{
+    struct cluster_vfs_route *route;
+
+    if (!target || !out_state)
+    {
+        return -(int)M9P_ERR_EINVAL;
+    }
+
+    route = find_route(target);
+    if (!route)
+    {
+        return -(int)M9P_ERR_ENOENT;
+    }
+
+    *out_state = route->state;
+    return 0;
 }
 
 int cluster_vfs_open(const char *path, uint8_t mode, uint16_t *out_fd)
@@ -337,6 +367,12 @@ int cluster_vfs_read_path(const char *path,
     if (ret < 0)
     {
         return ret;
+    }
+
+    if ((g_open_files[fd].qid.type & M9P_QID_DIR) != 0u)
+    {
+        (void)cluster_vfs_close(fd);
+        return -(int)M9P_ERR_EISDIR;
     }
 
     ret = cluster_vfs_read(fd, buf, in_out_len);

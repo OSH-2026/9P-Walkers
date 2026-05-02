@@ -422,6 +422,31 @@ static void test_duplicate_route(void)
     expect_int("duplicate second add", cluster_vfs_add_direct("mcu1", &client), -(int)M9P_ERR_EBUSY);
 }
 
+/* route state 查询只暴露状态值，不允许外部拿到内部路由表指针。 */
+static void test_get_route_state(void)
+{
+    struct mock_ctx ctx;
+    struct m9p_client client;
+    enum cluster_vfs_route_state state = CLUSTER_VFS_ROUTE_EMPTY;
+
+    memset(&ctx, 0, sizeof(ctx));
+    cluster_vfs_init();
+    m9p_client_init(&client, mock_transport, &ctx);
+
+    expect_int("missing route state", cluster_vfs_get_route_state("mcu1", &state), -(int)M9P_ERR_ENOENT);
+    expect_int("state add", cluster_vfs_add_direct("mcu1", &client), 0);
+    expect_int("state ready rc", cluster_vfs_get_route_state("mcu1", &state), 0);
+    expect_int("state ready", state, CLUSTER_VFS_ROUTE_READY);
+
+    expect_int("state attach", cluster_vfs_attach("mcu1"), 0);
+    expect_int("state attached rc", cluster_vfs_get_route_state("mcu1", &state), 0);
+    expect_int("state attached", state, CLUSTER_VFS_ROUTE_ATTACHED);
+
+    expect_int("state detach", cluster_vfs_detach("mcu1"), 0);
+    expect_int("state detached rc", cluster_vfs_get_route_state("mcu1", &state), 0);
+    expect_int("state detached", state, CLUSTER_VFS_ROUTE_READY);
+}
+
 /* 静态注册层应在没有真实 transport 的情况下继续启动。
  * 当前 stub attach 会失败，因此 mcu1 只完成注册，尚不可访问。
  */
@@ -525,6 +550,21 @@ static void test_read_path_helper(void)
     expect_mem("read_path data", buf, expected, sizeof(expected));
     expect_int("read_path clunk count", ctx.clunk_count, 1);
     expect_u16("read_path clunk fid", ctx.last_clunk_fid, ctx.last_open_fid);
+}
+
+/* 对目录执行 read_path 应返回 EISDIR，而不是把目录项当作普通文件内容。 */
+static void test_read_path_dir_returns_eisdir(void)
+{
+    struct mock_ctx ctx;
+    struct m9p_client client;
+    uint8_t buf[8] = {0};
+    uint16_t len = sizeof(buf);
+
+    setup_attached_route(&ctx, &client);
+    expect_int("read_path dir", cluster_vfs_read_path("/mcu1/dev", buf, &len), -(int)M9P_ERR_EISDIR);
+    expect_int("read_path dir no read", ctx.read_count, 0);
+    expect_int("read_path dir clunk count", ctx.clunk_count, 1);
+    expect_u16("read_path dir clunk fid", ctx.last_clunk_fid, ctx.last_open_fid);
 }
 
 /* write_path 是 open/write/close 的便捷封装，应使用写模式打开并自动释放 fid。 */
@@ -647,17 +687,52 @@ static void test_close_returns_clunk_error(void)
     expect_int("close freed fd", cluster_vfs_close(fd), -(int)M9P_ERR_EFID);
 }
 
+/* remove_route 必须拒绝删除仍被打开 fd 使用的路由。 */
+static void test_remove_route_busy_until_close(void)
+{
+    struct mock_ctx ctx;
+    struct m9p_client client;
+    enum cluster_vfs_route_state state = CLUSTER_VFS_ROUTE_EMPTY;
+    uint16_t fd = 0xffffu;
+
+    setup_attached_route(&ctx, &client);
+    expect_int("remove busy open", cluster_vfs_open("/mcu1/dev/temp", M9P_OREAD, &fd), 0);
+    expect_int("remove busy", cluster_vfs_remove_route("mcu1"), -(int)M9P_ERR_EBUSY);
+    expect_int("remove busy close", cluster_vfs_close(fd), 0);
+    expect_int("remove after close", cluster_vfs_remove_route("mcu1"), 0);
+    expect_int("remove state gone", cluster_vfs_get_route_state("mcu1", &state), -(int)M9P_ERR_ENOENT);
+}
+
+/* detach 也必须拒绝断开仍被打开 fd 使用的路由。 */
+static void test_detach_busy_until_close(void)
+{
+    struct mock_ctx ctx;
+    struct m9p_client client;
+    enum cluster_vfs_route_state state = CLUSTER_VFS_ROUTE_EMPTY;
+    uint16_t fd = 0xffffu;
+
+    setup_attached_route(&ctx, &client);
+    expect_int("detach busy open", cluster_vfs_open("/mcu1/dev/temp", M9P_OREAD, &fd), 0);
+    expect_int("detach busy", cluster_vfs_detach("mcu1"), -(int)M9P_ERR_EBUSY);
+    expect_int("detach busy close", cluster_vfs_close(fd), 0);
+    expect_int("detach after close", cluster_vfs_detach("mcu1"), 0);
+    expect_int("detach state rc", cluster_vfs_get_route_state("mcu1", &state), 0);
+    expect_int("detach state ready", state, CLUSTER_VFS_ROUTE_READY);
+}
+
 int main(void)
 {
     printf("cluster_vfs test runner start\n");
 
     run_test("test_duplicate_route", test_duplicate_route);
+    run_test("test_get_route_state", test_get_route_state);
     run_test("test_static_nodes_attach_failure_continues", test_static_nodes_attach_failure_continues);
     run_test("test_root_stat", test_root_stat);
     run_test("test_path_boundary", test_path_boundary);
     run_test("test_open_read_close", test_open_read_close);
     run_test("test_write_ordwr", test_write_ordwr);
     run_test("test_read_path_helper", test_read_path_helper);
+    run_test("test_read_path_dir_returns_eisdir", test_read_path_dir_returns_eisdir);
     run_test("test_write_path_helper", test_write_path_helper);
     run_test("test_list_root_mounts", test_list_root_mounts);
     run_test("test_list_remote_dir", test_list_remote_dir);
@@ -665,6 +740,8 @@ int main(void)
     run_test("test_stat_success_clunks", test_stat_success_clunks);
     run_test("test_stat_error_clunks", test_stat_error_clunks);
     run_test("test_close_returns_clunk_error", test_close_returns_clunk_error);
+    run_test("test_remove_route_busy_until_close", test_remove_route_busy_until_close);
+    run_test("test_detach_busy_until_close", test_detach_busy_until_close);
 
     if (g_failures != 0)
     {

@@ -250,10 +250,22 @@ ctx.clunk_error_code = M9P_ERR_EIO;
 
 ## 7. 当前测试边界
 
-当前测试已经覆盖核心单路由调用链，但仍有一些未覆盖或尚未实现的方向：
+当前测试已经覆盖核心单路由调用链和一组上层便捷接口：
+
+- `cluster_vfs_read_path()`：路径级读取普通文件，并自动 close。
+- `cluster_vfs_write_path()`：路径级写入普通文件，并自动 close。
+- `cluster_vfs_list("/")`：本地合成根目录挂载点。
+- `cluster_vfs_list("/mcu1/dev")`：读取并解析远端目录项。
+- `cluster_vfs_read_path()` 读目录返回 `-M9P_ERR_EISDIR`。
+- `cluster_vfs_list()` 列普通文件返回 `-M9P_ERR_ENOTDIR`。
+- `cluster_vfs_get_route_state()` 查询 READY/ATTACHED/READY 状态变化。
+- `cluster_vfs_remove_route()` 在 fd 未关闭时返回 `-M9P_ERR_EBUSY`。
+- `cluster_vfs_detach()` 在 fd 未关闭时返回 `-M9P_ERR_EBUSY`。
+
+仍有一些未覆盖或尚未实现的方向：
 
 - `cluster_vfs_add_route()` 尚未在 `cluster_vfs.c` 实现，因此没有中继路由测试。
-- `cluster_vfs_read_path()`、`cluster_vfs_write_path()` 和 `cluster_vfs_list()` 尚未实现，因此没有路径级快捷接口和目录读取测试。
+- `cluster_vfs_list_routes()` 尚未实现，因此没有批量路由枚举测试。
 - 没有覆盖真实 UART/WiFi transport。
 - 没有覆盖并发访问、自动重连、route offline 状态。
 - 没有覆盖路径规范化，例如 `//`、`.`、`..`。
@@ -265,6 +277,5 @@ ctx.clunk_error_code = M9P_ERR_EIO;
 - `cluster_vfs_add_route("mcu3", "mcu1", client)` 的全局路径转发测试。
 - `/mcu1` 和 `/mcu1/` 映射到远端 `/` 的测试。
 - open 表满时返回 `-M9P_ERR_EBUSY` 的测试。
-- remove route 在 fd 未关闭时返回 busy 的测试。
 - detach 后 open/stat 返回无路由或不可用错误的测试。
-- `cluster_vfs_list("/")` 返回挂载点的测试。
+- `cluster_vfs_list_routes()` 批量导出 `target/next_hop/state` 的测试。

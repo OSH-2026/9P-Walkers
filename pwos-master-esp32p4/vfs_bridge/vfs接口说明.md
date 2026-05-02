@@ -242,10 +242,43 @@ int cluster_vfs_detach(const char *target);
 当前实现：
 
 - 查找 `ATTACHED` 状态的 target。
+- 如果该 route 仍被任何打开的 fd 使用，则返回 busy。
 - 把状态改回 `READY`。
-- 不主动关闭已有 fd。
 
-调用者应先关闭该路由上的 fd，再 detach。
+调用者应先关闭该路由上的 fd，再 detach；VFS 不会替调用者主动关闭已有 fd。
+
+返回：
+
+```text
+0                  成功
+-M9P_ERR_EINVAL    target 为空
+-M9P_ERR_EBUSY     仍有 fd 使用该路由
+-M9P_ERR_ENOENT    未找到 ATTACHED 状态的目标路由
+```
+
+---
+
+### `cluster_vfs_get_route_state`
+
+查询目标节点当前路由状态。
+
+```c
+int cluster_vfs_get_route_state(const char *target,
+                                enum cluster_vfs_route_state *out_state);
+```
+
+用途：
+
+- 给 Shell/Web 查询单个节点是否已注册、已 attach 或处于预留离线状态。
+- 只拷贝状态值，不暴露内部路由表指针，避免外部修改 VFS 状态。
+
+返回：
+
+```text
+0                  成功
+-M9P_ERR_EINVAL    target 或 out_state 为空
+-M9P_ERR_ENOENT    未找到该 target
+```
 
 ---
 
@@ -352,6 +385,112 @@ M9P_OREAD 不允许写
 
 ---
 
+### `cluster_vfs_read_path`
+
+按路径读取普通文件内容。
+
+```c
+int cluster_vfs_read_path(const char *path,
+                          uint8_t *buf,
+                          uint16_t *in_out_len);
+```
+
+流程：
+
+```text
+cluster_vfs_open(path, M9P_OREAD)
+-> 检查 qid.type，若目标是目录则返回 EISDIR
+-> cluster_vfs_read
+-> cluster_vfs_close
+```
+
+用途：
+
+- 给 `cat`、Lua `read()`、Web API 这类上层接口使用。
+- 上层不需要管理本地 fd 或远端 fid。
+
+返回：
+
+```text
+0                  成功
+-M9P_ERR_EISDIR    期望普通文件，但目标是目录
+其他负错误码       open/read/close 返回的错误
+```
+
+---
+
+### `cluster_vfs_write_path`
+
+按路径写入普通文件内容。
+
+```c
+int cluster_vfs_write_path(const char *path,
+                           const uint8_t *data,
+                           uint16_t len,
+                           uint16_t *out_written);
+```
+
+流程：
+
+```text
+cluster_vfs_open(path, M9P_OWRITE)
+-> cluster_vfs_write
+-> cluster_vfs_close
+```
+
+用途：
+
+- 给 `echo > path`、Lua `write()`、Web API 这类上层接口使用。
+- 上层不需要管理本地 fd 或远端 fid。
+
+---
+
+### `cluster_vfs_list`
+
+枚举目录项。
+
+```c
+int cluster_vfs_list(const char *path,
+                     struct m9p_dirent *entries,
+                     size_t max_entries,
+                     size_t *out_count);
+```
+
+根路径 `/`：
+
+- 由 `cluster_vfs` 本地合成已注册节点的挂载点目录项。
+- 不访问远端节点。
+- 例如已注册 `mcu1` 时，`cluster_vfs_list("/")` 返回目录项 `mcu1`。
+
+远端目录 `/mcuN/...`：
+
+```text
+cluster_vfs_open(path, M9P_OREAD)
+-> 检查 qid.type，若目标不是目录则返回 ENOTDIR
+-> m9p_client_read(dir_offset)
+-> m9p_parse_dirents
+-> dir_offset += 本次解析出的目录项数
+-> 重复 read，直到 EOF 或 entries 填满
+-> cluster_vfs_close
+```
+
+注意：
+
+- 普通文件 offset 按字节推进。
+- 目录读取 offset 按“已消费目录项数量”推进，这是 `docs/protocol_spec.md` 的目录读取语义。
+- 因此目录列表不能直接复用 `cluster_vfs_read()` 的字节 offset 推进逻辑。
+
+返回：
+
+```text
+0                  成功
+-M9P_ERR_ENOTDIR   期望目录，但目标不是目录
+-M9P_ERR_EIO       远端目录数据无法解析为 dirent
+其他负错误码       open/read/close 返回的错误
+```
+
+---
+
 ### `cluster_vfs_stat`
 
 查询集群路径对应对象的属性。
@@ -432,15 +571,13 @@ target=mcu3, next_hop=mcu1
 
 当前 `cluster_vfs.c` 尚未实现该函数，主流程暂时应使用 `cluster_vfs_add_direct()`。
 
-设计文档中提到的路径级快捷接口和目录列表接口：
+后续也可以增加批量路由枚举接口，用于 Web 拓扑或 `nodes` 调试命令：
 
 ```text
-cluster_vfs_read_path
-cluster_vfs_write_path
-cluster_vfs_list
+cluster_vfs_list_routes
 ```
 
-当前也还没有落地为公开实现。
+当前已有 `cluster_vfs_get_route_state()` 可查询单个节点状态；批量枚举暂未实现。
 
 ---
 
@@ -452,10 +589,15 @@ cluster_vfs_list
 
 文件访问:
   open -> read/write -> close
+  read_path / write_path
 
 属性查询:
   stat("/")              -> 本地合成虚拟根目录
   stat("/mcuN/...")      -> walk -> stat -> clunk
+
+目录枚举:
+  list("/")              -> 本地合成挂载点目录项
+  list("/mcuN/...")      -> open -> read dirents -> parse -> close
 
 当前最常用流程:
   m9p_client_init
@@ -484,4 +626,22 @@ cluster_vfs_attach("mcu1");
 cluster_vfs_open("/mcu1/dev/temp", M9P_OREAD, &fd);
 cluster_vfs_read(fd, buf, &len);
 cluster_vfs_close(fd);
+```
+
+典型路径级读取：
+
+```c
+uint8_t buf[64];
+uint16_t len = sizeof(buf);
+
+cluster_vfs_read_path("/mcu1/dev/temp", buf, &len);
+```
+
+典型目录枚举：
+
+```c
+struct m9p_dirent entries[8];
+size_t count = 0;
+
+cluster_vfs_list("/mcu1/dev", entries, 8, &count);
 ```

@@ -120,6 +120,19 @@ int cluster_vfs_attach(const char *target);
 int cluster_vfs_detach(const char *target);
 
 /**
+ * @brief 查询目标节点当前路由状态。
+ *
+ * 该接口只返回状态值，不暴露内部路由表指针，供 Shell/Web 显示节点
+ * 是否已注册、已 attach 或离线。
+ *
+ * @param target 全局目标节点名，例如 "mcu1"。
+ * @param out_state 输出路由状态。
+ * @return 0 表示成功；负错误码表示参数非法或目标路由不存在。
+ */
+int cluster_vfs_get_route_state(const char *target,
+                                enum cluster_vfs_route_state *out_state);
+
+/**
  * @brief 打开集群统一路径下的文件或目录。
  *
  * 解析 `/mcuN/...` 路径，查找目标路由，转换为发送给下一跳的路径，

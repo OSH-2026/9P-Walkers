@@ -244,8 +244,12 @@ payload:        原始 Mini9P frame
 - `cluster_vfs_open`
 - `cluster_vfs_read`
 - `cluster_vfs_write`
+- `cluster_vfs_read_path`
+- `cluster_vfs_write_path`
+- `cluster_vfs_list`
 - `cluster_vfs_stat`
 - `cluster_vfs_close`
+- `cluster_vfs_get_route_state`
 
 已覆盖的修复点：
 
@@ -258,13 +262,20 @@ payload:        原始 Mini9P frame
 - remove route 防御空 route 指针。
 - `/` 支持虚拟根目录 stat。
 - `M9P_OREAD == 0` 的读权限判断已修正。
+- 路径级 `read_path/write_path` 已封装 open/read-write/close。
+- `read_path` 对目录返回 `EISDIR`，避免把目录项当普通文件内容。
+- `list("/")` 会本地合成已注册节点挂载点。
+- `list("/mcuN/...")` 会读取并解析远端目录项。
+- `list` 对普通文件返回 `ENOTDIR`，避免把文件内容误解析为目录项。
+- 可通过 `cluster_vfs_get_route_state()` 查询单个节点路由状态。
+- remove route 和 detach 都会在仍有打开 fd 时返回 busy。
 
 尚未实现或仍是规划：
 
 - `cluster_vfs_add_route()` 的中继路由实现。
-- `cluster_vfs_read_path()`、`cluster_vfs_write_path()`。
-- `cluster_vfs_list()` 和根目录挂载点枚举。
+- `cluster_vfs_list_routes()` 这类批量路由枚举接口。
 - routing header、多跳转发、动态路由。
+- `OFFLINE` 状态的主动使用和自动重连策略。
 - 自动重连、并发锁、目录缓存。
 
 ## 9. 测试状态
@@ -288,6 +299,12 @@ pwos-master-esp32p4/vfs_bridge/test/test_main.c
 - 根目录 stat。
 - 路径边界匹配。
 - open/read/write/stat/close。
+- 路径级 read/write。
+- 根目录和远端目录 list。
+- 对目录 read_path 返回 `EISDIR`。
+- 对普通文件 list 返回 `ENOTDIR`。
+- 单节点 route state 查询。
+- remove route / detach 在 fd 未关闭时返回 busy。
 - stat 成功和失败路径的 clunk。
 - close 返回远端 clunk 错误。
 
