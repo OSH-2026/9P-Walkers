@@ -7,6 +7,7 @@ cluster_vfs 是轻量级集群 VFS 桥接层，不是完整文件系统；
 #define CLUSTER_VFS_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "mini9p_client.h"
@@ -195,6 +196,23 @@ int cluster_vfs_write_path(const char *path,
                            const uint8_t *data,
                            uint16_t len,
                            uint16_t *out_written);
+
+/**
+ * @brief 枚举集群路径对应的目录项。
+ *
+ * 对根目录 "/"，cluster_vfs 会在本地合成已注册节点的挂载点目录项；
+ * 对远端路径，则执行 open(dir, OREAD) -> read(dir) -> parse dirent -> close。
+ *
+ * @param path 集群绝对路径，例如 "/" 或 "/mcu1/dev"。
+ * @param entries 输出目录项数组；max_entries 为 0 时可为 NULL。
+ * @param max_entries entries 数组最多可容纳的目录项数量。
+ * @param out_count 输出实际写入 entries 的目录项数量。
+ * @return 0 表示成功；负错误码表示参数非法、打开/读取/关闭失败或目录数据非法。
+ */
+int cluster_vfs_list(const char *path,
+                     struct m9p_dirent *entries,
+                     size_t max_entries,
+                     size_t *out_count);
 
 /**
  * @brief 查询集群路径对应对象的属性。

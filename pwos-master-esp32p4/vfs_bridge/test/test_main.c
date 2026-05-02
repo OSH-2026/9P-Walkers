@@ -27,6 +27,7 @@ struct mock_ctx {
     uint16_t last_open_fid;
     uint8_t last_open_mode;
     uint16_t last_read_fid;
+    uint32_t last_read_offset;
     uint16_t last_read_count;
     uint16_t last_write_fid;
     uint16_t last_write_count;
@@ -56,6 +57,14 @@ static void put_le32(uint8_t *dst, uint32_t value)
 static uint16_t get_le16(const uint8_t *src)
 {
     return (uint16_t)src[0] | (uint16_t)((uint16_t)src[1] << 8);
+}
+
+static uint32_t get_le32(const uint8_t *src)
+{
+    return (uint32_t)src[0] |
+           ((uint32_t)src[1] << 8) |
+           ((uint32_t)src[2] << 16) |
+           ((uint32_t)src[3] << 24);
 }
 
 static void encode_qid(uint8_t *dst, uint8_t type, uint16_t version, uint32_t object_id)
@@ -130,6 +139,15 @@ static int send_ropen(uint16_t tag, uint8_t *rx, size_t rx_cap, size_t *rx_len)
     return send_frame(M9P_ROPEN, tag, payload, sizeof(payload), rx, rx_cap, rx_len);
 }
 
+static int send_ropen_with_type(uint16_t tag, uint8_t qid_type, uint8_t *rx, size_t rx_cap, size_t *rx_len)
+{
+    uint8_t payload[10];
+
+    encode_qid(payload, qid_type, 2u, 42u);
+    put_le16(payload + 8, 128u);
+    return send_frame(M9P_ROPEN, tag, payload, sizeof(payload), rx, rx_cap, rx_len);
+}
+
 static int send_rread(uint16_t tag, uint8_t *rx, size_t rx_cap, size_t *rx_len)
 {
     static const uint8_t data[] = {'d', 'a', 't', 'a'};
@@ -138,6 +156,41 @@ static int send_rread(uint16_t tag, uint8_t *rx, size_t rx_cap, size_t *rx_len)
     put_le16(payload, (uint16_t)sizeof(data));
     memcpy(payload + 2, data, sizeof(data));
     return send_frame(M9P_RREAD, tag, payload, sizeof(payload), rx, rx_cap, rx_len);
+}
+
+static size_t encode_dirent(uint8_t *dst,
+                            uint8_t type,
+                            uint32_t object_id,
+                            uint8_t flags,
+                            const char *name)
+{
+    size_t name_len = strlen(name);
+
+    encode_qid(dst, type, 1u, object_id);
+    dst[8] = 0u;
+    dst[9] = flags;
+    dst[10] = (uint8_t)name_len;
+    memcpy(dst + 11, name, name_len);
+    return 11u + name_len;
+}
+
+static int send_rread_empty(uint16_t tag, uint8_t *rx, size_t rx_cap, size_t *rx_len)
+{
+    uint8_t payload[2];
+
+    put_le16(payload, 0u);
+    return send_frame(M9P_RREAD, tag, payload, sizeof(payload), rx, rx_cap, rx_len);
+}
+
+static int send_rread_dir(uint16_t tag, uint8_t *rx, size_t rx_cap, size_t *rx_len)
+{
+    uint8_t payload[64];
+    size_t offset = 2u;
+
+    offset += encode_dirent(payload + offset, M9P_QID_DEVICE, 51u, M9P_STAT_DEVICE, "temp");
+    offset += encode_dirent(payload + offset, M9P_QID_DEVICE, 52u, M9P_STAT_DEVICE, "led");
+    put_le16(payload, (uint16_t)(offset - 2u));
+    return send_frame(M9P_RREAD, tag, payload, (uint16_t)offset, rx, rx_cap, rx_len);
 }
 
 static int send_rwrite(uint16_t tag, uint16_t count, uint8_t *rx, size_t rx_cap, size_t *rx_len)
@@ -224,6 +277,10 @@ static int mock_transport(void *ctx_ptr,
         ctx->open_count++;
         ctx->last_open_fid = get_le16(frame.payload);
         ctx->last_open_mode = frame.payload[2];
+        if (strcmp(ctx->last_walk_path, "/dev") == 0)
+        {
+            return send_ropen_with_type(frame.tag, M9P_QID_DIR, rx, rx_cap, rx_len);
+        }
         return send_ropen(frame.tag, rx, rx_cap, rx_len);
 
     case M9P_TREAD:
@@ -233,7 +290,16 @@ static int mock_transport(void *ctx_ptr,
         }
         ctx->read_count++;
         ctx->last_read_fid = get_le16(frame.payload);
+        ctx->last_read_offset = get_le32(frame.payload + 2);
         ctx->last_read_count = get_le16(frame.payload + 6);
+        if (strcmp(ctx->last_walk_path, "/dev") == 0)
+        {
+            if (ctx->last_read_offset == 0u)
+            {
+                return send_rread_dir(frame.tag, rx, rx_cap, rx_len);
+            }
+            return send_rread_empty(frame.tag, rx, rx_cap, rx_len);
+        }
         return send_rread(frame.tag, rx, rx_cap, rx_len);
 
     case M9P_TWRITE:
@@ -479,6 +545,65 @@ static void test_write_path_helper(void)
     expect_u16("write_path clunk fid", ctx.last_clunk_fid, ctx.last_open_fid);
 }
 
+/* 根目录列表由 cluster_vfs 本地合成，展示已注册的集群挂载点。 */
+static void test_list_root_mounts(void)
+{
+    struct mock_ctx ctx;
+    struct m9p_client client;
+    struct m9p_dirent entries[2];
+    size_t count = 0u;
+
+    memset(&ctx, 0, sizeof(ctx));
+    memset(entries, 0, sizeof(entries));
+    cluster_vfs_init();
+    m9p_client_init(&client, mock_transport, &ctx);
+    expect_int("list root add", cluster_vfs_add_direct("mcu1", &client), 0);
+
+    expect_int("list root", cluster_vfs_list("/", entries, 2u, &count), 0);
+    expect_int("list root count", (int)count, 1);
+    expect_str("list root name", entries[0].name, "mcu1");
+    expect_int("list root dir flag", (entries[0].flags & M9P_STAT_DIR) != 0, 1);
+    expect_int("list root virtual flag", (entries[0].flags & M9P_STAT_VIRTUAL) != 0, 1);
+    expect_int("list root no remote read", ctx.read_count, 0);
+}
+
+/* 远端目录列表通过 open/read/parse dirent/close 完成。 */
+static void test_list_remote_dir(void)
+{
+    struct mock_ctx ctx;
+    struct m9p_client client;
+    struct m9p_dirent entries[4];
+    size_t count = 0u;
+
+    memset(entries, 0, sizeof(entries));
+    setup_attached_route(&ctx, &client);
+
+    expect_int("list remote", cluster_vfs_list("/mcu1/dev", entries, 4u, &count), 0);
+    expect_str("list remote mapped path", ctx.last_walk_path, "/dev");
+    expect_int("list remote count", (int)count, 2);
+    expect_str("list remote first", entries[0].name, "temp");
+    expect_str("list remote second", entries[1].name, "led");
+    expect_int("list remote read count", ctx.read_count, 2);
+    expect_int("list remote final offset", (int)ctx.last_read_offset, 2);
+    expect_int("list remote clunk count", ctx.clunk_count, 1);
+    expect_u16("list remote clunk fid", ctx.last_clunk_fid, ctx.last_open_fid);
+}
+
+/* 对普通文件执行 list 应返回 ENOTDIR，而不是把文件内容误解析为目录项。 */
+static void test_list_file_returns_enotdir(void)
+{
+    struct mock_ctx ctx;
+    struct m9p_client client;
+    struct m9p_dirent entries[2];
+    size_t count = 0u;
+
+    setup_attached_route(&ctx, &client);
+    expect_int("list file", cluster_vfs_list("/mcu1/dev/temp", entries, 2u, &count), -(int)M9P_ERR_ENOTDIR);
+    expect_int("list file count", (int)count, 0);
+    expect_int("list file no read", ctx.read_count, 0);
+    expect_int("list file clunk count", ctx.clunk_count, 1);
+}
+
 /* stat 成功后使用的是临时 fid，必须在返回前 clunk 掉。 */
 static void test_stat_success_clunks(void)
 {
@@ -534,6 +659,9 @@ int main(void)
     run_test("test_write_ordwr", test_write_ordwr);
     run_test("test_read_path_helper", test_read_path_helper);
     run_test("test_write_path_helper", test_write_path_helper);
+    run_test("test_list_root_mounts", test_list_root_mounts);
+    run_test("test_list_remote_dir", test_list_remote_dir);
+    run_test("test_list_file_returns_enotdir", test_list_file_returns_enotdir);
     run_test("test_stat_success_clunks", test_stat_success_clunks);
     run_test("test_stat_error_clunks", test_stat_error_clunks);
     run_test("test_close_returns_clunk_error", test_close_returns_clunk_error);

@@ -372,6 +372,113 @@ int cluster_vfs_write_path(const char *path,
     return close_ret;
 }
 
+static int list_root(struct m9p_dirent *entries,
+                     size_t max_entries,
+                     size_t *out_count)
+{
+    size_t produced = 0u;
+
+    for (size_t i = 0; i < CLUSTER_VFS_MAX_ROUTES && produced < max_entries; ++i)
+    {
+        if (g_routes[i].state == CLUSTER_VFS_ROUTE_EMPTY)
+        {
+            continue;
+        }
+
+        memset(&entries[produced], 0, sizeof(entries[produced]));
+        entries[produced].qid.type = M9P_QID_DIR | M9P_QID_VIRTUAL;
+        entries[produced].qid.object_id = (uint32_t)(i + 1u);
+        entries[produced].flags = M9P_STAT_DIR | M9P_STAT_VIRTUAL;
+        strncpy(entries[produced].name, g_routes[i].target, M9P_MAX_NAME_LEN);
+        entries[produced].name[M9P_MAX_NAME_LEN] = '\0';
+        ++produced;
+    }
+
+    *out_count = produced;
+    return 0;
+}
+
+int cluster_vfs_list(const char *path,
+                     struct m9p_dirent *entries,
+                     size_t max_entries,
+                     size_t *out_count)
+{
+    uint16_t fd;
+    struct cluster_vfs_file *file;
+    uint32_t dir_offset = 0u;
+    size_t produced = 0u;
+    int ret;
+    int close_ret;
+
+    if (!path || !out_count || (max_entries > 0u && !entries))
+    {
+        return -(int)M9P_ERR_EINVAL;
+    }
+
+    *out_count = 0u;
+    if (max_entries == 0u)
+    {
+        return 0;
+    }
+
+    if (strcmp(path, "/") == 0)
+    {
+        return list_root(entries, max_entries, out_count);
+    }
+
+    ret = cluster_vfs_open(path, M9P_OREAD, &fd);
+    if (ret < 0)
+    {
+        return ret;
+    }
+
+    file = &g_open_files[fd];
+    if ((file->qid.type & M9P_QID_DIR) == 0u)
+    {
+        (void)cluster_vfs_close(fd);
+        return -(int)M9P_ERR_ENOTDIR;
+    }
+
+    while (produced < max_entries)
+    {
+        uint8_t read_buf[M9P_CLIENT_BUFFER_CAP];
+        uint16_t read_len = sizeof(read_buf);
+        size_t parsed;
+
+        ret = m9p_client_read(file->route->client, file->remote_fid, dir_offset, read_buf, &read_len);
+        if (ret < 0)
+        {
+            break;
+        }
+
+        if (read_len == 0u)
+        {
+            break;
+        }
+
+        parsed = m9p_parse_dirents(read_buf,
+                                   read_len,
+                                   entries + produced,
+                                   max_entries - produced);
+        if (parsed == 0u)
+        {
+            ret = -(int)M9P_ERR_EIO;
+            break;
+        }
+
+        produced += parsed;
+        dir_offset += (uint32_t)parsed;
+    }
+
+    *out_count = produced;
+    close_ret = cluster_vfs_close(fd);
+    if (ret < 0)
+    {
+        return ret;
+    }
+    return close_ret;
+}
+
 int cluster_vfs_stat(const char *path,
                      struct m9p_stat *out_stat)
 {
