@@ -9,6 +9,7 @@ set(MINI9P_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../mini9p)
 
 add_executable(cluster_vfs_test
     test_main.c
+    ${VFS_BRIDGE_ROOT}/cluster_config.c
     ${VFS_BRIDGE_ROOT}/cluster_vfs.c
     ${MINI9P_ROOT}/mini9p_client.c
     ${MINI9P_ROOT}/mini9p_protocol.c

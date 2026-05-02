@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "cluster_config.h"
 #include "cluster_vfs.h"
 
 static int g_failures;
@@ -355,6 +356,25 @@ static void test_duplicate_route(void)
     expect_int("duplicate second add", cluster_vfs_add_direct("mcu1", &client), -(int)M9P_ERR_EBUSY);
 }
 
+/* 静态注册层应在没有真实 transport 的情况下继续启动。
+ * 当前 stub attach 会失败，因此 mcu1 只完成注册，尚不可访问。
+ */
+static void test_static_nodes_attach_failure_continues(void)
+{
+    struct mock_ctx ctx;
+    struct m9p_client client;
+    uint16_t fd = 0xffffu;
+
+    memset(&ctx, 0, sizeof(ctx));
+    cluster_vfs_init();
+
+    expect_int("static init", cluster_init_static_nodes(), 0);
+
+    m9p_client_init(&client, mock_transport, &ctx);
+    expect_int("static duplicate mcu1", cluster_vfs_add_direct("mcu1", &client), -(int)M9P_ERR_EBUSY);
+    expect_int("static unattached open", cluster_vfs_open("/mcu1/dev/temp", M9P_OREAD, &fd), -(int)M9P_ERR_ENOENT);
+}
+
 /* "/" 是 cluster_vfs 本地合成的虚拟根目录，不应该被转发给远端节点。 */
 static void test_root_stat(void)
 {
@@ -471,6 +491,7 @@ int main(void)
     printf("cluster_vfs test runner start\n");
 
     run_test("test_duplicate_route", test_duplicate_route);
+    run_test("test_static_nodes_attach_failure_continues", test_static_nodes_attach_failure_continues);
     run_test("test_root_stat", test_root_stat);
     run_test("test_path_boundary", test_path_boundary);
     run_test("test_open_read_close", test_open_read_close);
