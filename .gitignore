@@ -1,6 +1,7 @@
 build/
 pwos-master/
 .vscode/
+pwos-slave/.vscode/
 # !pwos-master-esp32p4/.vscode
 .codex
 
