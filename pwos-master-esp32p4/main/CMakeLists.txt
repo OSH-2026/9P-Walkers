@@ -16,6 +16,7 @@ idf_component_register(
         "lua_port.c"
         "../mini9p/mini9p_client.c"
         "../mini9p/mini9p_protocol.c"
+        "../transport/uart_transport.c"
         "../vfs_bridge/cluster_config.c"
         "../vfs_bridge/cluster_vfs.c"
         "../shell/shell.c"
@@ -27,5 +28,6 @@ idf_component_register(
         "."
         "../lua"
         "../mini9p"
+        "../transport"
         "../vfs_bridge"
         "../shell")

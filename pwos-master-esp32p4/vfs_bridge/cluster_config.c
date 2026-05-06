@@ -7,7 +7,7 @@
 
 #include "cluster_vfs.h"
 #include "mini9p_client.h"
-#include "mini9p_protocol.h"
+#include "uart_transport.h"
 
 struct cluster_static_node {
     const char *name;             /* 用户可见的节点名，例如 "mcu1" */
@@ -17,33 +17,10 @@ struct cluster_static_node {
 
 static struct m9p_client g_mcu1_client;
 
-/* 静态节点注册阶段使用的占位 transport。
- *
- * 它只用于让 m9p_client 完成初始化和路由注册，不模拟真实从机响应，
- * 因此 attach/read/write 等实际通信都会返回 ENOTSUP。等 UART/SPI
- * transport 接好后，应在这里替换为真实的收发回调。
- */
-static int cluster_stub_transport(void *transport_ctx,
-                                  const uint8_t *tx_data,
-                                  size_t tx_len,
-                                  uint8_t *rx_data,
-                                  size_t rx_cap,
-                                  size_t *rx_len)
-{
-    (void)transport_ctx;
-    (void)tx_data;
-    (void)tx_len;
-    (void)rx_data;
-    (void)rx_cap;
-
-    if (rx_len) {
-        *rx_len = 0u;
-    }
-    return -(int)M9P_ERR_ENOTSUP;
-}
-
 int cluster_init_static_nodes(void)
 {
+    int ret;
+
     /* 第一版只注册一个静态节点。真实 UART/SPI transport 接好后，
      * 只需要替换 g_mcu1_client 的 transport 初始化，不需要改 cluster_vfs。
      */
@@ -55,10 +32,17 @@ int cluster_init_static_nodes(void)
         },
     };
 
-    m9p_client_init(&g_mcu1_client, cluster_stub_transport, NULL);
+    ret = m9p_uart_transport_init_default();
+    if (ret < 0) {
+        return ret;
+    }
+
+    m9p_client_init(&g_mcu1_client,
+                    m9p_uart_transport_request,
+                    m9p_uart_transport_default());
 
     for (size_t i = 0; i < sizeof(nodes) / sizeof(nodes[0]); ++i) {
-        int ret = cluster_vfs_add_direct(nodes[i].name, nodes[i].client);
+        ret = cluster_vfs_add_direct(nodes[i].name, nodes[i].client);
         if (ret < 0) {
             return ret;
         }

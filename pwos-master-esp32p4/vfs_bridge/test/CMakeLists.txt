@@ -9,6 +9,7 @@ set(MINI9P_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../mini9p)
 
 add_executable(cluster_vfs_test
     test_main.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../transport/uart_transport.c
     ${VFS_BRIDGE_ROOT}/cluster_config.c
     ${VFS_BRIDGE_ROOT}/cluster_vfs.c
     ${MINI9P_ROOT}/mini9p_client.c
@@ -16,6 +17,7 @@ add_executable(cluster_vfs_test
 )
 
 target_include_directories(cluster_vfs_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../transport
     ${VFS_BRIDGE_ROOT}
     ${MINI9P_ROOT}
 )
