@@ -252,8 +252,8 @@ bool m9p_encode_frame(
     size_t out_cap,
     size_t *out_len)
 {
-    const uint16_t frame_len_field = (uint16_t)(4u + payload_len);
-    const size_t total_len = 2u + 2u + (size_t)frame_len_field + 2u;
+    uint16_t frame_len_field;
+    size_t total_len;
     uint16_t crc;
 
     if (out_frame == NULL || out_len == NULL) {
@@ -262,6 +262,12 @@ bool m9p_encode_frame(
     if (payload_len > 0u && payload == NULL) {
         return false;
     }
+    if (payload_len > (uint16_t)(UINT16_MAX - 4u)) {
+        return false;
+    }
+
+    frame_len_field = (uint16_t)(4u + payload_len);
+    total_len = 2u + 2u + (size_t)frame_len_field + 2u;
     if (out_cap < total_len) {
         return false;
     }
@@ -1069,7 +1075,7 @@ bool m9p_parse_rread(
     }
 
     count = get_le16(frame->payload);
-    if ((uint16_t)(2u + count) > frame->payload_len) {
+    if (2u + (size_t)count > frame->payload_len) {
         return false;
     }
     if (count > 0u && (out_data == NULL || out_cap < count)) {
