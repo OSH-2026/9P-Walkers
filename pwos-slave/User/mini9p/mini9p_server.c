@@ -516,7 +516,7 @@ int m9p_server_init(struct m9p_server *server, const struct m9p_server_config *c
 }
 
 /**
- * @brief 重置 session：清空所有 fid 表项并恢复初始状态。
+ * @brief 重置 session：隐式 clunk 所有活跃 fid，清空表项并恢复初始状态。
  * @param[in,out] server Mini9P server 实例；为 NULL 时不做任何操作。
  */
 void m9p_server_reset_session(struct m9p_server *server)
@@ -528,7 +528,12 @@ void m9p_server_reset_session(struct m9p_server *server)
     }
 
     for (i = 0u; i < server->max_fids; ++i) {
-        clear_fid(&server->fids[i]);
+        struct m9p_server_fid *entry = &server->fids[i];
+
+        if (entry->in_use && server->ops != NULL && server->ops->clunk != NULL) {
+            (void)server->ops->clunk(server->ops_ctx, entry->path, entry->open);
+        }
+        clear_fid(entry);
     }
     server->attached = false;
     server->root_fid = M9P_SERVER_ROOT_FID;
