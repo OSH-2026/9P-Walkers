@@ -4,10 +4,14 @@
 #include <stdio.h>
 #include <string.h>
 
+/* ---- test configuration ---- */
+
 #define TEST_BUFFER_CAP 512u
 #define TEST_ROOT_FID 0u
 #define TEST_HEALTH_FID 1u
 #define TEST_BAD_FID 99u
+
+/* ---- fake file tree ---- */
 
 struct fake_node {
     const char *path;
@@ -53,6 +57,8 @@ static const struct fake_node g_nodes[] = {
         "ok\n",
     },
 };
+
+/* ---- fake server ops (callback implementations) ---- */
 
 static const struct fake_node *find_node(const char *path)
 {
@@ -173,6 +179,8 @@ static int fake_clunk(void *ctx, const char *path, bool was_open)
     return 0;
 }
 
+/* ---- ops vtable ---- */
+
 static const struct m9p_server_ops g_fake_ops = {
     fake_stat,
     fake_open,
@@ -180,6 +188,8 @@ static const struct m9p_server_ops g_fake_ops = {
     fake_write,
     fake_clunk,
 };
+
+/* ---- test infrastructure (assertions, helpers) ---- */
 
 static int g_failures;
 
@@ -309,6 +319,8 @@ static bool open_health(struct m9p_server *server, uint8_t *request, uint8_t *re
     return frame.type == M9P_ROPEN;
 }
 
+/* ---- test cases ---- */
+
 static void test_happy_path(void)
 {
     struct m9p_server server;
@@ -396,8 +408,11 @@ static void test_invalid_fid(void)
     expect_true(error.code == M9P_ERR_EFID, "invalid fid code EFID");
 }
 
+/* ---- test runner ---- */
+
 int main(void)
 {
+    /* run each test case; failures accumulate in g_failures */
     test_happy_path();
     test_missing_path();
     test_invalid_fid();

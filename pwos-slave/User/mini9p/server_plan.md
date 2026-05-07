@@ -9,30 +9,51 @@ ESP32 cluster_vfs
   -> mini9p_client
   -> UART request
   -> STM32 mini9p_server
-  -> 本地文件/虚拟节点
+  -> 本地 VFS/backend
   -> STM32 mini9p_server
   -> UART response
   -> mini9p_client
   -> ESP32 cluster_vfs
 ```
 
-## 1. 先补齐协议层
-
-当前协议辅助函数主要偏 client 侧：
+设计边界：
 
 ```text
-构造 T* 请求
-解析 R* 响应
+mini9p_protocol  只负责帧编解码、T* 解析、R* 构造
+mini9p_server    负责会话状态、fid 生命周期、请求分发、Rerror
+backend/本地 VFS 负责真正的 stat/open/read/write/clunk
+uart_transport   负责收发完整 mini9p frame
 ```
 
-server 侧需要补齐相反方向：
+## 当前状态
+
+已完成：
 
 ```text
-解析 T* 请求
-构造 R* 响应
+[x] 协议源文件改名为 mini9p_protocol.c
+[x] CMake 已加入 mini9p_protocol.c / mini9p_server.c / uart_transport.c
+[x] 协议层已补齐 server 方向能力
+[x] mini9p_server 核心状态机已实现
+[x] server 资源访问已抽象为 m9p_server_ops
+[x] PC testbench 已建立
+[x] fake backend 已覆盖 attach/walk/open/read/clunk 与常见错误路径
 ```
 
-需要新增请求解析：
+仍未完成：
+
+```text
+[ ] 从机本地 backend / 本地 VFS 尚未实现
+[ ] m9p_server 尚未在从机启动链路中初始化
+[ ] m9p_server_handle_frame 尚未接入 m9p_uart_transport_serve_once
+[ ] 还没有上板验证 master <-> slave UART 闭环
+[ ] master 侧 cluster_vfs/cluster_config 目前也尚未接入 app_main 启动链路
+```
+
+## 1. 协议层
+
+状态：已完成。
+
+server 侧需要的请求解析已经补齐：
 
 ```text
 m9p_parse_tattach
@@ -44,7 +65,7 @@ m9p_parse_tstat
 m9p_parse_tclunk
 ```
 
-需要新增响应构造：
+server 侧需要的响应构造已经补齐：
 
 ```text
 m9p_build_rattach
@@ -57,78 +78,93 @@ m9p_build_rclunk
 m9p_build_rerror
 ```
 
-协议定义保持 client/server 共用，不拆成两套不兼容的协议文件。
+协议定义仍保持 client/server 共用，不拆成两套不兼容的协议文件。
 
-## 2. 实现 server 核心
+## 2. Server 核心
 
-在 `mini9p_server.h/.c` 中增加轻量 server 状态：
+状态：已完成第一版。
+
+`mini9p_server.h/.c` 已包含轻量 server 状态：
 
 ```text
 attached 标志
 fid 表
-fid -> path/qid/open 状态
+fid -> path/qid/open/mode/iounit 状态
 协商后的 msize
 根目录 qid
+后端 ops 指针
+read 暂存 buffer
 ```
 
-对外提供一个能直接接入 `m9p_uart_transport_serve_once()` 的处理函数：
+对外入口：
 
-```text
-m9p_server_handle_frame(...)
+```c
+int m9p_server_handle_frame(void *server_ctx,
+                            const uint8_t *request_data,
+                            size_t request_len,
+                            uint8_t *response_data,
+                            size_t response_cap,
+                            size_t *response_len);
 ```
 
-handler 主要流程：
+handler 流程：
 
 ```text
 解码 frame
+检查 version / msize
 按 T* type 分发
-校验 fid/path/mode
-调用本地 backend
+校验 fid/path/mode/open 状态
+调用本地 backend ops
 构造 R* 或 Rerror
 ```
 
-实现时需要对照 master 侧 `mini9p_client.c`：
+已实现请求集合：
 
 ```text
-m9p_client_attach    <-> handle_tattach
-m9p_client_walk      <-> handle_twalk
-m9p_client_open      <-> handle_topen
-m9p_client_read      <-> handle_tread
-m9p_client_write     <-> handle_twrite
-m9p_client_stat      <-> handle_tstat
-m9p_client_clunk     <-> handle_tclunk
+Tattach -> Rattach
+Twalk   -> Rwalk
+Topen   -> Ropen
+Tread   -> Rread
+Twrite  -> Rwrite
+Tstat   -> Rstat
+Tclunk  -> Rclunk
+错误    -> Rerror
 ```
 
-重点确认：
+关键约束：
 
 ```text
-payload 字段顺序一致
-响应 type 正确
-tag 原样返回
-fid 生命周期一致
-错误统一返回 Rerror
+payload 字段顺序与 master mini9p_client 对齐
+响应 tag 原样返回
+R* type 与请求匹配
+read/write 只能作用于已 open fid
+walk 不能作用于已 open fid
+不存在 fid 返回 EFID
+非法路径返回 EINVAL/ENOENT
+后端错误统一转换为 Rerror
 ```
 
-## 3. 建立模块 testbench
+## 3. PC Testbench
 
-在 PC 上先跑 server 模块测试，避免所有问题都等上板后才暴露。
+状态：已完成第一版。
 
-建议目录：
+目录：
 
 ```text
 pwos-slave/User/mini9p/test/
 ```
 
-第一版 testbench 只验证协议和 server 状态机：
+测试链路：
 
 ```text
-client 构造 T* 请求
-server handle frame
-server 返回 R* 响应
-client parse R* 成功
+test_main
+  -> m9p_build_t*
+  -> m9p_server_handle_frame
+  -> fake backend
+  -> m9p_parse_r*
 ```
 
-优先覆盖：
+当前覆盖：
 
 ```text
 Tattach -> Rattach
@@ -140,61 +176,220 @@ Tclunk -> Rclunk
 非法 fid -> Rerror EFID
 ```
 
-testbench 使用 fake backend，不依赖 UART、HAL 或 littlefs。
+运行方式：
 
-## 4. 先做最小 backend
-
-先做只读虚拟节点，不急着完整接 littlefs：
-
-```text
-/sys/health
-/verify/fs_selftest.txt
-/
+```bash
+cd pwos-slave/User/mini9p/test
+cmake -S . -B build
+cmake --build build
+./build/mini9p_server_test
 ```
 
-等请求/响应闭环稳定后，再通过 `lfs_port_fs()` 接入 littlefs。
+期望输出：
 
-## 5. MVP 请求集合
+```text
+mini9p_server_test: ok
+```
 
-第一阶段必须跑通：
+## 4. Backend / 本地 VFS
+
+状态：下一步。
+
+不要让 `mini9p_server` 直接绑定 littlefs。推荐先做一个从机本地资源层：
+
+```text
+mini9p_server
+  -> m9p_server_ops
+  -> slave local_vfs/backend
+      -> littlefs 普通文件
+      -> 设备节点
+      -> 状态节点
+      -> 计算任务节点
+```
+
+第一版 backend 可以先只做只读虚拟节点：
+
+```text
+/
+/sys
+/sys/health
+/verify/fs_selftest.txt
+```
+
+建议节点行为：
+
+```text
+/                  目录，可读
+/sys              目录，可读
+/sys/health       文件，只读，返回 "ok\n" 或系统状态
+/verify/fs_selftest.txt  文件，只读，返回最近一次 fs_selftest 结果
+```
+
+等请求/响应闭环稳定后，再通过已有存储接口接入 littlefs。
+
+## 5. UART 集成
+
+状态：待完成。
+
+从机侧已有 `m9p_uart_transport_serve_once()`，server 入口签名已兼容。需要补一个运行时初始化点，形状类似：
+
+```c
+static struct m9p_server g_m9p_server;
+static uint8_t g_m9p_rx[512];
+static uint8_t g_m9p_tx[512];
+
+void mini9p_service_init(void)
+{
+    struct m9p_server_config config;
+
+    m9p_server_get_default_config(&config);
+    config.ops = &slave_vfs_ops;
+    config.ops_ctx = &slave_vfs;
+    (void)m9p_server_init(&g_m9p_server, &config);
+    (void)m9p_uart_transport_init_default();
+}
+
+void mini9p_service_poll_once(void)
+{
+    (void)m9p_uart_transport_serve_once(m9p_uart_transport_default(),
+                                        m9p_server_handle_frame,
+                                        &g_m9p_server,
+                                        g_m9p_rx,
+                                        sizeof(g_m9p_rx),
+                                        NULL,
+                                        g_m9p_tx,
+                                        sizeof(g_m9p_tx),
+                                        NULL);
+}
+```
+
+实际函数名和任务调度位置可按从机工程启动结构调整。
+
+## 6. PC Master Emulator 串口联调
+
+状态：推荐作为上板第一阶段。
+
+在接 ESP32 master 之前，先用 PC 通过 USB-TTL 直接模拟 master，单独验证 STM32 侧 `uart_transport + mini9p_server + backend`。
+
+技术路线：
+
+```text
+PC (master emulator)                    STM32F407 (slave)
+┌───────────────────┐    USB-TTL       ┌────────────────────┐
+│ m9p_build_tattach │─── TX ──────────► PA3 (USART2 RX)     │
+│ m9p_build_twalk   │                  │ uart_transport.c   │
+│ m9p_build_tread   │◄── RX ────────── PA2 (USART2 TX)     │
+│ m9p_parse_rattach │                  │ mini9p_server.c    │
+│ ...               │                  │ -> local backend   │
+└───────────────────┘                  └────────────────────┘
+```
+
+硬件连接：
+
+```text
+USB-TTL TX -> STM32 PA3 / USART2_RX
+USB-TTL RX -> STM32 PA2 / USART2_TX
+USB-TTL GND -> STM32 GND
+```
+
+注意 USB-TTL 建议使用 3.3V TTL 电平。USART2 当前计划使用 1Mbaud；如果首测不稳定，可以先降到 115200 或 921600 排查。
+
+PC 端实现建议：
+
+```text
+第一版优先用 C 写 master emulator
+复用 mini9p_protocol.c/.h 构造 T*、解析 R*
+串口读帧时按 mini9p 长度字段读取完整 frame
+```
+
+PC 收帧流程必须和协议一致：
+
+```text
+先读 4 字节：'9' 'P' frame_len_le16
+计算 total_len = frame_len + 6
+继续读满剩余字节
+调用 m9p_decode_frame()
+再调用 m9p_parse_r*
+```
+
+最小联调命令序列：
 
 ```text
 Tattach -> Rattach
-Twalk   -> Rwalk
-Topen   -> Ropen
-Tread   -> Rread
-Tclunk  -> Rclunk
-Rerror  -> 所有非法情况
+Twalk /sys/health -> Rwalk
+Topen OREAD -> Ropen
+Tread -> Rread("ok\n")
+Tclunk -> Rclunk
 ```
 
-第二阶段再补：
+这个阶段的价值：
 
 ```text
-Tstat   -> Rstat
-Twrite  -> Rwrite
-目录读取
+绕开 ESP32 app_main / cluster_vfs / shell 复杂度
+优先确认 STM32 UART 收发和 mini9p_server 状态机
+PC 端更容易打印十六进制帧、重发请求和定位 CRC/长度错误
 ```
 
-## 6. 工程集成
+## 7. Master 侧联调前置
 
-把这些源文件加入 `pwos-slave/CMakeLists.txt`：
+状态：待完成。
+
+主机侧目前有：
 
 ```text
-User/mini9p/mini9p_protocol..c
-User/mini9p/mini9p_server.c
+cluster_vfs
+cluster_config
+mini9p_client
+uart_transport
 ```
 
-第一版稳定后，建议把 `mini9p_protocol..c` 改名为 `mini9p_protocol.c`。
+但 `cluster_vfs_init()` / `cluster_init_static_nodes()` 还没有接进 `app_main()`。联调前需要在 ESP32 启动链路中初始化：
 
-## 7. 验证标准
+```c
+cluster_vfs_init();
+cluster_init_static_nodes();
+```
 
-最小成功标准：
+这样 `/mcu1/...` 才能映射到 `g_mcu1_client`，再通过默认 UART transport 发送到 STM32。
+
+## 8. 验证标准
+
+PC 端最小标准：
 
 ```text
-PC testbench 可以跑通只读闭环
-master 可以 attach 到 STM32
-master 可以 open/read/clunk 一个文件
-非法路径返回 Rerror，而不是卡死
+testbench 可稳定通过
+错误路径返回 Rerror，而不是 handler 直接失败
 一次 request 只产生一次 response
-cluster_vfs_read_path("/mcu1/...", ...) 能读到数据
+```
+
+从机端最小标准：
+
+```text
+UART 能收到完整 Tattach 并返回 Rattach
+UART 能收到 Twalk/Topen/Tread/Tclunk 并返回对应 R*
+非法路径返回 Rerror ENOENT
+非法 fid 返回 Rerror EFID
+```
+
+主从闭环标准：
+
+```text
+master 可以 attach 到 STM32
+cluster_vfs_read_path("/mcu1/sys/health", ...) 能读到 "ok\n"
+多次 open/read/clunk 后 fid 表不泄漏
+断线重连后 attach 能重建 session
+```
+
+## 9. 后续增强
+
+后续可以逐步补：
+
+```text
+目录读取 dirent 编码
+Twrite 写控制节点
+littlefs 文件节点
+设备节点 /dev/*
+计算任务节点 /compute/*
+更完整的 testbench 错误路径
+从机本地 VFS 与未来分布式 route 层
 ```
