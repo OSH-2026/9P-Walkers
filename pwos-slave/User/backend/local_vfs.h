@@ -1,10 +1,10 @@
 /**
  * @file local_vfs.h
- * @brief Minimal slave-side virtual VFS exposed through Mini9P.
+ * @brief 极简从机虚拟 VFS，通过 Mini9P 对外暴露。
  *
- * local_vfs v1 exposes only local virtual nodes. It does not mount littlefs,
- * own persistent files, or keep backend file handles. The Mini9P server owns
- * fid/session state and calls this module through m9p_server_ops.
+ * local_vfs v1 仅暴露本地虚拟节点。它不挂载 littlefs、不持有持久文件、
+ * 也不保留后端文件句柄。Mini9P 服务器负责 fid/会话状态，并通过
+ * m9p_server_ops 调用本模块。
  */
 
 #ifndef LOCAL_VFS_H
@@ -18,46 +18,46 @@
 extern "C" {
 #endif
 
-/** Default I/O unit advertised through Ropen when config.iounit is zero. */
+/** 当 config.iounit 为零时，Ropen 中通告的默认 I/O 单元大小。 */
 #define LOCAL_VFS_DEFAULT_IOUNIT 128u
 
 /**
- * @brief local_vfs initialization parameters.
+ * @brief local_vfs 初始化参数。
  */
 struct local_vfs_config {
-    uint16_t iounit; /**< Preferred per-read payload size; zero selects LOCAL_VFS_DEFAULT_IOUNIT. */
+    uint16_t iounit; /**< 每次读取的期望载荷大小；为零则使用 LOCAL_VFS_DEFAULT_IOUNIT。 */
 };
 
 /**
- * @brief Runtime state for the minimal local VFS.
+ * @brief 极简本地 VFS 的运行时状态。
  */
 struct local_vfs {
-    uint16_t iounit; /**< Advertised I/O unit. */
+    uint16_t iounit; /**< 通告的 I/O 单元大小。 */
 };
 
 /**
- * @brief Fill a local_vfs_config with defaults.
+ * @brief 用默认值填充 local_vfs_config。
  *
- * @param[out] out_config Destination config. NULL is ignored.
+ * @param[out] out_config 目标配置。NULL 将被忽略。
  */
 void local_vfs_get_default_config(struct local_vfs_config *out_config);
 
 /**
- * @brief Initialize a local_vfs instance.
+ * @brief 初始化 local_vfs 实例。
  *
- * @param[out] vfs    VFS instance to initialize.
- * @param[in] config Optional config. NULL uses defaults.
- * @return 0 on success, negative Mini9P error code on failure.
+ * @param[out] vfs    要初始化的 VFS 实例。
+ * @param[in] config 可选配置。NULL 表示使用默认值。
+ * @return 成功返回 0，失败返回负的 Mini9P 错误码。
  */
 int local_vfs_init(struct local_vfs *vfs, const struct local_vfs_config *config);
 
 /**
- * @brief Return the Mini9P server callback table implemented by local_vfs.
+ * @brief 返回 local_vfs 实现的 Mini9P 服务器回调表。
  *
- * Pass this pointer to m9p_server_config::ops and the local_vfs instance to
- * m9p_server_config::ops_ctx.
+ * 将该指针传给 m9p_server_config::ops，并将 local_vfs 实例传给
+ * m9p_server_config::ops_ctx。
  *
- * @return Pointer to a static m9p_server_ops table.
+ * @return 指向静态 m9p_server_ops 表的指针。
  */
 const struct m9p_server_ops *local_vfs_ops(void);
 
