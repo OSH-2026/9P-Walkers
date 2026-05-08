@@ -714,6 +714,7 @@ static int handle_topen(struct m9p_server *server,
     struct m9p_stat stat;
     struct m9p_qid qid;
     uint16_t iounit;
+    bool backend_opened = false;
     int rc;
 
     if (!server->attached) {
@@ -747,9 +748,13 @@ static int handle_topen(struct m9p_server *server,
         if (rc != 0) {
             return build_error_from_rc(frame->tag, rc, response_data, response_cap, response_len);
         }
+        backend_opened = true;
     }
 
     if (!m9p_build_ropen(frame->tag, &qid, clamp_iounit(server, iounit), response_data, response_cap, response_len)) {
+        if (backend_opened && server->ops->clunk != NULL) {
+            (void)server->ops->clunk(server->ops_ctx, entry->path, true);
+        }
         return -(int)M9P_ERR_EMSIZE;
     }
 
@@ -965,13 +970,13 @@ static int handle_tclunk(struct m9p_server *server,
     if (server->ops != NULL && server->ops->clunk != NULL) {
         rc = normalize_backend_rc(server->ops->clunk(server->ops_ctx, entry->path, entry->open));
     }
+    if (rc != 0) {
+        return build_error_from_rc(frame->tag, rc, response_data, response_cap, response_len);
+    }
+
     clear_fid(entry);
     if (!has_live_fids(server)) {
         server->attached = false;
-    }
-
-    if (rc != 0) {
-        return build_error_from_rc(frame->tag, rc, response_data, response_cap, response_len);
     }
 
     if (!m9p_build_rclunk(frame->tag, response_data, response_cap, response_len)) {
