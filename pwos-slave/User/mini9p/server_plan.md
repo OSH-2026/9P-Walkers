@@ -193,7 +193,7 @@ mini9p_server_test: ok
 
 ## 4. Backend / 本地 VFS
 
-状态：下一步。
+状态：已开始。
 
 不要让 `mini9p_server` 直接绑定 littlefs。推荐先做一个从机本地资源层：
 
@@ -213,19 +213,55 @@ mini9p_server
 /
 /sys
 /sys/health
-/verify/fs_selftest.txt
 ```
 
 建议节点行为：
 
 ```text
-/                  目录，可读
-/sys              目录，可读
-/sys/health       文件，只读，返回 "ok\n" 或系统状态
-/verify/fs_selftest.txt  文件，只读，返回最近一次 fs_selftest 结果
+/             目录，可读
+/sys          目录，可读
+/sys/health   文件，只读，返回 "ok\n" 或系统状态
 ```
 
-等请求/响应闭环稳定后，再通过已有存储接口接入 littlefs。
+等本地虚拟节点闭环稳定后，再把 littlefs 作为 provider 接入。
+
+当前已新增 `User/backend/` 目录，local VFS v1 只保留本地虚拟节点：
+
+```text
+User/backend/local_vfs.h   public API + local VFS 状态结构
+User/backend/local_vfs.c   m9p_server_ops glue + 虚拟节点 + dirent 编码
+User/backend/test/         backend 独立 PC testbench
+```
+
+`local_vfs` 接口边界如下：
+
+```text
+m9p_server
+  -> m9p_server_ops
+  -> local_vfs
+      -> virtual nodes (/sys, /sys/health)
+```
+
+local VFS v1 行为：
+
+```text
+stat(path)      -> 查询固定虚拟节点
+open(path,mode) -> 只支持 OREAD
+read(path,off)  -> 虚拟文件直接切片；目录即时编码 dirent
+write(path,off) -> 返回 ENOTSUP
+clunk(path)     -> 无资源释放，参数合法则返回 0
+```
+
+第一版仍保持 server 的 path-based ops。由于 local VFS v1 只有虚拟节点，不保存真实文件句柄，也不需要 open table。后续接入 littlefs、设备节点或计算节点时，再评估是否把 ops 升级为 handle/cookie-based：
+
+```c
+open(ctx, path, mode, out_handle, out_qid, out_iounit)
+read(ctx, handle, offset, ...)
+write(ctx, handle, offset, ...)
+clunk(ctx, handle)
+```
+
+但当前 stop-and-wait UART 闭环阶段，path-based backend 足够小，风险也更低。
 
 ## 5. UART 集成
 
