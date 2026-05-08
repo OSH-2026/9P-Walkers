@@ -389,7 +389,7 @@ bool m9p_build_twalk(
     uint8_t payload[4u + 1u + M9P_MAX_PATH_LEN];
     size_t path_len = 0u;
 
-    if (path != NULL && path[0] != '\0' && !(path[0] == '/' && path[1] == '\0')) {
+    if (path != NULL && path[0] != '\0') {
         path_len = strlen(path);
     }
     if (path_len > M9P_MAX_PATH_LEN) {

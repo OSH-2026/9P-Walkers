@@ -9,6 +9,8 @@
 #define TEST_BUFFER_CAP 512u
 #define TEST_ROOT_FID 0u
 #define TEST_HEALTH_FID 1u
+#define TEST_SYS_FID 2u
+#define TEST_ROOT_AGAIN_FID 3u
 #define TEST_BAD_FID 99u
 
 /* ---- fake file tree ---- */
@@ -408,6 +410,44 @@ static void test_invalid_fid(void)
     expect_true(error.code == M9P_ERR_EFID, "invalid fid code EFID");
 }
 
+static void test_absolute_root_walk(void)
+{
+    struct m9p_server server;
+    uint8_t request[TEST_BUFFER_CAP];
+    uint8_t response[TEST_BUFFER_CAP];
+    struct m9p_frame_view frame;
+    struct m9p_qid qid;
+    size_t request_len = 0u;
+
+    init_server(&server);
+    expect_true(attach_server(&server, request, response), "attach before root walk");
+    expect_true(m9p_build_twalk(
+                    30u,
+                    TEST_ROOT_FID,
+                    TEST_SYS_FID,
+                    "/sys",
+                    request,
+                    sizeof(request),
+                    &request_len),
+                "build sys Twalk");
+    expect_true(transact(&server, request, request_len, response, sizeof(response), &frame), "sys Twalk transact");
+    expect_true(frame.type == M9P_RWALK, "sys Twalk returns Rwalk");
+
+    expect_true(m9p_build_twalk(
+                    31u,
+                    TEST_SYS_FID,
+                    TEST_ROOT_AGAIN_FID,
+                    "/",
+                    request,
+                    sizeof(request),
+                    &request_len),
+                "build root Twalk");
+    expect_true(transact(&server, request, request_len, response, sizeof(response), &frame), "root Twalk transact");
+    expect_true(frame.type == M9P_RWALK, "root Twalk returns Rwalk");
+    expect_true(m9p_parse_rwalk(&frame, &qid), "root Rwalk parses");
+    expect_true(qid.object_id == 1u, "absolute root walk returns root qid");
+}
+
 /* ---- test runner ---- */
 
 int main(void)
@@ -416,6 +456,7 @@ int main(void)
     test_happy_path();
     test_missing_path();
     test_invalid_fid();
+    test_absolute_root_walk();
 
     if (g_failures != 0) {
         printf("mini9p_server_test: %d failure(s)\n", g_failures);

@@ -743,13 +743,15 @@ static int handle_topen(struct m9p_server *server,
 
     qid = stat.qid;
     iounit = server->default_iounit;
-    if (server->ops != NULL && server->ops->open != NULL) {
-        rc = normalize_backend_rc(server->ops->open(server->ops_ctx, entry->path, request.mode, &qid, &iounit));
-        if (rc != 0) {
-            return build_error_from_rc(frame->tag, rc, response_data, response_cap, response_len);
-        }
-        backend_opened = true;
+    if (server->ops == NULL || server->ops->open == NULL) {
+        return build_error_response(frame->tag, M9P_ERR_ENOTSUP, response_data, response_cap, response_len);
     }
+
+    rc = normalize_backend_rc(server->ops->open(server->ops_ctx, entry->path, request.mode, &qid, &iounit));
+    if (rc != 0) {
+        return build_error_from_rc(frame->tag, rc, response_data, response_cap, response_len);
+    }
+    backend_opened = true;
 
     if (!m9p_build_ropen(frame->tag, &qid, clamp_iounit(server, iounit), response_data, response_cap, response_len)) {
         if (backend_opened && server->ops->clunk != NULL) {
