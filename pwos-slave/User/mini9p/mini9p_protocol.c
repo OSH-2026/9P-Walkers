@@ -107,6 +107,102 @@ static bool payload_to_frame(
 }
 
 /**
+ * @brief 带上限的 strlen，最多数到 max_len 个字符
+ *
+ * @param str 字符串指针，可为 NULL
+ * @param max_len 最大计数长度
+ * @return 实际长度（不超过 max_len）
+ */
+static size_t bounded_strlen(const char *str, size_t max_len)
+{
+    size_t len = 0u;
+
+    if (str == NULL) {
+        return 0u;
+    }
+
+    while (len < max_len && str[len] != '\0') {
+        ++len;
+    }
+
+    return len;
+}
+
+/**
+ * @brief 将两段 payload（prefix + data）拼接后编码成完整 m9p 帧
+ *
+ * 避免调方先拼临时大数组再调 m9p_encode_frame，减少一次拷贝。
+ *
+ * @param type 消息类型
+ * @param tag 事务标签
+ * @param prefix 前缀数据（可为 NULL，prefix_len=0 时）
+ * @param prefix_len 前缀长度
+ * @param data 主数据（可为 NULL，data_len=0 时）
+ * @param data_len 主数据长度
+ * @param out_frame 输出帧缓冲区
+ * @param out_cap 输出缓冲区容量
+ * @param out_len 输出帧长度
+ * @return true 编码成功
+ * @return false 编码失败
+ */
+static bool payload_parts_to_frame(
+    uint8_t type,
+    uint16_t tag,
+    const uint8_t *prefix,
+    uint16_t prefix_len,
+    const uint8_t *data,
+    uint16_t data_len,
+    uint8_t *out_frame,
+    size_t out_cap,
+    size_t *out_len)
+{
+    const uint32_t payload_len = (uint32_t)prefix_len + (uint32_t)data_len;
+    uint16_t frame_len_field;
+    size_t total_len;
+    uint8_t *payload_dst;
+    uint16_t crc;
+
+    if (out_frame == NULL || out_len == NULL) {
+        return false;
+    }
+    if (prefix_len > 0u && prefix == NULL) {
+        return false;
+    }
+    if (data_len > 0u && data == NULL) {
+        return false;
+    }
+    if (payload_len > (uint32_t)UINT16_MAX - 4u) {
+        return false;
+    }
+
+    frame_len_field = (uint16_t)(4u + payload_len);
+    total_len = 2u + 2u + (size_t)frame_len_field + 2u;
+    if (out_cap < total_len) {
+        return false;
+    }
+
+    out_frame[0] = (uint8_t)'9';
+    out_frame[1] = (uint8_t)'P';
+    put_le16(out_frame + 2, frame_len_field);
+    out_frame[4] = M9P_VERSION;
+    out_frame[5] = type;
+    put_le16(out_frame + 6, tag);
+
+    payload_dst = out_frame + 8;
+    if (prefix_len > 0u) {
+        memcpy(payload_dst, prefix, prefix_len);
+    }
+    if (data_len > 0u) {
+        memcpy(payload_dst + prefix_len, data, data_len);
+    }
+
+    crc = m9p_crc16_ccitt_false(out_frame + 4, frame_len_field);
+    put_le16(out_frame + 8u + payload_len, crc);
+    *out_len = total_len;
+    return true;
+}
+
+/**
  * @brief CRC 16-CCITT-FALSE 校验算法
  * 
  * @param data 
@@ -135,17 +231,17 @@ uint16_t m9p_crc16_ccitt_false(const uint8_t *data, size_t len)
 }
 
 /**
- * @brief 解码完整 m9p 帧到 m9p_frame_view 结构体
- * 
- * @param type 类型
- * @param tag 标签
+ * @brief 编码 payload 到完整 m9p 帧
+ *
+ * @param type 消息类型
+ * @param tag 事务标签
  * @param payload 有效负载
  * @param payload_len 有效负载长度
  * @param out_frame 输出帧缓冲区
  * @param out_cap 输出缓冲区容量
  * @param out_len 输出帧长度
- * @return true 
- * @return false 
+ * @return true 编码成功
+ * @return false 编码失败
  */
 bool m9p_encode_frame(
     uint8_t type,
@@ -156,8 +252,8 @@ bool m9p_encode_frame(
     size_t out_cap,
     size_t *out_len)
 {
-    const uint16_t frame_len_field = (uint16_t)(4u + payload_len);
-    const size_t total_len = 2u + 2u + (size_t)frame_len_field + 2u;
+    uint16_t frame_len_field;
+    size_t total_len;
     uint16_t crc;
 
     if (out_frame == NULL || out_len == NULL) {
@@ -166,6 +262,12 @@ bool m9p_encode_frame(
     if (payload_len > 0u && payload == NULL) {
         return false;
     }
+    if (payload_len > (uint16_t)(UINT16_MAX - 4u)) {
+        return false;
+    }
+
+    frame_len_field = (uint16_t)(4u + payload_len);
+    total_len = 2u + 2u + (size_t)frame_len_field + 2u;
     if (out_cap < total_len) {
         return false;
     }
@@ -287,7 +389,7 @@ bool m9p_build_twalk(
     uint8_t payload[4u + 1u + M9P_MAX_PATH_LEN];
     size_t path_len = 0u;
 
-    if (path != NULL && path[0] != '\0' && !(path[0] == '/' && path[1] == '\0')) {
+    if (path != NULL && path[0] != '\0') {
         path_len = strlen(path);
     }
     if (path_len > M9P_MAX_PATH_LEN) {
@@ -465,6 +567,433 @@ bool m9p_build_tclunk(
 }
 
 /**
+ * @brief 解析 TATTACH 请求帧
+ *
+ * TATTACH 是客户端发给服务端的"建立会话/挂载根目录"请求，
+ * 包含 fid、期望 msize、最大并发数和 attach flags。
+ *
+ * @param frame 输入帧视图
+ * @param out_request 输出解析结果
+ * @return true 解析成功
+ * @return false 解析失败
+ */
+bool m9p_parse_tattach(const struct m9p_frame_view *frame, struct m9p_attach_request *out_request)
+{
+    if (frame == NULL || out_request == NULL || frame->type != M9P_TATTACH || frame->payload_len != 6u) {
+        return false;
+    }
+
+    out_request->fid = get_le16(frame->payload);
+    out_request->requested_msize = get_le16(frame->payload + 2);
+    out_request->requested_inflight = frame->payload[4];
+    out_request->attach_flags = frame->payload[5];
+    return true;
+}
+
+/**
+ * @brief 解析 TWALK 请求帧
+ *
+ * newfid 是 walk 成功后新目标的句柄编号
+ * @param frame 输入帧视图
+ * @param out_request 输出解析结果
+ * @return true 解析成功
+ * @return false 解析失败
+ */
+bool m9p_parse_twalk(const struct m9p_frame_view *frame, struct m9p_walk_request *out_request)
+{
+    size_t path_len;
+
+    if (frame == NULL || out_request == NULL || frame->type != M9P_TWALK || frame->payload_len < 5u) {
+        return false;
+    }
+
+    path_len = frame->payload[4];
+    if (path_len > M9P_MAX_PATH_LEN || 5u + path_len != frame->payload_len) {
+        return false;
+    }
+
+    out_request->fid = get_le16(frame->payload);
+    out_request->newfid = get_le16(frame->payload + 2);
+    if (path_len > 0u) {
+        memcpy(out_request->path, frame->payload + 5, path_len);
+    }
+    out_request->path[path_len] = '\0';
+    return true;
+}
+
+bool m9p_parse_topen(const struct m9p_frame_view *frame, struct m9p_open_request *out_request)
+{
+    if (frame == NULL || out_request == NULL || frame->type != M9P_TOPEN || frame->payload_len != 3u) {
+        return false;
+    }
+
+    out_request->fid = get_le16(frame->payload);
+    out_request->mode = frame->payload[2];
+    return true;
+}
+
+/**
+ * @brief 解析 TREAD 请求帧
+ *
+ * 解析"从 fid 的 offset 处读最多 count 字节"请求。
+ * payload 固定 8 字节：fid(2) + offset(4) + count(2)。
+ *
+ * @param frame 输入帧视图
+ * @param out_request 输出解析结果
+ * @return true 解析成功
+ * @return false 解析失败
+ */
+bool m9p_parse_tread(const struct m9p_frame_view *frame, struct m9p_read_request *out_request)
+{
+    if (frame == NULL || out_request == NULL || frame->type != M9P_TREAD || frame->payload_len != 8u) {
+        return false;
+    }
+
+    out_request->fid = get_le16(frame->payload);
+    out_request->offset = get_le32(frame->payload + 2);
+    out_request->count = get_le16(frame->payload + 6);
+    return true;
+}
+
+/**
+ * @brief 解析 TWRITE 请求帧
+ *
+ * 解析"往 fid 的 offset 处写 count 字节数据"请求。
+ * payload 变长：fid(2) + offset(4) + count(2) + data(count)。
+ *
+ * @param frame 输入帧视图
+ * @param out_request 输出解析结果（data 指针指向帧内 payload）
+ * @return true 解析成功
+ * @return false 解析失败
+ */
+bool m9p_parse_twrite(const struct m9p_frame_view *frame, struct m9p_write_request *out_request)
+{
+    uint16_t count;
+
+    if (frame == NULL || out_request == NULL || frame->type != M9P_TWRITE || frame->payload_len < 8u) {
+        return false;
+    }
+
+    count = get_le16(frame->payload + 6);
+    if (8u + (size_t)count != frame->payload_len) {
+        return false;
+    }
+
+    out_request->fid = get_le16(frame->payload);
+    out_request->offset = get_le32(frame->payload + 2);
+    out_request->count = count;
+    out_request->data = count > 0u ? frame->payload + 8 : NULL;
+    return true;
+}
+
+/**
+ * @brief 解析 TSTAT 请求帧
+ *
+ * 解析"查询 fid 对象状态"请求。payload 固定 2 字节，仅含 fid。
+ *
+ * @param frame 输入帧视图
+ * @param out_fid 输出 fid
+ * @return true 解析成功
+ * @return false 解析失败
+ */
+bool m9p_parse_tstat(const struct m9p_frame_view *frame, uint16_t *out_fid)
+{
+    if (frame == NULL || out_fid == NULL || frame->type != M9P_TSTAT || frame->payload_len != 2u) {
+        return false;
+    }
+
+    *out_fid = get_le16(frame->payload);
+    return true;
+}
+
+/**
+ * @brief 解析 TCLUNK 请求帧
+ *
+ * 解析"释放 fid"请求。payload 固定 2 字节，仅含 fid。
+ *
+ * @param frame 输入帧视图
+ * @param out_fid 输出 fid
+ * @return true 解析成功
+ * @return false 解析失败
+ */
+bool m9p_parse_tclunk(const struct m9p_frame_view *frame, uint16_t *out_fid)
+{
+    if (frame == NULL || out_fid == NULL || frame->type != M9P_TCLUNK || frame->payload_len != 2u) {
+        return false;
+    }
+
+    *out_fid = get_le16(frame->payload);
+    return true;
+}
+
+/**
+ * @brief 构造 RATTACH 响应帧
+ *
+ * @param tag 对应请求的标签
+ * @param negotiated_msize 协商后的最大消息大小
+ * @param max_fids 最大 fid 数
+ * @param max_inflight 最大未完成请求数
+ * @param feature_bits 支持的功能位
+ * @param root_qid 根目录 qid
+ * @param out_frame 输出帧缓冲区
+ * @param out_cap 输出缓冲区容量
+ * @param out_len 输出帧长度
+ * @return true 构造成功
+ * @return false 构造失败
+ */
+bool m9p_build_rattach(
+    uint16_t tag,
+    uint16_t negotiated_msize,
+    uint8_t max_fids,
+    uint8_t max_inflight,
+    uint32_t feature_bits,
+    const struct m9p_qid *root_qid,
+    uint8_t *out_frame,
+    size_t out_cap,
+    size_t *out_len)
+{
+    uint8_t payload[16];
+
+    if (root_qid == NULL) {
+        return false;
+    }
+
+    put_le16(payload, negotiated_msize);
+    payload[2] = max_fids;
+    payload[3] = max_inflight;
+    put_le32(payload + 4, feature_bits);
+    encode_qid(payload + 8, root_qid);
+    return payload_to_frame(M9P_RATTACH, tag, payload, sizeof(payload), out_frame, out_cap, out_len);
+}
+
+/**
+ * @brief 构造 RWALK 响应帧
+ *
+ * @param tag 对应请求的标签
+ * @param qid walk 成功后的目标 qid
+ * @param out_frame 输出帧缓冲区
+ * @param out_cap 输出缓冲区容量
+ * @param out_len 输出帧长度
+ * @return true 构造成功
+ * @return false 构造失败
+ */
+bool m9p_build_rwalk(
+    uint16_t tag,
+    const struct m9p_qid *qid,
+    uint8_t *out_frame,
+    size_t out_cap,
+    size_t *out_len)
+{
+    uint8_t payload[8];
+
+    if (qid == NULL) {
+        return false;
+    }
+
+    encode_qid(payload, qid);
+    return payload_to_frame(M9P_RWALK, tag, payload, sizeof(payload), out_frame, out_cap, out_len);
+}
+
+/**
+ * @brief 构造 ROPEN 响应帧
+ *
+ * @param tag 对应请求的标签
+ * @param qid 打开对象的 qid
+ * @param iounit 单次 I/O 建议大小
+ * @param out_frame 输出帧缓冲区
+ * @param out_cap 输出缓冲区容量
+ * @param out_len 输出帧长度
+ * @return true 构造成功
+ * @return false 构造失败
+ */
+bool m9p_build_ropen(
+    uint16_t tag,
+    const struct m9p_qid *qid,
+    uint16_t iounit,
+    uint8_t *out_frame,
+    size_t out_cap,
+    size_t *out_len)
+{
+    uint8_t payload[10];
+
+    if (qid == NULL) {
+        return false;
+    }
+
+    encode_qid(payload, qid);
+    put_le16(payload + 8, iounit);
+    return payload_to_frame(M9P_ROPEN, tag, payload, sizeof(payload), out_frame, out_cap, out_len);
+}
+
+/**
+ * @brief 构造 RREAD 响应帧
+ *
+ * @param tag 对应请求的标签
+ * @param data 读取到的数据
+ * @param count 数据长度
+ * @param out_frame 输出帧缓冲区
+ * @param out_cap 输出缓冲区容量
+ * @param out_len 输出帧长度
+ * @return true 构造成功
+ * @return false 构造失败
+ */
+bool m9p_build_rread(
+    uint16_t tag,
+    const uint8_t *data,
+    uint16_t count,
+    uint8_t *out_frame,
+    size_t out_cap,
+    size_t *out_len)
+{
+    uint8_t prefix[2];
+
+    if (count > 0u && data == NULL) {
+        return false;
+    }
+
+    put_le16(prefix, count);
+    return payload_parts_to_frame(
+        M9P_RREAD,
+        tag,
+        prefix,
+        sizeof(prefix),
+        data,
+        count,
+        out_frame,
+        out_cap,
+        out_len);
+}
+
+/**
+ * @brief 构造 RWRITE 响应帧
+ *
+ * @param tag 对应请求的标签
+ * @param count 实际写入字节数
+ * @param out_frame 输出帧缓冲区
+ * @param out_cap 输出缓冲区容量
+ * @param out_len 输出帧长度
+ * @return true 构造成功
+ * @return false 构造失败
+ */
+bool m9p_build_rwrite(
+    uint16_t tag,
+    uint16_t count,
+    uint8_t *out_frame,
+    size_t out_cap,
+    size_t *out_len)
+{
+    uint8_t payload[2];
+
+    put_le16(payload, count);
+    return payload_to_frame(M9P_RWRITE, tag, payload, sizeof(payload), out_frame, out_cap, out_len);
+}
+
+/**
+ * @brief 构造 RSTAT 响应帧
+ *
+ * @param tag 对应请求的标签
+ * @param stat 文件状态信息
+ * @param out_frame 输出帧缓冲区
+ * @param out_cap 输出缓冲区容量
+ * @param out_len 输出帧长度
+ * @return true 构造成功
+ * @return false 构造失败
+ */
+bool m9p_build_rstat(
+    uint16_t tag,
+    const struct m9p_stat *stat,
+    uint8_t *out_frame,
+    size_t out_cap,
+    size_t *out_len)
+{
+    uint8_t payload[19u + M9P_MAX_NAME_LEN];
+    size_t name_len;
+
+    if (stat == NULL) {
+        return false;
+    }
+
+    name_len = bounded_strlen(stat->name, M9P_MAX_NAME_LEN);
+    encode_qid(payload, &stat->qid);
+    payload[8] = stat->perm;
+    payload[9] = stat->flags;
+    put_le32(payload + 10, stat->size);
+    put_le32(payload + 14, stat->mtime);
+    payload[18] = (uint8_t)name_len;
+    if (name_len > 0u) {
+        memcpy(payload + 19, stat->name, name_len);
+    }
+
+    return payload_to_frame(
+        M9P_RSTAT,
+        tag,
+        payload,
+        (uint16_t)(19u + name_len),
+        out_frame,
+        out_cap,
+        out_len);
+}
+
+/**
+ * @brief 构造 RCLUNK 响应帧
+ *
+ * @param tag 对应请求的标签
+ * @param out_frame 输出帧缓冲区
+ * @param out_cap 输出缓冲区容量
+ * @param out_len 输出帧长度
+ * @return true 构造成功
+ * @return false 构造失败
+ */
+bool m9p_build_rclunk(
+    uint16_t tag,
+    uint8_t *out_frame,
+    size_t out_cap,
+    size_t *out_len)
+{
+    return payload_to_frame(M9P_RCLUNK, tag, NULL, 0u, out_frame, out_cap, out_len);
+}
+
+/**
+ * @brief 构造 RERROR 响应帧
+ *
+ * @param tag 对应请求的标签
+ * @param code 错误码
+ * @param msg 错误文本
+ * @param out_frame 输出帧缓冲区
+ * @param out_cap 输出缓冲区容量
+ * @param out_len 输出帧长度
+ * @return true 构造成功
+ * @return false 构造失败
+ */
+bool m9p_build_rerror(
+    uint16_t tag,
+    uint16_t code,
+    const char *msg,
+    uint8_t *out_frame,
+    size_t out_cap,
+    size_t *out_len)
+{
+    uint8_t payload[3u + M9P_MAX_ERROR_TEXT];
+    size_t msg_len;
+
+    msg_len = bounded_strlen(msg, M9P_MAX_ERROR_TEXT);
+    put_le16(payload, code);
+    payload[2] = (uint8_t)msg_len;
+    if (msg_len > 0u) {
+        memcpy(payload + 3, msg, msg_len);
+    }
+
+    return payload_to_frame(
+        M9P_RERROR,
+        tag,
+        payload,
+        (uint16_t)(3u + msg_len),
+        out_frame,
+        out_cap,
+        out_len);
+}
+
+/**
  * @brief 解析 RATTACH 响应帧
  * 
  * @param frame 响应帧视图
@@ -546,7 +1075,7 @@ bool m9p_parse_rread(
     }
 
     count = get_le16(frame->payload);
-    if ((uint16_t)(2u + count) > frame->payload_len) {
+    if (2u + (size_t)count > frame->payload_len) {
         return false;
     }
     if (count > 0u && (out_data == NULL || out_cap < count)) {

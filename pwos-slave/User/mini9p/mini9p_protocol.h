@@ -87,7 +87,15 @@ struct m9p_frame_view {
     uint16_t payload_len;
 };
 
-// attach 响应的结果
+// Tattach 请求解析结果：Master 发送，Slave 解析使用
+struct m9p_attach_request {
+    uint16_t fid;
+    uint16_t requested_msize;
+    uint8_t requested_inflight;
+    uint8_t attach_flags;
+};
+
+// Rattach 响应解析结果：Slave 发送，Master 解析使用
 struct m9p_attach_result {
     uint16_t negotiated_msize;
     uint8_t max_fids;
@@ -96,13 +104,41 @@ struct m9p_attach_result {
     struct m9p_qid root_qid;
 };
 
-// open 响应的结果
+// Twalk 请求解析结果：Master 发送，Slave 解析使用
+struct m9p_walk_request {
+    uint16_t fid;
+    uint16_t newfid;
+    char path[M9P_MAX_PATH_LEN + 1u];
+};
+
+// Topen 请求解析结果：Master 发送，Slave 解析使用
+struct m9p_open_request {
+    uint16_t fid;
+    uint8_t mode;
+};
+
+// Ropen 响应解析结果：Slave 发送，Master 解析使用
 struct m9p_open_result {
     struct m9p_qid qid;
     uint16_t iounit;
 };
 
-// stat 响应的结果
+// Tread 请求解析结果：Master 发送，Slave 解析使用
+struct m9p_read_request {
+    uint16_t fid;
+    uint32_t offset;
+    uint16_t count;
+};
+
+// Twrite 请求解析结果：Master 发送，Slave 解析使用
+struct m9p_write_request {
+    uint16_t fid;
+    uint32_t offset;
+    uint16_t count;
+    const uint8_t *data;
+};
+
+// Rstat 响应数据：Slave 构造发送，Master 解析使用
 struct m9p_stat {
     struct m9p_qid qid;
     uint8_t perm;       // 权限
@@ -112,13 +148,13 @@ struct m9p_stat {
     char name[M9P_MAX_NAME_LEN + 1u];
 };
 
-// 错误响应的结果
+// Rerror 响应解析结果：Slave 发送，Master 解析使用
 struct m9p_error {
     uint16_t code;
     char msg[M9P_MAX_ERROR_TEXT + 1u];
 };
 
-// 目录项
+// 目录项：Slave 放入 Rread.data，Master 从 Rread.data 二次解析
 struct m9p_dirent {
     struct m9p_qid qid;
     uint8_t perm;       // 权限
@@ -138,7 +174,7 @@ bool m9p_encode_frame(
     size_t *out_len);
 bool m9p_decode_frame(const uint8_t *frame, size_t frame_len, struct m9p_frame_view *out_view);
 
-// 请求构造
+// T* 请求构造：Master 调用，用于生成发往 Slave 的请求帧
 bool m9p_build_tattach(
     uint16_t tag,
     uint16_t fid,
@@ -193,7 +229,72 @@ bool m9p_build_tclunk(
     size_t out_cap,
     size_t *out_len);
 
-    // 响应解析
+// T* 请求解析：Slave 调用，用于解析 Master 发来的请求帧
+bool m9p_parse_tattach(const struct m9p_frame_view *frame, struct m9p_attach_request *out_request);
+bool m9p_parse_twalk(const struct m9p_frame_view *frame, struct m9p_walk_request *out_request);
+bool m9p_parse_topen(const struct m9p_frame_view *frame, struct m9p_open_request *out_request);
+bool m9p_parse_tread(const struct m9p_frame_view *frame, struct m9p_read_request *out_request);
+bool m9p_parse_twrite(const struct m9p_frame_view *frame, struct m9p_write_request *out_request);
+bool m9p_parse_tstat(const struct m9p_frame_view *frame, uint16_t *out_fid);
+bool m9p_parse_tclunk(const struct m9p_frame_view *frame, uint16_t *out_fid);
+
+// R* 响应构造：Slave 调用，用于生成回给 Master 的响应帧
+bool m9p_build_rattach(
+    uint16_t tag,
+    uint16_t negotiated_msize,
+    uint8_t max_fids,
+    uint8_t max_inflight,
+    uint32_t feature_bits,
+    const struct m9p_qid *root_qid,
+    uint8_t *out_frame,
+    size_t out_cap,
+    size_t *out_len);
+bool m9p_build_rwalk(
+    uint16_t tag,
+    const struct m9p_qid *qid,
+    uint8_t *out_frame,
+    size_t out_cap,
+    size_t *out_len);
+bool m9p_build_ropen(
+    uint16_t tag,
+    const struct m9p_qid *qid,
+    uint16_t iounit,
+    uint8_t *out_frame,
+    size_t out_cap,
+    size_t *out_len);
+bool m9p_build_rread(
+    uint16_t tag,
+    const uint8_t *data,
+    uint16_t count,
+    uint8_t *out_frame,
+    size_t out_cap,
+    size_t *out_len);
+bool m9p_build_rwrite(
+    uint16_t tag,
+    uint16_t count,
+    uint8_t *out_frame,
+    size_t out_cap,
+    size_t *out_len);
+bool m9p_build_rstat(
+    uint16_t tag,
+    const struct m9p_stat *stat,
+    uint8_t *out_frame,
+    size_t out_cap,
+    size_t *out_len);
+bool m9p_build_rclunk(
+    uint16_t tag,
+    uint8_t *out_frame,
+    size_t out_cap,
+    size_t *out_len);
+bool m9p_build_rerror(
+    uint16_t tag,
+    uint16_t code,
+    const char *msg,
+    uint8_t *out_frame,
+    size_t out_cap,
+    size_t *out_len);
+
+// R* 响应解析：Master 调用，用于解析 Slave 回来的响应帧
 bool m9p_parse_rattach(const struct m9p_frame_view *frame, struct m9p_attach_result *out_result);
 bool m9p_parse_rwalk(const struct m9p_frame_view *frame, struct m9p_qid *out_qid);
 bool m9p_parse_ropen(const struct m9p_frame_view *frame, struct m9p_open_result *out_result);
