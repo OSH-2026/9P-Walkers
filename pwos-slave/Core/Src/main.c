@@ -125,6 +125,9 @@ int main(void) {
   MX_SDIO_SD_Init();
 #endif
   /* USER CODE BEGIN 2 */
+#ifdef PWOS_BOARD_ZGT6
+  MX_GPIO_PF9_LED_Init();
+#endif
 #ifdef PWOS_ENABLE_MINI9P_SERIAL
   if (mini9p_service_init() != 0) {
     Error_Handler();
@@ -149,8 +152,10 @@ int main(void) {
     /* USER CODE BEGIN 3 */
 #ifdef PWOS_ENABLE_MINI9P_SERIAL
     (void)mini9p_service_poll_once();
-    HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13); // PC13 接 LED 
-    HAL_Delay(100);             // 100ms 闪烁一次
+#ifdef PWOS_BOARD_ZGT6
+    HAL_GPIO_TogglePin(GPIOF, GPIO_PIN_9);  // PF9 接绿色 LED
+    HAL_Delay(100);                         // 100ms 闪烁一次
+#endif
 #else
     (void)vofa_firewater_send_fs_report(&g_fs_report, HAL_GetTick());
     HAL_Delay(1000);

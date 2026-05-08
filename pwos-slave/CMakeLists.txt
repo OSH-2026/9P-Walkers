@@ -29,6 +29,7 @@ project(${CMAKE_PROJECT_NAME})
 message("Build type: " ${CMAKE_BUILD_TYPE})
 
 option(PWOS_ENABLE_MINI9P_SERIAL "Use USART2 for Mini9P slave serial bring-up" OFF)
+option(PWOS_BOARD_ZGT6 "Board has PF9 green LED (ZGT6)" OFF)
 
 # Enable CMake support for ASM and C languages
 enable_language(C CXX ASM)
@@ -75,6 +76,9 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
 
 if(PWOS_ENABLE_MINI9P_SERIAL)
     target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE PWOS_ENABLE_MINI9P_SERIAL)
+endif()
+if(PWOS_BOARD_ZGT6)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE PWOS_BOARD_ZGT6)
 endif()
 
 # Remove wrong libob.a library dependency when using cpp files
