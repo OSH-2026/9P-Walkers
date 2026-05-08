@@ -874,6 +874,9 @@ static int handle_twrite(struct m9p_server *server,
     if (server->ops == NULL || server->ops->write == NULL) {
         return build_error_response(frame->tag, M9P_ERR_ENOTSUP, response_data, response_cap, response_len);
     }
+    if (response_data == NULL || response_len == NULL || response_cap < (M9P_FRAME_OVERHEAD + 2u)) {
+        return -(int)M9P_ERR_EMSIZE;
+    }
 
     written = request.count;
     rc = normalize_backend_rc(server->ops->write(
@@ -967,6 +970,9 @@ static int handle_tclunk(struct m9p_server *server,
     entry = find_fid(server, fid);
     if (entry == NULL) {
         return build_error_response(frame->tag, M9P_ERR_EFID, response_data, response_cap, response_len);
+    }
+    if (response_data == NULL || response_len == NULL || response_cap < M9P_FRAME_OVERHEAD) {
+        return -(int)M9P_ERR_EMSIZE;
     }
 
     if (server->ops != NULL && server->ops->clunk != NULL) {

@@ -11,6 +11,7 @@
 #define TEST_HEALTH_FID 1u
 #define TEST_SYS_FID 2u
 #define TEST_ROOT_AGAIN_FID 3u
+#define TEST_SINK_FID 4u
 #define TEST_BAD_FID 99u
 
 /* ---- fake file tree ---- */
@@ -57,6 +58,18 @@ static const struct fake_node g_nodes[] = {
             "health",
         },
         "ok\n",
+    },
+    {
+        "/sys/sink",
+        {
+            {M9P_QID_VIRTUAL, 0u, 1u, 4u},
+            M9P_SERVER_PERM_WRITE,
+            M9P_STAT_VIRTUAL,
+            0u,
+            0u,
+            "sink",
+        },
+        "",
     },
 };
 
@@ -155,6 +168,9 @@ static int fake_read(void *ctx,
     return 0;
 }
 
+static int g_fake_write_calls;
+static int g_fake_clunk_calls;
+
 static int fake_write(void *ctx,
                       const char *path,
                       uint32_t offset,
@@ -168,9 +184,14 @@ static int fake_write(void *ctx,
     (void)offset;
     (void)mode;
     (void)data;
-    (void)count;
-    (void)out_count;
-    return -(int)M9P_ERR_EPERM;
+
+    ++g_fake_write_calls;
+    if (out_count == NULL) {
+        return -(int)M9P_ERR_EINVAL;
+    }
+
+    *out_count = count;
+    return 0;
 }
 
 static int fake_clunk(void *ctx, const char *path, bool was_open)
@@ -178,6 +199,8 @@ static int fake_clunk(void *ctx, const char *path, bool was_open)
     (void)ctx;
     (void)path;
     (void)was_open;
+
+    ++g_fake_clunk_calls;
     return 0;
 }
 
@@ -207,6 +230,8 @@ static void init_server(struct m9p_server *server)
 {
     struct m9p_server_config config;
 
+    g_fake_write_calls = 0;
+    g_fake_clunk_calls = 0;
     m9p_server_get_default_config(&config);
     config.ops = &g_fake_ops;
     config.max_msize = TEST_BUFFER_CAP;
@@ -448,6 +473,98 @@ static void test_absolute_root_walk(void)
     expect_true(qid.object_id == 1u, "absolute root walk returns root qid");
 }
 
+static void test_write_small_response_does_not_call_backend(void)
+{
+    struct m9p_server server;
+    uint8_t request[TEST_BUFFER_CAP];
+    uint8_t response[TEST_BUFFER_CAP];
+    uint8_t tiny_response[M9P_FRAME_OVERHEAD + 1u];
+    struct m9p_frame_view frame;
+    size_t request_len = 0u;
+    size_t response_len = 0u;
+    int rc;
+    const uint8_t data[] = {'x'};
+
+    init_server(&server);
+    expect_true(attach_server(&server, request, response), "attach before small write response");
+    expect_true(m9p_build_twalk(
+                    40u,
+                    TEST_ROOT_FID,
+                    TEST_SINK_FID,
+                    "/sys/sink",
+                    request,
+                    sizeof(request),
+                    &request_len),
+                "build sink Twalk");
+    expect_true(transact(&server, request, request_len, response, sizeof(response), &frame), "sink Twalk transact");
+    expect_true(frame.type == M9P_RWALK, "sink Twalk returns Rwalk");
+
+    expect_true(m9p_build_topen(
+                    41u,
+                    TEST_SINK_FID,
+                    M9P_OWRITE,
+                    request,
+                    sizeof(request),
+                    &request_len),
+                "build sink Topen");
+    expect_true(transact(&server, request, request_len, response, sizeof(response), &frame), "sink Topen transact");
+    expect_true(frame.type == M9P_ROPEN, "sink Topen returns Ropen");
+
+    expect_true(m9p_build_twrite(
+                    42u,
+                    TEST_SINK_FID,
+                    0u,
+                    data,
+                    sizeof(data),
+                    request,
+                    sizeof(request),
+                    &request_len),
+                "build sink Twrite");
+    rc = m9p_server_handle_frame(
+        &server,
+        request,
+        request_len,
+        tiny_response,
+        sizeof(tiny_response),
+        &response_len);
+    expect_true(rc == -(int)M9P_ERR_EMSIZE, "small Rwrite buffer returns EMSIZE");
+    expect_true(g_fake_write_calls == 0, "small Rwrite buffer skips backend write");
+}
+
+static void test_clunk_small_response_keeps_fid(void)
+{
+    struct m9p_server server;
+    uint8_t request[TEST_BUFFER_CAP];
+    uint8_t response[TEST_BUFFER_CAP];
+    uint8_t tiny_response[M9P_FRAME_OVERHEAD - 1u];
+    struct m9p_frame_view frame;
+    size_t request_len = 0u;
+    size_t response_len = 0u;
+    int rc;
+
+    init_server(&server);
+    expect_true(attach_server(&server, request, response), "attach before small clunk response");
+    expect_true(walk_health(&server, request, response), "walk before small clunk response");
+    expect_true(open_health(&server, request, response), "open before small clunk response");
+    g_fake_clunk_calls = 0;
+
+    expect_true(m9p_build_tclunk(50u, TEST_HEALTH_FID, request, sizeof(request), &request_len), "build small Tclunk");
+    rc = m9p_server_handle_frame(
+        &server,
+        request,
+        request_len,
+        tiny_response,
+        sizeof(tiny_response),
+        &response_len);
+    expect_true(rc == -(int)M9P_ERR_EMSIZE, "small Rclunk buffer returns EMSIZE");
+    expect_true(g_fake_clunk_calls == 0, "small Rclunk buffer skips backend clunk");
+
+    expect_true(m9p_build_tclunk(51u, TEST_HEALTH_FID, request, sizeof(request), &request_len), "build retry Tclunk");
+    expect_true(transact(&server, request, request_len, response, sizeof(response), &frame), "retry Tclunk transact");
+    expect_true(frame.type == M9P_RCLUNK, "retry Tclunk returns Rclunk");
+    expect_true(g_fake_clunk_calls == 1, "retry Tclunk calls backend once");
+}
+
 /* ---- test runner ---- */
 
 int main(void)
@@ -457,6 +574,8 @@ int main(void)
     test_missing_path();
     test_invalid_fid();
     test_absolute_root_walk();
+    test_write_small_response_does_not_call_backend();
+    test_clunk_small_response_keeps_fid();
 
     if (g_failures != 0) {
         printf("mini9p_server_test: %d failure(s)\n", g_failures);
