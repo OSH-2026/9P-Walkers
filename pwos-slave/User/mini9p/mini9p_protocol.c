@@ -1170,7 +1170,59 @@ bool m9p_parse_rerror(const struct m9p_frame_view *frame, struct m9p_error *out_
 }
 
 /**
- * @brief 解析目录条目
+ * @brief 构造单个目录条目的线格式。
+ *
+ * 目录条目放在 Rread.data 内部，不是独立 Mini9P frame。
+ *
+ * @param entry 目录条目
+ * @param out_data 输出数据缓冲区
+ * @param out_cap 输出缓冲区容量
+ * @param out_len 实际写入长度
+ * @return true 构造成功
+ * @return false 构造失败
+ */
+bool m9p_build_dirent(
+    const struct m9p_dirent *entry,
+    uint8_t *out_data,
+    size_t out_cap,
+    size_t *out_len)
+{
+    size_t name_len;
+    size_t total_len;
+
+    if (out_len != NULL) {
+        *out_len = 0u;
+    }
+    if (entry == NULL || out_data == NULL || out_len == NULL) {
+        return false;
+    }
+
+    name_len = bounded_strlen(entry->name, M9P_MAX_NAME_LEN + 1u);
+    if (name_len > M9P_MAX_NAME_LEN || entry->name[name_len] != '\0') {
+        return false;
+    }
+
+    total_len = 11u + name_len;
+    if (out_cap < total_len) {
+        return false;
+    }
+
+    encode_qid(out_data, &entry->qid);
+    out_data[8] = entry->perm;
+    out_data[9] = entry->flags;
+    out_data[10] = (uint8_t)name_len;
+    if (name_len > 0u) {
+        memcpy(out_data + 11u, entry->name, name_len);
+    }
+
+    *out_len = total_len;
+    return true;
+}
+
+/**
+ * @brief 解析目录条目。
+ *
+ * 目录条目来自 Rread.data 内部，不是独立 Mini9P frame。
  * 
  * @param data 目录条目数据
  * @param data_len 数据长度

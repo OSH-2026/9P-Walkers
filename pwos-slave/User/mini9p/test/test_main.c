@@ -565,6 +565,37 @@ static void test_clunk_small_response_keeps_fid(void)
     expect_true(g_fake_clunk_calls == 1, "retry Tclunk calls backend once");
 }
 
+static void test_dirent_build_parse_roundtrip(void)
+{
+    struct m9p_dirent entry;
+    struct m9p_dirent parsed;
+    uint8_t data[32];
+    size_t data_len = 0u;
+    size_t parsed_count;
+
+    memset(&entry, 0, sizeof(entry));
+    entry.qid.type = M9P_QID_VIRTUAL | M9P_QID_READONLY;
+    entry.qid.version = 7u;
+    entry.qid.object_id = 42u;
+    entry.perm = M9P_SERVER_PERM_READ;
+    entry.flags = M9P_STAT_VIRTUAL;
+    memcpy(entry.name, "health", sizeof("health"));
+
+    expect_true(m9p_build_dirent(&entry, data, sizeof(data), &data_len), "build dirent");
+    expect_true(data_len == 17u, "dirent encoded length");
+
+    memset(&parsed, 0, sizeof(parsed));
+    parsed_count = m9p_parse_dirents(data, data_len, &parsed, 1u);
+    expect_true(parsed_count == 1u, "parse built dirent count");
+    expect_true(parsed.qid.type == entry.qid.type, "dirent qid type");
+    expect_true(parsed.qid.version == entry.qid.version, "dirent qid version");
+    expect_true(parsed.qid.object_id == entry.qid.object_id, "dirent qid object");
+    expect_true(parsed.perm == entry.perm, "dirent perm");
+    expect_true(parsed.flags == entry.flags, "dirent flags");
+    expect_true(strcmp(parsed.name, entry.name) == 0, "dirent name");
+    expect_true(!m9p_build_dirent(&entry, data, data_len - 1u, &data_len), "dirent small buffer");
+}
+
 /* ---- test runner ---- */
 
 int main(void)
@@ -576,6 +607,7 @@ int main(void)
     test_absolute_root_walk();
     test_write_small_response_does_not_call_backend();
     test_clunk_small_response_keeps_fid();
+    test_dirent_build_parse_roundtrip();
 
     if (g_failures != 0) {
         printf("mini9p_server_test: %d failure(s)\n", g_failures);

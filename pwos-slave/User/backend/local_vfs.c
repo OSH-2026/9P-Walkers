@@ -118,46 +118,6 @@ static int validate_read_open_mode(uint8_t mode)
 }
 
 /**
- * @brief 将 uint16_t 以小端序写入字节缓冲区。
- *
- * @param[out] dst 输出缓冲区，至少 2 字节。
- * @param[in] value 要编码的值。
- */
-static void put_le16(uint8_t *dst, uint16_t value)
-{
-    dst[0] = (uint8_t)(value & 0xffu);
-    dst[1] = (uint8_t)((value >> 8) & 0xffu);
-}
-
-/**
- * @brief 将 uint32_t 以小端序写入字节缓冲区。
- *
- * @param[out] dst 输出缓冲区，至少 4 字节。
- * @param[in] value 要编码的值。
- */
-static void put_le32(uint8_t *dst, uint32_t value)
-{
-    dst[0] = (uint8_t)(value & 0xffu);
-    dst[1] = (uint8_t)((value >> 8) & 0xffu);
-    dst[2] = (uint8_t)((value >> 16) & 0xffu);
-    dst[3] = (uint8_t)((value >> 24) & 0xffu);
-}
-
-/**
- * @brief 将 Mini9P qid 编码为目录项的线格式表示。
- *
- * @param[out] dst 输出缓冲区，至少 8 字节。
- * @param[in] qid 要编码的 qid。
- */
-static void encode_qid(uint8_t *dst, const struct m9p_qid *qid)
-{
-    dst[0] = qid->type;
-    dst[1] = qid->reserved;
-    put_le16(dst + 2u, qid->version);
-    put_le32(dst + 4u, qid->object_id);
-}
-
-/**
  * @brief 从绝对路径派生目录项名称。
  *
  * @param[in] path 节点本地绝对路径。
@@ -204,6 +164,7 @@ static int append_dirent(const struct local_vfs_node *node,
                          uint16_t *out_count)
 {
     uint8_t record[11u + M9P_MAX_NAME_LEN];
+    struct m9p_dirent entry;
     const char *name;
     size_t name_len;
     size_t record_len;
@@ -217,15 +178,18 @@ static int append_dirent(const struct local_vfs_node *node,
     name = node_name_from_path(node->path);
     name_len = strlen(name);
     if (name_len > M9P_MAX_NAME_LEN) {
-        name_len = M9P_MAX_NAME_LEN;
+        return -(int)M9P_ERR_EINVAL;
     }
 
-    encode_qid(record, &node->stat.qid);
-    record[8] = node->stat.perm;
-    record[9] = node->stat.flags;
-    record[10] = (uint8_t)name_len;
-    memcpy(record + 11u, name, name_len);
-    record_len = 11u + name_len;
+    memset(&entry, 0, sizeof(entry));
+    entry.qid = node->stat.qid;
+    entry.perm = node->stat.perm;
+    entry.flags = node->stat.flags;
+    memcpy(entry.name, name, name_len);
+    entry.name[name_len] = '\0';
+    if (!m9p_build_dirent(&entry, record, sizeof(record), &record_len)) {
+        return -(int)M9P_ERR_EINVAL;
+    }
 
     if (*stream_offset + record_len <= read_offset) {
         *stream_offset += (uint32_t)record_len;
