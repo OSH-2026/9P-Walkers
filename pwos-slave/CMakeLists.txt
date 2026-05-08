@@ -28,6 +28,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 project(${CMAKE_PROJECT_NAME})
 message("Build type: " ${CMAKE_BUILD_TYPE})
 
+option(PWOS_ENABLE_MINI9P_SERIAL "Use USART2 for Mini9P slave serial bring-up" OFF)
+
 # Enable CMake support for ASM and C languages
 enable_language(C CXX ASM)
 
@@ -53,6 +55,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/User/backend/local_vfs.c
     ${CMAKE_SOURCE_DIR}/User/mini9p/mini9p_protocol.c
     ${CMAKE_SOURCE_DIR}/User/mini9p/mini9p_server.c
+    ${CMAKE_SOURCE_DIR}/User/mini9p/mini9p_service.c
     ${CMAKE_SOURCE_DIR}/User/mini9p/uart_transport.c
 )
 
@@ -69,6 +72,10 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
 )
+
+if(PWOS_ENABLE_MINI9P_SERIAL)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE PWOS_ENABLE_MINI9P_SERIAL)
+endif()
 
 # Remove wrong libob.a library dependency when using cpp files
 list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)

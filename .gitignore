@@ -1,4 +1,5 @@
 build/
+tools/pc_master_emulator/build/
 pwos-master/
 .vscode/
 pwos-slave/.vscode/

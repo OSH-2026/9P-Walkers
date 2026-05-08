@@ -37,14 +37,14 @@ uart_transport   负责收发完整 mini9p frame
 [x] server 资源访问已抽象为 m9p_server_ops
 [x] PC testbench 已建立
 [x] fake backend 已覆盖 attach/walk/open/read/clunk 与常见错误路径
+[x] local VFS v1 已接入虚拟节点 `/`、`/sys`、`/sys/health`
+[x] mini9p_service 已组装 local_vfs + mini9p_server + uart_transport
+[x] PC Master Emulator 串口联调工具已建立
 ```
 
 仍未完成：
 
 ```text
-[ ] 从机本地 backend / 本地 VFS 尚未实现
-[ ] m9p_server 尚未在从机启动链路中初始化
-[ ] m9p_server_handle_frame 尚未接入 m9p_uart_transport_serve_once
 [ ] 还没有上板验证 master <-> slave UART 闭环
 [ ] master 侧 cluster_vfs/cluster_config 目前也尚未接入 app_main 启动链路
 ```
@@ -265,45 +265,47 @@ clunk(ctx, handle)
 
 ## 5. UART 集成
 
-状态：待完成。
+状态：已完成第一版，等待上板验证。
 
-从机侧已有 `m9p_uart_transport_serve_once()`，server 入口签名已兼容。需要补一个运行时初始化点，形状类似：
+从机侧新增 `User/mini9p/mini9p_service.h/.c`，作为上板联调的组装层：
 
-```c
-static struct m9p_server g_m9p_server;
-static uint8_t g_m9p_rx[512];
-static uint8_t g_m9p_tx[512];
+```text
+mini9p_service_init
+  -> local_vfs_init
+  -> m9p_server_init(local_vfs_ops)
+  -> m9p_uart_transport_init_default
 
-void mini9p_service_init(void)
-{
-    struct m9p_server_config config;
-
-    m9p_server_get_default_config(&config);
-    config.ops = &slave_vfs_ops;
-    config.ops_ctx = &slave_vfs;
-    (void)m9p_server_init(&g_m9p_server, &config);
-    (void)m9p_uart_transport_init_default();
-}
-
-void mini9p_service_poll_once(void)
-{
-    (void)m9p_uart_transport_serve_once(m9p_uart_transport_default(),
-                                        m9p_server_handle_frame,
-                                        &g_m9p_server,
-                                        g_m9p_rx,
-                                        sizeof(g_m9p_rx),
-                                        NULL,
-                                        g_m9p_tx,
-                                        sizeof(g_m9p_tx),
-                                        NULL);
-}
+mini9p_service_poll_once
+  -> m9p_uart_transport_serve_once
+  -> m9p_server_handle_frame
+  -> local_vfs
 ```
 
-实际函数名和任务调度位置可按从机工程启动结构调整。
+`pwos-slave/CMakeLists.txt` 提供编译选项：
+
+```bash
+cmake -S pwos-slave -B pwos-slave/build/Mini9PSerial \
+  -G Ninja \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/gcc-arm-none-eabi.cmake \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DPWOS_ENABLE_MINI9P_SERIAL=ON
+cmake --build pwos-slave/build/Mini9PSerial
+```
+
+开启 `PWOS_ENABLE_MINI9P_SERIAL` 后，`Core/Src/main.c` 的启动链路切换为 Mini9P 串口模式：
+
+```text
+MX_GPIO_Init
+MX_USART2_UART_Init
+mini9p_service_init
+while (1) mini9p_service_poll_once
+```
+
+该模式下 USART2 只承载 Mini9P 二进制帧，不输出 VOFA 文本、fs report 或 Error_Handler 文本，避免污染协议帧流。宏未开启时保持原来的 VOFA/fs_selftest 行为。
 
 ## 6. PC Master Emulator 串口联调
 
-状态：推荐作为上板第一阶段。
+状态：PC 工具已建立，推荐作为上板第一阶段。
 
 在接 ESP32 master 之前，先用 PC 通过 USB-TTL 直接模拟 master，单独验证 STM32 侧 `uart_transport + mini9p_server + backend`。
 
@@ -333,9 +335,23 @@ USB-TTL GND -> STM32 GND
 PC 端实现建议：
 
 ```text
-第一版优先用 C 写 master emulator
-复用 mini9p_protocol.c/.h 构造 T*、解析 R*
+第一版已用 C 写 master emulator
+目录为 tools/pc_master_emulator/
+复用 pwos-slave/User/mini9p/mini9p_protocol.c/.h 构造 T*、解析 R*
 串口读帧时按 mini9p 长度字段读取完整 frame
+```
+
+构建方式：
+
+```bash
+cmake -S tools/pc_master_emulator -B tools/pc_master_emulator/build
+cmake --build tools/pc_master_emulator/build
+```
+
+运行方式：
+
+```bash
+tools/pc_master_emulator/build/pc_master_emulator /dev/ttyUSB0 1000000
 ```
 
 PC 收帧流程必须和协议一致：
@@ -356,6 +372,8 @@ Twalk /sys/health -> Rwalk
 Topen OREAD -> Ropen
 Tread -> Rread("ok\n")
 Tclunk -> Rclunk
+Twalk /missing -> Rerror ENOENT
+Topen bad fid -> Rerror EFID
 ```
 
 这个阶段的价值：

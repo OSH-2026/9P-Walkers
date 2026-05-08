@@ -24,9 +24,13 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#ifdef PWOS_ENABLE_MINI9P_SERIAL
+#include "mini9p_service.h"
+#else
 #include "fs_selftest.h"
 #include "vofa_firewater.h"
 #include <stdio.h>
+#endif
 
 /* USER CODE END Includes */
 
@@ -48,25 +52,22 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+#ifndef PWOS_ENABLE_MINI9P_SERIAL
 HAL_SD_CardInfoTypeDef SDCardInfo;
 FS_SelfTestReport g_fs_report;
+#endif
 /* USER CODE END PV */
-
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
-static void UART_ReportEarlyBoot(void);
+#ifndef PWOS_ENABLE_MINI9P_SERIAL
 static void FS_ReportBootStatus(void);
+#endif
 
 /* USER CODE END PFP */
-
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-static void UART_ReportEarlyBoot(void)
-{
-  (void)vofa_firewater_send_text("boot: uart2 ok");
-}
-
+#ifndef PWOS_ENABLE_MINI9P_SERIAL
 static void FS_ReportBootStatus(void)
 {
   char message[128];
@@ -90,6 +91,7 @@ static void FS_ReportBootStatus(void)
     (void)vofa_firewater_send_text(message);
   }
 }
+#endif
 
 /* USER CODE END 0 */
 
@@ -123,8 +125,16 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART2_UART_Init();
+#ifndef PWOS_ENABLE_MINI9P_SERIAL
   MX_SDIO_SD_Init();
+#endif
   /* USER CODE BEGIN 2 */
+#ifdef PWOS_ENABLE_MINI9P_SERIAL
+  if (mini9p_service_init() != 0)
+  {
+    Error_Handler();
+  }
+#else
   (void)vofa_firewater_send_text("boot: sdio ok");
   if (HAL_SD_GetCardInfo(&hsd, &SDCardInfo) == HAL_OK)
   {
@@ -136,6 +146,7 @@ int main(void)
   }
   (void)fs_selftest_run(&g_fs_report);
   FS_ReportBootStatus();
+#endif
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -145,8 +156,12 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+#ifdef PWOS_ENABLE_MINI9P_SERIAL
+    (void)mini9p_service_poll_once();
+#else
     (void)vofa_firewater_send_fs_report(&g_fs_report, HAL_GetTick());
     HAL_Delay(1000);
+#endif
   }
   /* USER CODE END 3 */
 }
@@ -207,12 +222,14 @@ void SystemClock_Config(void)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
+#ifndef PWOS_ENABLE_MINI9P_SERIAL
   /* User can add his own implementation to report the HAL error return state */
   {
     const uint8_t error_message[] = "error: entered Error_Handler\n";
     (void)HAL_UART_Transmit(&huart2, error_message,
                             sizeof(error_message) - 1U, 100U);
   }
+#endif
   __disable_irq();
   while (1)
   {
