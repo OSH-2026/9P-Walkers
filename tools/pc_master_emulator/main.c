@@ -1,3 +1,14 @@
+/**
+ * @file main.c
+ * @brief PC 端 Mini9P 主控模拟器
+ *
+ * 通过串口与 STM32 从设备建立连接，执行完整的 Mini9P 协议测试序列：
+ * attach → walk → open → read → clunk，并验证错误处理路径。
+ *
+ * @author OSH-2026 Team
+ * @date 2026
+ */
+
 #include "mini9p_protocol.h"
 
 #include <errno.h>
@@ -11,24 +22,51 @@
 #include <termios.h>
 #include <unistd.h>
 
+/** @brief 默认串口波特率（1 Mbps） */
 #define PC_MASTER_DEFAULT_BAUD 1000000u
+
+/** @brief 串口读/轮询超时时间，单位毫秒 */
 #define PC_MASTER_TIMEOUT_MS 1000
+
+/** @brief 收发缓冲区最大容量（字节） */
 #define PC_MASTER_FRAME_CAP 512u
+
+/** @brief Mini9P 根目录 fid */
 #define PC_MASTER_ROOT_FID 0u
+
+/** @brief /sys/health 文件测试用 fid */
 #define PC_MASTER_HEALTH_FID 1u
+
+/** @brief 故意传入的错误 fid，用于测试远端错误响应 */
 #define PC_MASTER_BAD_FID 99u
 
+/**
+ * @brief 从字节缓冲区解码小端 16 位无符号整数
+ * @param[in] data 指向两个字节的缓冲区
+ * @return 解码后的 uint16_t 值
+ */
 static uint16_t get_le16(const uint8_t *data)
 {
     return (uint16_t)data[0] | (uint16_t)((uint16_t)data[1] << 8);
 }
 
+/**
+ * @brief 打印命令行用法信息到 stderr
+ * @param[in] prog 程序名（argv[0]）
+ */
 static void print_usage(const char *prog)
 {
     fprintf(stderr, "usage: %s <serial-dev> [baud]\n", prog);
     fprintf(stderr, "example: %s /dev/ttyUSB0 1000000\n", prog);
 }
 
+/**
+ * @brief 将数值波特率转换为 termios speed_t
+ * @param[in] baud 数值波特率（如 115200）
+ * @param[out] out_speed 输出 termios 速率常量
+ * @return true  支持并转换成功
+ * @return false 不支持的波特率
+ */
 static bool baud_to_speed(unsigned long baud, speed_t *out_speed)
 {
     if (out_speed == NULL) {
@@ -67,6 +105,16 @@ static bool baud_to_speed(unsigned long baud, speed_t *out_speed)
     }
 }
 
+/**
+ * @brief 打开并配置串口设备为原始 8N1 模式
+ *
+ * 关闭所有 termios 处理标志（回显、规范模式、流控等），
+ * 设置非阻塞读、8 位数据位、无奇偶校验、1 位停止位。
+ *
+ * @param[in] path 串口设备路径（如 /dev/ttyUSB0）
+ * @param[in] baud 波特率数值
+ * @return 已配置串口的文件描述符，失败返回 -1
+ */
 static int open_serial(const char *path, unsigned long baud)
 {
     struct termios tty;
@@ -116,6 +164,11 @@ static int open_serial(const char *path, unsigned long baud)
     return fd;
 }
 
+/**
+ * @brief 阻塞等待串口文件描述符变为可读（带超时）
+ * @param[in] fd 串口文件描述符
+ * @return 0 可读； -1 超时或 poll 出错
+ */
 static int wait_readable(int fd)
 {
     struct pollfd pfd;
@@ -145,6 +198,13 @@ static int wait_readable(int fd)
     return 0;
 }
 
+/**
+ * @brief 从文件描述符精确读取 len 字节（自动处理 EINTR / 短读）
+ * @param[in] fd 文件描述符
+ * @param[out] data 接收缓冲区
+ * @param[in] len 期望读取的字节数
+ * @return 0 成功； -1 失败
+ */
 static int read_exact(int fd, uint8_t *data, size_t len)
 {
     size_t total = 0u;
@@ -174,6 +234,13 @@ static int read_exact(int fd, uint8_t *data, size_t len)
     return 0;
 }
 
+/**
+ * @brief 向文件描述符写入全部数据并等待硬件发送完成（tcdrain）
+ * @param[in] fd 文件描述符
+ * @param[in] data 待写入数据
+ * @param[in] len 数据长度
+ * @return 0 成功； -1 失败
+ */
 static int write_all(int fd, const uint8_t *data, size_t len)
 {
     size_t total = 0u;
@@ -201,6 +268,17 @@ static int write_all(int fd, const uint8_t *data, size_t len)
     return 0;
 }
 
+/**
+ * @brief 读取一个完整的 Mini9P 帧（含 4 字节头部 + payload + CRC）
+ *
+ * 头部 magic 必须为 "9P"，随后根据帧长度字段读取剩余数据。
+ *
+ * @param[in] fd 串口文件描述符
+ * @param[out] frame 帧数据缓冲区
+ * @param[in] cap frame 缓冲区容量
+ * @param[out] out_len 实际读取的帧长度（含 CRC）
+ * @return 0 成功； -1 失败（magic 错误、长度非法、缓冲区不足或读出错）
+ */
 static int read_frame(int fd, uint8_t *frame, size_t cap, size_t *out_len)
 {
     uint8_t header[4];
@@ -236,6 +314,11 @@ static int read_frame(int fd, uint8_t *frame, size_t cap, size_t *out_len)
     return 0;
 }
 
+/**
+ * @brief 将 Mini9P 响应类型字节转换为可读的字符串常量
+ * @param[in] type 响应类型字节
+ * @return 对应的类型名称（如 "Rattach"），未知类型返回 "unknown"
+ */
 static const char *type_name(uint8_t type)
 {
     switch (type) {
@@ -256,6 +339,20 @@ static const char *type_name(uint8_t type)
     }
 }
 
+/**
+ * @brief 发送一帧 Mini9P 请求并读取响应，进行 tag 匹配校验
+ *
+ * 输出方向标识 [PC→STM32] / [STM32→PC] 便于调试。
+ *
+ * @param[in] fd 串口文件描述符
+ * @param[in] step 当前步骤描述字符串（用于日志）
+ * @param[in] tx 待发送的完整帧数据
+ * @param[in] tx_len 发送帧长度
+ * @param[out] out_frame 解码后的响应帧视图
+ * @param[out] rx 原始响应帧接收缓冲区（必须 >= rx_cap）
+ * @param[in] rx_cap 接收缓冲区容量
+ * @return 0 成功； -1 发送失败、读帧失败、解码失败或 tag 不匹配
+ */
 static int transact(int fd,
                     const char *step,
                     const uint8_t *tx,
@@ -267,7 +364,7 @@ static int transact(int fd,
     size_t rx_len = 0u;
     uint16_t expected_tag;
 
-    printf("-> %s (%zu bytes)\n", step, tx_len);
+    printf("[PC→STM32] %s (%zu bytes)\n", step, tx_len);
     if (tx_len < M9P_FRAME_OVERHEAD) {
         fprintf(stderr, "request frame too short for %s\n", step);
         return -1;
@@ -281,18 +378,23 @@ static int transact(int fd,
         return -1;
     }
     if (!m9p_decode_frame(rx, rx_len, out_frame)) {
-        fprintf(stderr, "<- failed to decode response for %s\n", step);
+        fprintf(stderr, "[STM32→PC] failed to decode response for %s\n", step);
         return -1;
     }
     if (out_frame->tag != expected_tag) {
-        fprintf(stderr, "<- tag mismatch for %s: expected %u, got %u\n", step, expected_tag, out_frame->tag);
+        fprintf(stderr, "[STM32→PC] tag mismatch for %s: expected %u, got %u\n", step, expected_tag, out_frame->tag);
         return -1;
     }
 
-    printf("<- %s tag=%u payload=%u\n", type_name(out_frame->type), out_frame->tag, out_frame->payload_len);
+    printf("[STM32→PC] %s tag=%u payload=%u\n", type_name(out_frame->type), out_frame->tag, out_frame->payload_len);
     return 0;
 }
 
+/**
+ * @brief 检查响应帧是否为 Rerror，若是则打印错误信息并返回 -1
+ * @param[in] frame 解码后的响应帧视图
+ * @return 0 不是 Rerror； -1 是 Rerror（已打印详情）
+ */
 static int fail_if_rerror(const struct m9p_frame_view *frame)
 {
     struct m9p_error error;
@@ -308,6 +410,12 @@ static int fail_if_rerror(const struct m9p_frame_view *frame)
     return -1;
 }
 
+/**
+ * @brief 断言响应帧为预期的 Rerror 并校验错误码
+ * @param[in] frame 解码后的响应帧视图
+ * @param[in] code 期望的 Mini9P 错误码
+ * @return 0 错误码匹配； -1 类型不匹配或错误码不符
+ */
 static int expect_error(const struct m9p_frame_view *frame, uint16_t code)
 {
     struct m9p_error error;
@@ -325,6 +433,21 @@ static int expect_error(const struct m9p_frame_view *frame, uint16_t code)
     return 0;
 }
 
+/**
+ * @brief 执行完整的 Mini9P 测试序列
+ *
+ * 测试流程：
+ *   1. Tattach  → 验证协商参数（msize、max_fids、feature bits）
+ *   2. Twalk    → /sys/health
+ *   3. Topen    → OREAD
+ *   4. Tread    → 验证返回 "ok\n"
+ *   5. Tclunk   → 释放 fid
+ *   6. Twalk    → /missing（期望 ENOENT）
+ *   7. Topen    → 非法 fid（期望 EFID）
+ *
+ * @param[in] fd 已打开的串口文件描述符
+ * @return 0 全部测试通过； -1 任意步骤失败
+ */
 static int run_sequence(int fd)
 {
     uint8_t tx[PC_MASTER_FRAME_CAP];
@@ -436,6 +559,15 @@ static int run_sequence(int fd)
     return 0;
 }
 
+/**
+ * @brief 程序入口：解析参数、打开串口、执行 Mini9P 测试序列
+ *
+ * 用法：pc_master_emulator <serial-dev> [baud]
+ *
+ * @param[in] argc 参数个数
+ * @param[in] argv 参数数组，argv[1] 为串口路径，argv[2] 可选波特率
+ * @return 0 测试全部通过； 1 运行时错误； 2 参数错误
+ */
 int main(int argc, char **argv)
 {
     const char *serial_path;
