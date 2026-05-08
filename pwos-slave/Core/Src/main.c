@@ -57,6 +57,9 @@
 HAL_SD_CardInfoTypeDef SDCardInfo;
 FS_SelfTestReport g_fs_report;
 #endif
+#if defined(PWOS_ENABLE_MINI9P_SERIAL) && defined(PWOS_BOARD_ZGT6)
+static uint32_t g_led_last_toggle_ms;
+#endif
 /* USER CODE END PV */
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
@@ -153,8 +156,13 @@ int main(void) {
 #ifdef PWOS_ENABLE_MINI9P_SERIAL
     (void)mini9p_service_poll_once();
 #ifdef PWOS_BOARD_ZGT6
-    HAL_GPIO_TogglePin(GPIOF, GPIO_PIN_9);  // PF9 接绿色 LED
-    HAL_Delay(100);                         // 100ms 闪烁一次
+    {
+      uint32_t now = HAL_GetTick();
+      if ((uint32_t)(now - g_led_last_toggle_ms) >= 100U) {
+        HAL_GPIO_TogglePin(GPIOF, GPIO_PIN_9);  // PF9 接绿色 LED
+        g_led_last_toggle_ms = now;
+      }
+    }
 #endif
 #else
     (void)vofa_firewater_send_fs_report(&g_fs_report, HAL_GetTick());
