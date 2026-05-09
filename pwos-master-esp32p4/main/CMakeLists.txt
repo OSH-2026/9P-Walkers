@@ -1,4 +1,5 @@
 file(GLOB LUA_SRCS "${CMAKE_CURRENT_LIST_DIR}/../lua/*.c")
+set(PWOS_SHARED_MINI9P_DIR "${CMAKE_CURRENT_LIST_DIR}/../../pwos-shared/mini9p")
 
 list(REMOVE_ITEM LUA_SRCS
     "${CMAKE_CURRENT_LIST_DIR}/../lua/lua.c"
@@ -14,8 +15,8 @@ idf_component_register(
         "hello_world_main.c"
         "lua_bindings.c"
         "lua_port.c"
-        "../mini9p/mini9p_client.c"
-        "../mini9p/mini9p_protocol.c"
+        "${PWOS_SHARED_MINI9P_DIR}/mini9p_client.c"
+        "${PWOS_SHARED_MINI9P_DIR}/mini9p_protocol.c"
         "../transport/uart_transport.c"
         "../vfs_bridge/cluster_config.c"
         "../vfs_bridge/cluster_vfs.c"
@@ -27,7 +28,7 @@ idf_component_register(
     INCLUDE_DIRS
         "."
         "../lua"
-        "../mini9p"
+        "${PWOS_SHARED_MINI9P_DIR}"
         "../transport"
         "../vfs_bridge"
         "../shell")

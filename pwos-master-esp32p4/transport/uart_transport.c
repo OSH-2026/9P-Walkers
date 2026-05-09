@@ -4,7 +4,7 @@
  * 不代表系统中的主从角色。非 ESP32 分支仅用于 PC 外部仿真和接口验证。
  */
 #include "uart_transport.h"
-#include "../mini9p/mini9p_protocol.h"
+#include "mini9p_protocol.h"
 
 // #define ESP_PLATFORM  /* 这个宏由 ESP-IDF 构建系统自动定义，表示当前编译环境是 ESP32 平台。 */
 
