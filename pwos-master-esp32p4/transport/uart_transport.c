@@ -14,7 +14,7 @@
  * 真正的 ESP-IDF 构建会自动定义 ESP_PLATFORM。
  * 这里不要手工 #define 它，否则即使在 PC/编辑器环境里，
  * 代码也会强行进入 ESP32 分支，随后出现：
- * 1. 找不到 driver/uart.h、freertos/*.h
+ * 1. 找不到 driver/uart.h 以及 freertos 下的相关头文件
  * 2. 连带找不到 TickType_t、SemaphoreHandle_t 的定义
  */
 #ifdef ESP_PLATFORM
@@ -47,6 +47,7 @@ void m9p_uart_transport_get_default_config(struct m9p_uart_transport_config *out
     out_config->rx_buffer_size = M9P_UART_TRANSPORT_DEFAULT_RX_BUFFER_SIZE;
     out_config->tx_buffer_size = M9P_UART_TRANSPORT_DEFAULT_TX_BUFFER_SIZE;
     out_config->flush_before_request = true;
+    out_config->flush_before_receive = false;
 }
 
 #ifndef ESP_PLATFORM
@@ -70,6 +71,47 @@ int m9p_uart_transport_init(struct m9p_uart_transport *transport,
     transport->lock = NULL;
     transport->initialized = true;
     return 0;
+}
+
+/**
+ * @brief 发送一整帧数据到 UART（非 ESP32 平台桩实现）。
+ * @param[in,out] transport 传输上下文指针。
+ * @param[in] tx_data 待发送帧数据。
+ * @param[in] tx_len 待发送帧长度。
+ * @retval <0 非 ESP32 平台下恒返回 ENOTSUP。
+ */
+int m9p_uart_transport_send_frame(struct m9p_uart_transport *transport,
+                                  const uint8_t *tx_data,
+                                  size_t tx_len)
+{
+    (void)transport;
+    (void)tx_data;
+    (void)tx_len;
+
+    return -(int)M9P_ERR_ENOTSUP;
+}
+
+/**
+ * @brief 从 UART 接收一整帧数据（非 ESP32 平台桩实现）。
+ * @param[in,out] transport 传输上下文指针。
+ * @param[out] rx_data 接收缓冲区。
+ * @param[in] rx_cap 接收缓冲区容量。
+ * @param[out] rx_len 实际接收长度。
+ * @retval <0 非 ESP32 平台下恒返回 ENOTSUP。
+ */
+int m9p_uart_transport_receive_frame(struct m9p_uart_transport *transport,
+                                     uint8_t *rx_data,
+                                     size_t rx_cap,
+                                     size_t *rx_len)
+{
+    (void)transport;
+    (void)rx_data;
+    (void)rx_cap;
+
+    if (rx_len != NULL) {
+        *rx_len = 0u;
+    }
+    return -(int)M9P_ERR_ENOTSUP;
 }
 
 /**
@@ -116,6 +158,46 @@ int m9p_uart_transport_request(void *transport_ctx,
     return -(int)M9P_ERR_ENOTSUP;
 }
 
+/**
+ * @brief 接收一帧请求、调用处理器并回发响应（非 ESP32 平台桩实现）。
+ * @param[in,out] transport 传输上下文指针。
+ * @param[in] handler 服务端帧处理回调。
+ * @param[in] server_ctx 传给回调的用户上下文。
+ * @param[out] rx_data 请求帧缓冲区。
+ * @param[in] rx_cap 请求帧缓冲区容量。
+ * @param[out] rx_len 实际请求长度。
+ * @param[out] tx_data 响应帧缓冲区。
+ * @param[in] tx_cap 响应帧缓冲区容量。
+ * @param[out] tx_len 实际响应长度。
+ * @retval <0 非 ESP32 平台下恒返回 ENOTSUP。
+ */
+int m9p_uart_transport_serve_once(struct m9p_uart_transport *transport,
+                                  m9p_server_transport_fn handler,
+                                  void *server_ctx,
+                                  uint8_t *rx_data,
+                                  size_t rx_cap,
+                                  size_t *rx_len,
+                                  uint8_t *tx_data,
+                                  size_t tx_cap,
+                                  size_t *tx_len)
+{
+    (void)transport;
+    (void)handler;
+    (void)server_ctx;
+    (void)rx_data;
+    (void)rx_cap;
+    (void)tx_data;
+    (void)tx_cap;
+
+    if (rx_len != NULL) {
+        *rx_len = 0u;
+    }
+    if (tx_len != NULL) {
+        *tx_len = 0u;
+    }
+    return -(int)M9P_ERR_ENOTSUP;
+}
+
 #else
 
 /*
@@ -153,6 +235,22 @@ static SemaphoreHandle_t transport_lock(const struct m9p_uart_transport *transpo
     return (SemaphoreHandle_t)transport->lock;
 }
 
+/* 拿锁失败直接返回 EBUSY，让调用方知道当前 UART 已被其他事务占用。 */
+static int transport_take_lock(struct m9p_uart_transport *transport)
+{
+    if (xSemaphoreTake(transport_lock(transport), transport_timeout_ticks(transport)) != pdTRUE) {
+        return -(int)M9P_ERR_EBUSY;
+    }
+
+    return 0;
+}
+
+/* 和 transport_take_lock 配套的释放动作，保证所有路径都能把锁还回去。 */
+static void transport_give_lock(struct m9p_uart_transport *transport)
+{
+    xSemaphoreGive(transport_lock(transport));
+}
+
 /* ESP-IDF 的错误码和 mini9P 自己的错误码不是一套，这里做一层翻译。 */
 static int esp_err_to_m9p(esp_err_t err)
 {
@@ -170,6 +268,12 @@ static int esp_err_to_m9p(esp_err_t err)
     default:
         return -(int)M9P_ERR_EIO;
     }
+}
+
+/* ESP32 分支里所有输入清空都走这一层，便于把底层错误码统一翻译成 mini9P 风格。 */
+static int flush_input(struct m9p_uart_transport *transport)
+{
+    return esp_err_to_m9p(uart_flush_input((uart_port_t)transport->config.uart_port));
 }
 
 /*
@@ -209,6 +313,76 @@ static int read_exact(struct m9p_uart_transport *transport,
         total += (size_t)chunk;
     }
 
+    return 0;
+}
+
+/*
+ * 发送一整帧原始 UART 数据。
+ * 这个函数只负责“把这帧写出去并确认底层发送完成”，
+ * 不关心它是 mini9P 请求还是响应，也不关心后面是不是还要继续接收。
+ */
+static int send_frame_locked(struct m9p_uart_transport *transport,
+                             const uint8_t *tx_data,
+                             size_t tx_len)
+{
+    int written;
+    int ret;
+
+    written = uart_write_bytes((uart_port_t)transport->config.uart_port, tx_data, tx_len);
+    if (written < 0 || (size_t)written != tx_len) {
+        return -(int)M9P_ERR_EIO;
+    }
+
+    ret = esp_err_to_m9p(uart_wait_tx_done((uart_port_t)transport->config.uart_port,
+                                           transport_timeout_ticks(transport)));
+    if (ret < 0) {
+        return ret;
+    }
+
+    return 0;
+}
+
+/*
+ * 接收一整帧原始 UART 数据。
+ * 它先读 4 字节固定头部，再根据协议中的长度字段把剩余内容读满。
+ * 之所以不一次性盲读固定大缓冲，是为了同时兼顾帧完整性和内存占用。
+ */
+static int receive_frame_locked(struct m9p_uart_transport *transport,
+                                uint8_t *rx_data,
+                                size_t rx_cap,
+                                size_t *rx_len)
+{
+    uint8_t header[4];
+    uint16_t frame_len_field;
+    size_t total_len;
+    int ret;
+
+    ret = read_exact(transport, header, sizeof(header));
+    if (ret < 0) {
+        return ret;
+    }
+    if (header[0] != (uint8_t)'9' || header[1] != (uint8_t)'P') {
+        return -(int)M9P_ERR_EIO;
+    }
+
+    frame_len_field = (uint16_t)header[2] | (uint16_t)((uint16_t)header[3] << 8);
+    if (frame_len_field < 4u) {
+        return -(int)M9P_ERR_EIO;
+    }
+
+    total_len = (size_t)frame_len_field + 6u;
+    if (total_len > rx_cap) {
+        (void)flush_input(transport);
+        return -(int)M9P_ERR_EMSIZE;
+    }
+
+    memcpy(rx_data, header, sizeof(header));
+    ret = read_exact(transport, rx_data + sizeof(header), total_len - sizeof(header));
+    if (ret < 0) {
+        return ret;
+    }
+
+    *rx_len = total_len;
     return 0;
 }
 
@@ -293,6 +467,77 @@ int m9p_uart_transport_init(struct m9p_uart_transport *transport,
 }
 
 /**
+ * @brief 发送一整帧原始 UART 数据（ESP32 实现）。
+ * @param[in,out] transport 传输上下文指针。
+ * @param[in] tx_data 待发送帧数据。
+ * @param[in] tx_len 帧长度。
+ * @retval 0 成功
+ * @retval <0 错误码
+ * @note 该接口只负责原始发帧，不额外等待对端响应。
+ */
+int m9p_uart_transport_send_frame(struct m9p_uart_transport *transport,
+                                  const uint8_t *tx_data,
+                                  size_t tx_len)
+{
+    int ret;
+
+    if (transport == NULL || !transport->initialized || tx_data == NULL || tx_len == 0u) {
+        return -(int)M9P_ERR_EINVAL;
+    }
+
+    ret = transport_take_lock(transport);
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = send_frame_locked(transport, tx_data, tx_len);
+    transport_give_lock(transport);
+    return ret;
+}
+
+/**
+ * @brief 接收一整帧原始 UART 数据（ESP32 实现）。
+ * @param[in,out] transport 传输上下文指针。
+ * @param[out] rx_data 接收缓冲区。
+ * @param[in] rx_cap 接收缓冲区容量。
+ * @param[out] rx_len 实际接收长度。
+ * @retval 0 成功
+ * @retval <0 错误码
+ * @note 该接口只做“收满一帧”，不自动调用任何协议处理器。
+ */
+int m9p_uart_transport_receive_frame(struct m9p_uart_transport *transport,
+                                     uint8_t *rx_data,
+                                     size_t rx_cap,
+                                     size_t *rx_len)
+{
+    int ret;
+
+    if (transport == NULL || !transport->initialized || rx_data == NULL || rx_len == NULL ||
+        rx_cap < M9P_FRAME_OVERHEAD) {
+        return -(int)M9P_ERR_EINVAL;
+    }
+
+    *rx_len = 0u;
+
+    ret = transport_take_lock(transport);
+    if (ret < 0) {
+        return ret;
+    }
+
+    if (transport->config.flush_before_receive) {
+        ret = flush_input(transport);
+        if (ret < 0) {
+            transport_give_lock(transport);
+            return ret;
+        }
+    }
+
+    ret = receive_frame_locked(transport, rx_data, rx_cap, rx_len);
+    transport_give_lock(transport);
+    return ret;
+}
+
+/**
  * @brief 反初始化 UART 传输上下文（ESP32 实现）。
  * @param[in,out] transport 传输上下文指针。
  * @note 卸载 UART 驱动，释放互斥锁，清零结构体。
@@ -330,14 +575,10 @@ int m9p_uart_transport_request(void *transport_ctx,
                                size_t *rx_len)
 {
     struct m9p_uart_transport *transport = (struct m9p_uart_transport *)transport_ctx;
-    uint8_t header[4];
-    uint16_t frame_len_field;
-    size_t total_len;
-    int written;
     int ret = 0;
 
     if (transport == NULL || !transport->initialized || tx_data == NULL || tx_len == 0u ||
-        rx_data == NULL || rx_len == NULL) {
+        rx_data == NULL || rx_len == NULL || rx_cap < M9P_FRAME_OVERHEAD) {
         return -(int)M9P_ERR_EINVAL;
     }
 
@@ -345,69 +586,114 @@ int m9p_uart_transport_request(void *transport_ctx,
     *rx_len = 0u;
 
     /* 先拿锁，避免多个任务同时收发同一条 UART。 */
-    if (xSemaphoreTake(transport_lock(transport), transport_timeout_ticks(transport)) != pdTRUE) {
-        return -(int)M9P_ERR_EBUSY;
+    ret = transport_take_lock(transport);
+    if (ret < 0) {
+        return ret;
     }
 
     if (transport->config.flush_before_request) {
         /* 丢掉串口里残留的旧数据，减少把上一次碎片误当成新响应的风险。 */
-        ret = esp_err_to_m9p(uart_flush_input((uart_port_t)transport->config.uart_port));
+        ret = flush_input(transport);
         if (ret < 0) {
             goto out;
         }
     }
 
-    /* 把整帧请求写到 UART。 */
-    written = uart_write_bytes((uart_port_t)transport->config.uart_port, tx_data, tx_len);
-    if (written < 0 || (size_t)written != tx_len) {
-        ret = -(int)M9P_ERR_EIO;
-        goto out;
-    }
-
-    /* 等到底层 UART 真正发送完成，再开始等响应。 */
-    ret = esp_err_to_m9p(uart_wait_tx_done((uart_port_t)transport->config.uart_port,
-                                           transport_timeout_ticks(transport)));
+    /* 请求模式下要求一个完整原子事务：发完整帧，再接完整帧。 */
+    ret = send_frame_locked(transport, tx_data, tx_len);
     if (ret < 0) {
         goto out;
     }
 
-    /* 先读固定长度的帧头，再根据帧头里的长度信息决定后面还要读多少。 */
-    ret = read_exact(transport, header, sizeof(header));
-    if (ret < 0) {
-        goto out;
-    }
-    if (header[0] != (uint8_t)'9' || header[1] != (uint8_t)'P') {
-        ret = -(int)M9P_ERR_EIO;
-        goto out;
-    }
-
-    /* 协议头里带了长度字段，先解出来，再检查接收缓冲区够不够大。 */
-    frame_len_field = (uint16_t)header[2] | (uint16_t)((uint16_t)header[3] << 8);
-    if (frame_len_field < 4u) {
-        ret = -(int)M9P_ERR_EIO;
-        goto out;
-    }
-
-    total_len = (size_t)frame_len_field + 6u;
-    if (total_len > rx_cap) {
-        (void)uart_flush_input((uart_port_t)transport->config.uart_port);
-        ret = -(int)M9P_ERR_EMSIZE;
-        goto out;
-    }
-
-    /* 帧头已经有了，先拷进去，再把剩余部分继续读满。 */
-    memcpy(rx_data, header, sizeof(header));
-    ret = read_exact(transport, rx_data + sizeof(header), total_len - sizeof(header));
-    if (ret < 0) {
-        goto out;
-    }
-
-    /* 走到这里说明一整帧响应已经收完整。 */
-    *rx_len = total_len;
+    ret = receive_frame_locked(transport, rx_data, rx_cap, rx_len);
 
 out:
     /* 无论成功失败都要放锁，否则后续调用会被永久卡住。 */
-    xSemaphoreGive(transport_lock(transport));
+    transport_give_lock(transport);
+    return ret;
+}
+
+/**
+ * @brief 接收一帧请求、调用处理器并回发响应（ESP32 实现）。
+ * @param[in,out] transport 传输上下文指针。
+ * @param[in] handler 服务端处理器，负责把请求帧变成响应帧。
+ * @param[in] server_ctx 回调上下文。
+ * @param[out] rx_data 请求帧缓冲区。
+ * @param[in] rx_cap 请求帧缓冲区容量。
+ * @param[out] rx_len 实际收到的请求帧长度。
+ * @param[out] tx_data 响应帧缓冲区。
+ * @param[in] tx_cap 响应帧缓冲区容量。
+ * @param[out] tx_len 实际发出的响应帧长度。
+ * @retval 0 成功
+ * @retval <0 错误码
+ * @note 这样一来同一套 transport 既能服务 m9p_client，也能服务未来的 m9p_server。
+ */
+int m9p_uart_transport_serve_once(struct m9p_uart_transport *transport,
+                                  m9p_server_transport_fn handler,
+                                  void *server_ctx,
+                                  uint8_t *rx_data,
+                                  size_t rx_cap,
+                                  size_t *rx_len,
+                                  uint8_t *tx_data,
+                                  size_t tx_cap,
+                                  size_t *tx_len)
+{
+    size_t local_rx_len = 0u;
+    size_t local_tx_len = 0u;
+    int ret;
+
+    if (transport == NULL || !transport->initialized || handler == NULL || rx_data == NULL ||
+        tx_data == NULL || rx_cap < M9P_FRAME_OVERHEAD || tx_cap < M9P_FRAME_OVERHEAD) {
+        return -(int)M9P_ERR_EINVAL;
+    }
+
+    if (rx_len != NULL) {
+        *rx_len = 0u;
+    }
+    if (tx_len != NULL) {
+        *tx_len = 0u;
+    }
+
+    ret = transport_take_lock(transport);
+    if (ret < 0) {
+        return ret;
+    }
+
+    if (transport->config.flush_before_receive) {
+        ret = flush_input(transport);
+        if (ret < 0) {
+            goto out;
+        }
+    }
+
+    ret = receive_frame_locked(transport, rx_data, rx_cap, &local_rx_len);
+    if (ret < 0) {
+        goto out;
+    }
+
+    ret = handler(server_ctx, rx_data, local_rx_len, tx_data, tx_cap, &local_tx_len);
+    if (ret < 0) {
+        goto out;
+    }
+    if (local_tx_len == 0u) {
+        ret = -(int)M9P_ERR_EINVAL;
+        goto out;
+    }
+
+    ret = send_frame_locked(transport, tx_data, local_tx_len);
+    if (ret < 0) {
+        goto out;
+    }
+
+    if (rx_len != NULL) {
+        *rx_len = local_rx_len;
+    }
+    if (tx_len != NULL) {
+        *tx_len = local_tx_len;
+    }
+
+out:
+    transport_give_lock(transport);
     return ret;
 }
 

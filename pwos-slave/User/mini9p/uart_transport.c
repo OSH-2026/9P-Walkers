@@ -1,22 +1,27 @@
 /*
- * STM32 侧系统角色是 mini9P 从机（server）。
- * 这份 transport 和 ESP32 主控侧保持相同的生命周期接口：
- * - get_default_config
- * - init / deinit
- * - init_default / default
+ * 系统角色约定：ESP32 是主控（master），STM32 是从机（slave）。
+ * 但 transport 这一层不再把自己绑定死到“只能做 server”这个角色上。
  *
- * 但真正的数据流方向不同：
- * - 主控侧是 send request -> wait response
- * - 从机侧是 receive request -> process -> send response
+ * 这份 STM32 UART transport 现在同时支持两类用法：
+ * 1. request 模式：主动发送一帧请求，再等待一帧响应。
+ * 2. serve_once 模式：被动接收一帧请求，调用处理器，再回发一帧响应。
+ *
+ * 这样做的目的，是让主控和从机两边都能同时挂 mini9P client 和 mini9P server，
+ * 上层如果要做双向 RPC、管理通道或者反向控制，就不必重新发明第二套串口收发逻辑。
  */
 #include "uart_transport.h"
 
 #include <limits.h>
 #include <string.h>
 
+/* 全局默认 transport，给“开箱即用”的初始化接口使用。 */
 static struct m9p_uart_transport g_default_transport;
 
-static uint32_t transport_timeout_ms(const struct m9p_uart_transport *transport)
+/*
+ * 统一做一个“毫秒超时兜底”。
+ * 如果调用方把超时设置成 0，这里强制改成 1ms，避免 HAL 出现不明确行为。
+ */
+static unsigned int transport_timeout_ms(const struct m9p_uart_transport *transport)
 {
     if (transport->config.io_timeout_ms == 0u) {
         return 1u;
@@ -25,6 +30,11 @@ static uint32_t transport_timeout_ms(const struct m9p_uart_transport *transport)
     return transport->config.io_timeout_ms;
 }
 
+/*
+ * STM32 HAL 和 mini9P 使用的错误语义不同。
+ * 这一层把 HAL 的返回状态统一翻译成 mini9P 错误码，
+ * 这样上层 client/server 看到的始终是一套风格一致的返回值。
+ */
 static int hal_status_to_m9p(HAL_StatusTypeDef status)
 {
     switch (status) {
@@ -40,6 +50,34 @@ static int hal_status_to_m9p(HAL_StatusTypeDef status)
     }
 }
 
+/*
+ * 当前 STM32 侧没有引入 RTOS 互斥锁，这里先用一个轻量 busy 标志做重入保护。
+ * 它的目标不是提供跨中断/跨线程的强同步，而是避免同一条 UART 在当前轮询模型下
+ * 被 request 和 serve_once 嵌套使用，导致请求帧和响应帧交织。
+ */
+static int transport_claim(struct m9p_uart_transport *transport)
+{
+    if (transport->busy) {
+        return -(int)M9P_ERR_EBUSY;
+    }
+
+    transport->busy = true;
+    return 0;
+}
+
+/* 和 transport_claim 配套的释放动作。 */
+static void transport_release(struct m9p_uart_transport *transport)
+{
+    transport->busy = false;
+}
+
+/*
+ * 把串口接收寄存器和 FIFO 里残留的旧字节尽量清掉。
+ * 典型用途是：
+ * 1. request 模式下，发新请求前先清碎片；
+ * 2. serve_once 模式下，如果上层确认当前阶段只想处理“下一帧完整新请求”，
+ *    也可以选择先丢弃残留数据。
+ */
 static int drain_rx_fifo(struct m9p_uart_transport *transport)
 {
     uint8_t byte;
@@ -50,6 +88,13 @@ static int drain_rx_fifo(struct m9p_uart_transport *transport)
     return 0;
 }
 
+/*
+ * HAL_UART_Receive 一次不保证拿满所有目标字节。
+ * 所以这里循环读，直到：
+ * 1. 读满 len 个字节；
+ * 2. 某次接收返回超时；
+ * 3. 某次接收返回错误或 busy。
+ */
 static int read_exact(struct m9p_uart_transport *transport, uint8_t *buf, size_t len)
 {
     size_t total = 0u;
@@ -76,60 +121,38 @@ static int read_exact(struct m9p_uart_transport *transport, uint8_t *buf, size_t
     return 0;
 }
 
-void m9p_uart_transport_get_default_config(struct m9p_uart_transport_config *out_config)
+/*
+ * 发送一整帧原始 UART 数据。
+ * 这一层只负责“把这帧真正发出去”，不关心它是请求还是响应。
+ */
+static int send_frame_locked(struct m9p_uart_transport *transport,
+                             const uint8_t *tx_data,
+                             size_t tx_len)
 {
-    if (out_config == NULL) {
-        return;
+    if (tx_len > (size_t)UINT16_MAX) {
+        return -(int)M9P_ERR_EMSIZE;
     }
 
-    out_config->uart = &huart2;
-    out_config->io_timeout_ms = M9P_UART_TRANSPORT_DEFAULT_TIMEOUT_MS;
-    out_config->flush_before_receive = false;
+    return hal_status_to_m9p(HAL_UART_Transmit(transport->config.uart,
+                                               tx_data,
+                                               (uint16_t)tx_len,
+                                               transport_timeout_ms(transport)));
 }
 
-int m9p_uart_transport_init(struct m9p_uart_transport *transport,
-                            const struct m9p_uart_transport_config *config)
-{
-    if (transport == NULL || config == NULL || config->uart == NULL) {
-        return -(int)M9P_ERR_EINVAL;
-    }
-
-    transport->config = *config;
-    transport->initialized = true;
-    return 0;
-}
-
-void m9p_uart_transport_deinit(struct m9p_uart_transport *transport)
-{
-    if (transport == NULL) {
-        return;
-    }
-
-    memset(transport, 0, sizeof(*transport));
-}
-
-int m9p_uart_transport_receive_frame(struct m9p_uart_transport *transport,
-                                     uint8_t *rx_data,
-                                     size_t rx_cap,
-                                     size_t *rx_len)
+/*
+ * 接收一整帧原始 UART 数据。
+ * 实现方式和主控侧一致：先拿 4 字节固定帧头，再根据长度字段决定后续还要读多少。
+ * 这样可以在不浪费缓冲区的前提下，确保调用方拿到的是完整帧。
+ */
+static int receive_frame_locked(struct m9p_uart_transport *transport,
+                                uint8_t *rx_data,
+                                size_t rx_cap,
+                                size_t *rx_len)
 {
     uint8_t header[4];
     uint16_t frame_len_field;
     size_t total_len;
     int ret;
-
-    if (transport == NULL || !transport->initialized || rx_data == NULL || rx_len == NULL) {
-        return -(int)M9P_ERR_EINVAL;
-    }
-
-    *rx_len = 0u;
-
-    if (transport->config.flush_before_receive) {
-        ret = drain_rx_fifo(transport);
-        if (ret < 0) {
-            return ret;
-        }
-    }
 
     ret = read_exact(transport, header, sizeof(header));
     if (ret < 0) {
@@ -159,23 +182,197 @@ int m9p_uart_transport_receive_frame(struct m9p_uart_transport *transport,
     return 0;
 }
 
+/**
+ * @brief 获取 UART 传输默认配置。
+ * @param[out] out_config 输出配置结构体指针，不能为空。
+ * @note 默认配置绑定到 STM32 工程里现成的 huart2，同时默认不开启任何收发前清空策略。
+ */
+void m9p_uart_transport_get_default_config(struct m9p_uart_transport_config *out_config)
+{
+    if (out_config == NULL) {
+        return;
+    }
+
+    out_config->uart = &huart2;
+    out_config->io_timeout_ms = M9P_UART_TRANSPORT_DEFAULT_TIMEOUT_MS;
+    out_config->flush_before_request = false;
+    out_config->flush_before_receive = false;
+}
+
+/**
+ * @brief 初始化 UART 传输上下文（STM32 实现）。
+ * @param[in,out] transport 传输上下文指针。
+ * @param[in] config 配置指针。
+ * @retval 0 成功
+ * @retval <0 错误码
+ * @note 这里不初始化 UART 外设本身；UART 的底层初始化仍由 CubeMX 生成的 MX_USART2_UART_Init 完成。
+ */
+int m9p_uart_transport_init(struct m9p_uart_transport *transport,
+                            const struct m9p_uart_transport_config *config)
+{
+    if (transport == NULL || config == NULL || config->uart == NULL) {
+        return -(int)M9P_ERR_EINVAL;
+    }
+
+    transport->config = *config;
+    transport->busy = false;
+    transport->initialized = true;
+    return 0;
+}
+
+/**
+ * @brief 反初始化 UART 传输上下文（STM32 实现）。
+ * @param[in,out] transport 传输上下文指针。
+ * @note 不会关闭或反初始化 HAL UART 外设，只会清零本 transport 内部状态。
+ */
+void m9p_uart_transport_deinit(struct m9p_uart_transport *transport)
+{
+    if (transport == NULL) {
+        return;
+    }
+
+    memset(transport, 0, sizeof(*transport));
+}
+
+/**
+ * @brief 发送一整帧原始 UART 数据（STM32 实现）。
+ * @param[in,out] transport 传输上下文指针。
+ * @param[in] tx_data 待发送帧数据。
+ * @param[in] tx_len 帧长度。
+ * @retval 0 成功
+ * @retval <0 错误码
+ * @note 该接口只管“发帧”，不自动等待对端回包。
+ */
 int m9p_uart_transport_send_frame(struct m9p_uart_transport *transport,
                                   const uint8_t *tx_data,
                                   size_t tx_len)
 {
+    int ret;
+
     if (transport == NULL || !transport->initialized || tx_data == NULL || tx_len == 0u) {
         return -(int)M9P_ERR_EINVAL;
     }
-    if (tx_len > (size_t)UINT16_MAX) {
-        return -(int)M9P_ERR_EMSIZE;
+
+    ret = transport_claim(transport);
+    if (ret < 0) {
+        return ret;
     }
 
-    return hal_status_to_m9p(HAL_UART_Transmit(transport->config.uart,
-                                               (const uint8_t *)tx_data,
-                                               (uint16_t)tx_len,
-                                               transport_timeout_ms(transport)));
+    ret = send_frame_locked(transport, tx_data, tx_len);
+    transport_release(transport);
+    return ret;
 }
 
+/**
+ * @brief 接收一整帧原始 UART 数据（STM32 实现）。
+ * @param[in,out] transport 传输上下文指针。
+ * @param[out] rx_data 接收缓冲区。
+ * @param[in] rx_cap 接收缓冲区容量。
+ * @param[out] rx_len 实际接收长度。
+ * @retval 0 成功
+ * @retval <0 错误码
+ * @note 该接口只做“收满一帧”，不自动把帧交给 server 处理器。
+ */
+int m9p_uart_transport_receive_frame(struct m9p_uart_transport *transport,
+                                     uint8_t *rx_data,
+                                     size_t rx_cap,
+                                     size_t *rx_len)
+{
+    int ret;
+
+    if (transport == NULL || !transport->initialized || rx_data == NULL || rx_len == NULL ||
+        rx_cap < M9P_FRAME_OVERHEAD) {
+        return -(int)M9P_ERR_EINVAL;
+    }
+
+    *rx_len = 0u;
+
+    ret = transport_claim(transport);
+    if (ret < 0) {
+        return ret;
+    }
+
+    if (transport->config.flush_before_receive) {
+        ret = drain_rx_fifo(transport);
+        if (ret < 0) {
+            transport_release(transport);
+            return ret;
+        }
+    }
+
+    ret = receive_frame_locked(transport, rx_data, rx_cap, rx_len);
+    transport_release(transport);
+    return ret;
+}
+
+/**
+ * @brief 主动发送一帧请求，并等待一帧响应（STM32 实现）。
+ * @param[in] transport_ctx 传输上下文指针（struct m9p_uart_transport *）。
+ * @param[in] tx_data 待发送请求帧。
+ * @param[in] tx_len 请求帧长度。
+ * @param[out] rx_data 接收响应帧缓冲区。
+ * @param[in] rx_cap 接收缓冲区容量。
+ * @param[out] rx_len 实际接收长度。
+ * @retval 0 成功
+ * @retval <0 错误码
+ * @note 有了这个接口后，STM32 侧也可以直接挂一个 m9p_client，主动向 ESP32 发起请求。
+ */
+int m9p_uart_transport_request(void *transport_ctx,
+                               const uint8_t *tx_data,
+                               size_t tx_len,
+                               uint8_t *rx_data,
+                               size_t rx_cap,
+                               size_t *rx_len)
+{
+    struct m9p_uart_transport *transport = (struct m9p_uart_transport *)transport_ctx;
+    int ret = 0;
+
+    if (transport == NULL || !transport->initialized || tx_data == NULL || tx_len == 0u ||
+        rx_data == NULL || rx_len == NULL || rx_cap < M9P_FRAME_OVERHEAD) {
+        return -(int)M9P_ERR_EINVAL;
+    }
+
+    *rx_len = 0u;
+
+    ret = transport_claim(transport);
+    if (ret < 0) {
+        return ret;
+    }
+
+    if (transport->config.flush_before_request) {
+        ret = drain_rx_fifo(transport);
+        if (ret < 0) {
+            goto out;
+        }
+    }
+
+    ret = send_frame_locked(transport, tx_data, tx_len);
+    if (ret < 0) {
+        goto out;
+    }
+
+    ret = receive_frame_locked(transport, rx_data, rx_cap, rx_len);
+
+out:
+    transport_release(transport);
+    return ret;
+}
+
+/**
+ * @brief 接收一帧请求、调用处理器并回发响应（STM32 实现）。
+ * @param[in,out] transport 传输上下文指针。
+ * @param[in] handler 服务端处理器，负责把请求帧转成响应帧。
+ * @param[in] server_ctx 回调上下文。
+ * @param[out] rx_data 请求帧缓冲区。
+ * @param[in] rx_cap 请求帧缓冲区容量。
+ * @param[out] rx_len 实际接收的请求帧长度。
+ * @param[out] tx_data 响应帧缓冲区。
+ * @param[in] tx_cap 响应帧缓冲区容量。
+ * @param[out] tx_len 实际发送的响应帧长度。
+ * @retval 0 成功
+ * @retval <0 错误码
+ * @note 这是从机服务模式最直接的入口，但主控侧如果未来要挂 server，也可以用同样思路实现。
+ */
 int m9p_uart_transport_serve_once(struct m9p_uart_transport *transport,
                                   m9p_server_transport_fn handler,
                                   void *server_ctx,
@@ -190,26 +387,47 @@ int m9p_uart_transport_serve_once(struct m9p_uart_transport *transport,
     size_t local_tx_len = 0u;
     int ret;
 
-    if (transport == NULL || handler == NULL || rx_data == NULL || tx_data == NULL) {
+    if (transport == NULL || !transport->initialized || handler == NULL || rx_data == NULL ||
+        tx_data == NULL || rx_cap < M9P_FRAME_OVERHEAD || tx_cap < M9P_FRAME_OVERHEAD) {
         return -(int)M9P_ERR_EINVAL;
     }
 
-    ret = m9p_uart_transport_receive_frame(transport, rx_data, rx_cap, &local_rx_len);
+    if (rx_len != NULL) {
+        *rx_len = 0u;
+    }
+    if (tx_len != NULL) {
+        *tx_len = 0u;
+    }
+
+    ret = transport_claim(transport);
     if (ret < 0) {
         return ret;
+    }
+
+    if (transport->config.flush_before_receive) {
+        ret = drain_rx_fifo(transport);
+        if (ret < 0) {
+            goto out;
+        }
+    }
+
+    ret = receive_frame_locked(transport, rx_data, rx_cap, &local_rx_len);
+    if (ret < 0) {
+        goto out;
     }
 
     ret = handler(server_ctx, rx_data, local_rx_len, tx_data, tx_cap, &local_tx_len);
     if (ret < 0) {
-        return ret;
+        goto out;
     }
     if (local_tx_len == 0u) {
-        return -(int)M9P_ERR_EINVAL;
+        ret = -(int)M9P_ERR_EINVAL;
+        goto out;
     }
 
-    ret = m9p_uart_transport_send_frame(transport, tx_data, local_tx_len);
+    ret = send_frame_locked(transport, tx_data, local_tx_len);
     if (ret < 0) {
-        return ret;
+        goto out;
     }
 
     if (rx_len != NULL) {
@@ -219,9 +437,17 @@ int m9p_uart_transport_serve_once(struct m9p_uart_transport *transport,
         *tx_len = local_tx_len;
     }
 
-    return 0;
+out:
+    transport_release(transport);
+    return ret;
 }
 
+/**
+ * @brief 初始化全局默认 UART 传输实例。
+ * @retval 0 成功
+ * @retval <0 错误码
+ * @note 该接口只初始化 transport 包装层，不会代替 CubeMX 生成的外设初始化入口。
+ */
 int m9p_uart_transport_init_default(void)
 {
     struct m9p_uart_transport_config config;
@@ -234,6 +460,10 @@ int m9p_uart_transport_init_default(void)
     return m9p_uart_transport_init(&g_default_transport, &config);
 }
 
+/**
+ * @brief 获取全局默认 UART 传输实例指针。
+ * @retval struct m9p_uart_transport* 指针
+ */
 struct m9p_uart_transport *m9p_uart_transport_default(void)
 {
     return &g_default_transport;
