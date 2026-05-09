@@ -306,11 +306,20 @@ bool m9p_parse_rread(
 bool m9p_parse_rwrite(const struct m9p_frame_view *frame, uint16_t *out_count);
 bool m9p_parse_rstat(const struct m9p_frame_view *frame, struct m9p_stat *out_stat);
 bool m9p_parse_rerror(const struct m9p_frame_view *frame, struct m9p_error *out_error);
+
+// 目录项编解码
+bool m9p_build_dirent(
+    const struct m9p_dirent *entry,
+    uint8_t *out_data,
+    size_t out_cap,
+    size_t *out_len);
 size_t m9p_parse_dirents(
     const uint8_t *data,
     size_t data_len,
     struct m9p_dirent *entries,
     size_t max_entries);
+
+// 错误码转文本
 const char *m9p_error_name(uint16_t code);
 
 #endif
