@@ -9,3 +9,5 @@ pwos-slave/.vscode/
 
 # Local development files
 venv/
+# Logs and temporary files
+tmp*.md

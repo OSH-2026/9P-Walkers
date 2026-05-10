@@ -20,10 +20,12 @@ tools/pc_master_emulator/build/pc_master_emulator <serial-dev> [baud]
 示例：
 
 ```bash
-tools/pc_master_emulator/build/pc_master_emulator /dev/ttyUSB0 1000000
+tools/pc_master_emulator/build/pc_master_emulator /dev/ttyUSB0 115200
 ```
 
-默认波特率为 `1000000`。
+如果省略波特率，工具默认使用 `1000000`。当前 `pwos-slave-stm32f411`
+工程的 USART1 配置为 `115200`，运行时需要显式传入 `115200`，或者同步修改
+固件里的 `huart1.Init.BaudRate`。
 
 ## 测试流程
 
@@ -45,12 +47,12 @@ pc_master_emulator: ok
 
 ## 连接约定
 
-- USB-TTL TX -> STM32 USART2 RX，通常为 `PA3`
-- USB-TTL RX -> STM32 USART2 TX，通常为 `PA2`
+- USB-TTL TX -> STM32 USART1 RX，通常为 `PA10`
+- USB-TTL RX -> STM32 USART1 TX，通常为 `PA9`
 - GND -> GND
 - 使用 3.3V TTL 电平
 
-从机固件需要开启 Mini9P 串口联调模式，例如使用 `PWOS_ENABLE_MINI9P_SERIAL` 构建。该模式下 USART2 应由 Mini9P 二进制帧独占，不应混入 VOFA 或其他文本日志。
+从机固件需要开启 Mini9P 串口联调模式，例如使用 `PWOS_ENABLE_MINI9P_SERIAL` 构建。该模式下对应 USART 应由 Mini9P 二进制帧独占，不应混入 VOFA 或其他文本日志。
 
 ## 当前边界
 
