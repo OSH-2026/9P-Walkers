@@ -215,6 +215,39 @@ static void test_request_round_trip(void)
     assert(memcmp(actual, response, response_len) == 0);
 }
 
+static void test_direction_flags_are_independent(void)
+{
+    struct m9p_uart_transport transport;
+    struct m9p_uart_transport_config config;
+    uint8_t frame[64];
+    uint8_t actual[64];
+    uint8_t payload[] = {0x19u, 0x91u};
+    size_t frame_len;
+    size_t actual_len;
+
+    fake_uart_reset();
+    m9p_uart_transport_get_default_config(&config);
+    config.flush_before_receive = false;
+    assert(m9p_uart_transport_init(&transport, &config) == 0);
+
+    transport.tx_busy = true;
+    assert(m9p_encode_frame(M9P_RREAD,
+                            0x555u,
+                            payload,
+                            (uint16_t)sizeof(payload),
+                            frame,
+                            sizeof(frame),
+                            &frame_len));
+    fake_uart_append_rx(frame, frame_len);
+    assert(m9p_uart_transport_receive_frame(&transport, actual, sizeof(actual), &actual_len) == 0);
+    assert(actual_len == frame_len);
+    transport.tx_busy = false;
+
+    transport.rx_busy = true;
+    assert(m9p_uart_transport_send_frame(&transport, frame, frame_len) == 0);
+    transport.rx_busy = false;
+}
+
 static void test_serve_once_round_trip(void)
 {
     struct m9p_uart_transport transport;
@@ -269,6 +302,7 @@ int main(void)
     test_send_frame();
     test_receive_frame();
     test_request_round_trip();
+    test_direction_flags_are_independent();
     test_serve_once_round_trip();
     puts("slave uart_transport host tests passed");
     return 0;

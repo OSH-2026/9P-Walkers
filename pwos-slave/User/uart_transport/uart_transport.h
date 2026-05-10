@@ -27,7 +27,9 @@ struct m9p_uart_transport_config {
 
 struct m9p_uart_transport {
     struct m9p_uart_transport_config config;  /* 当前实际生效的配置。 */
-    bool busy;                                /* 轻量重入保护，避免同一 UART 被嵌套复用。 */
+    bool tx_busy;                             /* 发送方向独立占用标志。 */
+    bool rx_busy;                             /* 接收方向独立占用标志。 */
+    bool exchange_busy;                       /* request/serve_once 的整轮事务占用标志。 */
     bool initialized;                         /* 是否已经完成初始化。 */
 };
 

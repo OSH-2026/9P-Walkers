@@ -51,24 +51,58 @@ static int hal_status_to_m9p(HAL_StatusTypeDef status)
 }
 
 /*
- * 当前 STM32 侧没有引入 RTOS 互斥锁，这里先用一个轻量 busy 标志做重入保护。
- * 它的目标不是提供跨中断/跨线程的强同步，而是避免同一条 UART 在当前轮询模型下
- * 被 request 和 serve_once 嵌套使用，导致请求帧和响应帧交织。
+ * 当前 STM32 侧没有引入 RTOS 互斥锁，因此这里把占用拆成三个轻量标志：
+ * 1. tx_busy：raw send_frame 使用
+ * 2. rx_busy：raw receive_frame 使用
+ * 3. exchange_busy：request / serve_once 使用
+ *
+ * 这样 raw TX 和 raw RX 可以并行发生，更接近 UART 的物理全双工；
+ * 而 request / serve_once 仍保持单事务 helper 语义，避免一轮 exchange 被打散。
  */
-static int transport_claim(struct m9p_uart_transport *transport)
+static int transport_claim_flag(bool *flag)
 {
-    if (transport->busy) {
+    if (*flag) {
         return -(int)M9P_ERR_EBUSY;
     }
 
-    transport->busy = true;
+    *flag = true;
     return 0;
 }
 
-/* 和 transport_claim 配套的释放动作。 */
-static void transport_release(struct m9p_uart_transport *transport)
+static int transport_claim_tx(struct m9p_uart_transport *transport)
 {
-    transport->busy = false;
+    return transport_claim_flag(&transport->tx_busy);
+}
+
+static int transport_claim_rx(struct m9p_uart_transport *transport)
+{
+    return transport_claim_flag(&transport->rx_busy);
+}
+
+static int transport_claim_exchange(struct m9p_uart_transport *transport)
+{
+    return transport_claim_flag(&transport->exchange_busy);
+}
+
+/* 和 transport_claim_* 配套的释放动作。 */
+static void transport_release_flag(bool *flag)
+{
+    *flag = false;
+}
+
+static void transport_release_tx(struct m9p_uart_transport *transport)
+{
+    transport_release_flag(&transport->tx_busy);
+}
+
+static void transport_release_rx(struct m9p_uart_transport *transport)
+{
+    transport_release_flag(&transport->rx_busy);
+}
+
+static void transport_release_exchange(struct m9p_uart_transport *transport)
+{
+    transport_release_flag(&transport->exchange_busy);
 }
 
 /*
@@ -215,7 +249,9 @@ int m9p_uart_transport_init(struct m9p_uart_transport *transport,
     }
 
     transport->config = *config;
-    transport->busy = false;
+    transport->tx_busy = false;
+    transport->rx_busy = false;
+    transport->exchange_busy = false;
     transport->initialized = true;
     return 0;
 }
@@ -241,7 +277,7 @@ void m9p_uart_transport_deinit(struct m9p_uart_transport *transport)
  * @param[in] tx_len 帧长度。
  * @retval 0 成功
  * @retval <0 错误码
- * @note 该接口只管“发帧”，不自动等待对端回包。
+ * @note 该接口只占用 TX 方向；因此 raw send_frame 与 raw receive_frame 可以并行发生。
  */
 int m9p_uart_transport_send_frame(struct m9p_uart_transport *transport,
                                   const uint8_t *tx_data,
@@ -253,13 +289,13 @@ int m9p_uart_transport_send_frame(struct m9p_uart_transport *transport,
         return -(int)M9P_ERR_EINVAL;
     }
 
-    ret = transport_claim(transport);
+    ret = transport_claim_tx(transport);
     if (ret < 0) {
         return ret;
     }
 
     ret = send_frame_locked(transport, tx_data, tx_len);
-    transport_release(transport);
+    transport_release_tx(transport);
     return ret;
 }
 
@@ -271,7 +307,7 @@ int m9p_uart_transport_send_frame(struct m9p_uart_transport *transport,
  * @param[out] rx_len 实际接收长度。
  * @retval 0 成功
  * @retval <0 错误码
- * @note 该接口只做“收满一帧”，不自动把帧交给 server 处理器。
+ * @note 该接口只占用 RX 方向；因此 raw receive_frame 与 raw send_frame 可以并行发生。
  */
 int m9p_uart_transport_receive_frame(struct m9p_uart_transport *transport,
                                      uint8_t *rx_data,
@@ -287,7 +323,7 @@ int m9p_uart_transport_receive_frame(struct m9p_uart_transport *transport,
 
     *rx_len = 0u;
 
-    ret = transport_claim(transport);
+    ret = transport_claim_rx(transport);
     if (ret < 0) {
         return ret;
     }
@@ -295,13 +331,13 @@ int m9p_uart_transport_receive_frame(struct m9p_uart_transport *transport,
     if (transport->config.flush_before_receive) {
         ret = drain_rx_fifo(transport);
         if (ret < 0) {
-            transport_release(transport);
+            transport_release_rx(transport);
             return ret;
         }
     }
 
     ret = receive_frame_locked(transport, rx_data, rx_cap, rx_len);
-    transport_release(transport);
+    transport_release_rx(transport);
     return ret;
 }
 
@@ -315,7 +351,8 @@ int m9p_uart_transport_receive_frame(struct m9p_uart_transport *transport,
  * @param[out] rx_len 实际接收长度。
  * @retval 0 成功
  * @retval <0 错误码
- * @note 有了这个接口后，STM32 侧也可以直接挂一个 m9p_client，主动向 ESP32 发起请求。
+ * @note 这是单事务 helper：它会同时占住 exchange/TX/RX，确保一轮 request/response
+ *       不会和其他 raw API 交织。真正的双向并发调度仍需要上层 dispatcher。
  */
 int m9p_uart_transport_request(void *transport_ctx,
                                const uint8_t *tx_data,
@@ -326,6 +363,8 @@ int m9p_uart_transport_request(void *transport_ctx,
 {
     struct m9p_uart_transport *transport = (struct m9p_uart_transport *)transport_ctx;
     int ret = 0;
+    bool rx_claimed = false;
+    bool tx_claimed = false;
 
     if (transport == NULL || !transport->initialized || tx_data == NULL || tx_len == 0u ||
         rx_data == NULL || rx_len == NULL || rx_cap < M9P_FRAME_OVERHEAD) {
@@ -334,10 +373,22 @@ int m9p_uart_transport_request(void *transport_ctx,
 
     *rx_len = 0u;
 
-    ret = transport_claim(transport);
+    ret = transport_claim_exchange(transport);
     if (ret < 0) {
         return ret;
     }
+
+    ret = transport_claim_rx(transport);
+    if (ret < 0) {
+        goto out;
+    }
+    rx_claimed = true;
+
+    ret = transport_claim_tx(transport);
+    if (ret < 0) {
+        goto out;
+    }
+    tx_claimed = true;
 
     if (transport->config.flush_before_request) {
         ret = drain_rx_fifo(transport);
@@ -354,7 +405,13 @@ int m9p_uart_transport_request(void *transport_ctx,
     ret = receive_frame_locked(transport, rx_data, rx_cap, rx_len);
 
 out:
-    transport_release(transport);
+    if (tx_claimed) {
+        transport_release_tx(transport);
+    }
+    if (rx_claimed) {
+        transport_release_rx(transport);
+    }
+    transport_release_exchange(transport);
     return ret;
 }
 
@@ -371,7 +428,8 @@ out:
  * @param[out] tx_len 实际发送的响应帧长度。
  * @retval 0 成功
  * @retval <0 错误码
- * @note 这是从机服务模式最直接的入口，但主控侧如果未来要挂 server，也可以用同样思路实现。
+ * @note 这是单事务 helper：它会同时占住 exchange/TX/RX，确保本轮
+ *       receive -> handler -> send 不会和其他 raw API 交织。
  */
 int m9p_uart_transport_serve_once(struct m9p_uart_transport *transport,
                                   m9p_server_transport_fn handler,
@@ -386,6 +444,8 @@ int m9p_uart_transport_serve_once(struct m9p_uart_transport *transport,
     size_t local_rx_len = 0u;
     size_t local_tx_len = 0u;
     int ret;
+    bool rx_claimed = false;
+    bool tx_claimed = false;
 
     if (transport == NULL || !transport->initialized || handler == NULL || rx_data == NULL ||
         tx_data == NULL || rx_cap < M9P_FRAME_OVERHEAD || tx_cap < M9P_FRAME_OVERHEAD) {
@@ -399,10 +459,22 @@ int m9p_uart_transport_serve_once(struct m9p_uart_transport *transport,
         *tx_len = 0u;
     }
 
-    ret = transport_claim(transport);
+    ret = transport_claim_exchange(transport);
     if (ret < 0) {
         return ret;
     }
+
+    ret = transport_claim_rx(transport);
+    if (ret < 0) {
+        goto out;
+    }
+    rx_claimed = true;
+
+    ret = transport_claim_tx(transport);
+    if (ret < 0) {
+        goto out;
+    }
+    tx_claimed = true;
 
     if (transport->config.flush_before_receive) {
         ret = drain_rx_fifo(transport);
@@ -438,7 +510,13 @@ int m9p_uart_transport_serve_once(struct m9p_uart_transport *transport,
     }
 
 out:
-    transport_release(transport);
+    if (tx_claimed) {
+        transport_release_tx(transport);
+    }
+    if (rx_claimed) {
+        transport_release_rx(transport);
+    }
+    transport_release_exchange(transport);
     return ret;
 }
 

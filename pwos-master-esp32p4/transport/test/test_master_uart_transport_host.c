@@ -24,7 +24,8 @@ struct fake_uart {
     size_t tx_len;
     int flush_count;
     bool driver_installed;
-    struct fake_mutex mutex;
+    struct fake_mutex mutex_pool[4];
+    size_t mutex_count;
     void (*on_write)(const uint8_t *data, size_t len);
 };
 
@@ -85,8 +86,9 @@ static int server_handler(void *server_ctx,
 
 SemaphoreHandle_t xSemaphoreCreateMutex(void)
 {
-    g_uart.mutex.locked = false;
-    return &g_uart.mutex;
+    assert(g_uart.mutex_count < (sizeof(g_uart.mutex_pool) / sizeof(g_uart.mutex_pool[0])));
+    g_uart.mutex_pool[g_uart.mutex_count].locked = false;
+    return &g_uart.mutex_pool[g_uart.mutex_count++];
 }
 
 int xSemaphoreTake(SemaphoreHandle_t xSemaphore, TickType_t xTicksToWait)
@@ -303,6 +305,39 @@ static void test_request_round_trip(void)
     assert(memcmp(actual, response, response_len) == 0);
 }
 
+static void test_direction_locks_are_independent(void)
+{
+    struct m9p_uart_transport transport;
+    struct m9p_uart_transport_config config;
+    uint8_t frame[64];
+    uint8_t actual[64];
+    uint8_t payload[] = {0x5Au, 0xA5u};
+    size_t frame_len;
+    size_t actual_len;
+
+    fake_uart_reset();
+    m9p_uart_transport_get_default_config(&config);
+    config.flush_before_receive = false;
+    assert(m9p_uart_transport_init(&transport, &config) == 0);
+
+    ((struct fake_mutex *)transport.tx_lock)->locked = true;
+    assert(m9p_encode_frame(M9P_RREAD,
+                            0x505u,
+                            payload,
+                            (uint16_t)sizeof(payload),
+                            frame,
+                            sizeof(frame),
+                            &frame_len));
+    fake_uart_append_rx(frame, frame_len);
+    assert(m9p_uart_transport_receive_frame(&transport, actual, sizeof(actual), &actual_len) == 0);
+    assert(actual_len == frame_len);
+    ((struct fake_mutex *)transport.tx_lock)->locked = false;
+
+    ((struct fake_mutex *)transport.rx_lock)->locked = true;
+    assert(m9p_uart_transport_send_frame(&transport, frame, frame_len) == 0);
+    ((struct fake_mutex *)transport.rx_lock)->locked = false;
+}
+
 static void test_serve_once_round_trip(void)
 {
     struct m9p_uart_transport transport;
@@ -358,6 +393,7 @@ int main(void)
     test_send_frame();
     test_receive_frame();
     test_request_round_trip();
+    test_direction_locks_are_independent();
     test_serve_once_round_trip();
     puts("master uart_transport host tests passed");
     return 0;

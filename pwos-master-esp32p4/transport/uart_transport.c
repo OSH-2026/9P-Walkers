@@ -68,7 +68,9 @@ int m9p_uart_transport_init(struct m9p_uart_transport *transport,
     }
 
     transport->config = *config;
-    transport->lock = NULL;
+    transport->tx_lock = NULL;
+    transport->rx_lock = NULL;
+    transport->exchange_lock = NULL;
     transport->initialized = true;
     return 0;
 }
@@ -226,29 +228,95 @@ static TickType_t transport_timeout_ticks(const struct m9p_uart_transport *trans
 }
 
 /*
- * SemaphoreHandle_t 是 FreeRTOS 里的“信号量/互斥锁句柄”类型，定义来自 freertos/semphr.h。
- * 头文件把它存成 void *，是为了让非 ESP32 平台也能包含 uart_transport.h，
+ * 头文件里把锁字段存成 void *，是为了让非 ESP32 平台也能包含 uart_transport.h，
  * 不必被迫依赖 FreeRTOS 头文件；真正到了 ESP32 分支里，再转回具体类型。
+ * 这里把 TX、RX 和“整轮事务”拆成三把锁：
+ * 1. raw send_frame 只拿 TX 锁
+ * 2. raw receive_frame 只拿 RX 锁
+ * 3. request / serve_once 再额外拿 exchange 锁，确保 helper 仍是单事务语义
  */
-static SemaphoreHandle_t transport_lock(const struct m9p_uart_transport *transport)
+static SemaphoreHandle_t transport_tx_lock(const struct m9p_uart_transport *transport)
 {
-    return (SemaphoreHandle_t)transport->lock;
+    return (SemaphoreHandle_t)transport->tx_lock;
 }
 
-/* 拿锁失败直接返回 EBUSY，让调用方知道当前 UART 已被其他事务占用。 */
-static int transport_take_lock(struct m9p_uart_transport *transport)
+static SemaphoreHandle_t transport_rx_lock(const struct m9p_uart_transport *transport)
 {
-    if (xSemaphoreTake(transport_lock(transport), transport_timeout_ticks(transport)) != pdTRUE) {
+    return (SemaphoreHandle_t)transport->rx_lock;
+}
+
+static SemaphoreHandle_t transport_exchange_lock(const struct m9p_uart_transport *transport)
+{
+    return (SemaphoreHandle_t)transport->exchange_lock;
+}
+
+/* 拿锁失败直接返回 EBUSY，让调用方知道对应方向当前已被其他事务占用。 */
+static int transport_take_mutex(const struct m9p_uart_transport *transport,
+                                SemaphoreHandle_t lock)
+{
+    if (lock == NULL) {
+        return -(int)M9P_ERR_EINVAL;
+    }
+
+    if (xSemaphoreTake(lock, transport_timeout_ticks(transport)) != pdTRUE) {
         return -(int)M9P_ERR_EBUSY;
     }
 
     return 0;
 }
 
-/* 和 transport_take_lock 配套的释放动作，保证所有路径都能把锁还回去。 */
-static void transport_give_lock(struct m9p_uart_transport *transport)
+static int transport_take_tx_lock(struct m9p_uart_transport *transport)
 {
-    xSemaphoreGive(transport_lock(transport));
+    return transport_take_mutex(transport, transport_tx_lock(transport));
+}
+
+static int transport_take_rx_lock(struct m9p_uart_transport *transport)
+{
+    return transport_take_mutex(transport, transport_rx_lock(transport));
+}
+
+static int transport_take_exchange_lock(struct m9p_uart_transport *transport)
+{
+    return transport_take_mutex(transport, transport_exchange_lock(transport));
+}
+
+/* 和 transport_take_*_lock 配套的释放动作，保证所有路径都能把锁还回去。 */
+static void transport_give_mutex(SemaphoreHandle_t lock)
+{
+    if (lock != NULL) {
+        xSemaphoreGive(lock);
+    }
+}
+
+static void transport_give_tx_lock(struct m9p_uart_transport *transport)
+{
+    transport_give_mutex(transport_tx_lock(transport));
+}
+
+static void transport_give_rx_lock(struct m9p_uart_transport *transport)
+{
+    transport_give_mutex(transport_rx_lock(transport));
+}
+
+static void transport_give_exchange_lock(struct m9p_uart_transport *transport)
+{
+    transport_give_mutex(transport_exchange_lock(transport));
+}
+
+static void transport_delete_locks(struct m9p_uart_transport *transport)
+{
+    if (transport_tx_lock(transport) != NULL) {
+        vSemaphoreDelete(transport_tx_lock(transport));
+        transport->tx_lock = NULL;
+    }
+    if (transport_rx_lock(transport) != NULL) {
+        vSemaphoreDelete(transport_rx_lock(transport));
+        transport->rx_lock = NULL;
+    }
+    if (transport_exchange_lock(transport) != NULL) {
+        vSemaphoreDelete(transport_exchange_lock(transport));
+        transport->exchange_lock = NULL;
+    }
 }
 
 /* ESP-IDF 的错误码和 mini9P 自己的错误码不是一套，这里做一层翻译。 */
@@ -392,7 +460,7 @@ static int receive_frame_locked(struct m9p_uart_transport *transport,
  * @param[in] config 配置指针。
  * @retval 0 成功
  * @retval <0 错误码
- * @note ESP32 下分配互斥锁，安装 UART 驱动，配置参数。
+ * @note ESP32 下分配 TX/RX/事务三把互斥锁，安装 UART 驱动，配置参数。
  */
 int m9p_uart_transport_init(struct m9p_uart_transport *transport,
                             const struct m9p_uart_transport_config *config)
@@ -413,13 +481,20 @@ int m9p_uart_transport_init(struct m9p_uart_transport *transport,
     }
 
     transport->config = *config;
-    if (transport_lock(transport) == NULL) {
-        /* 创建一个互斥锁，保证同一时刻只有一个任务能操作这条 UART。 */
-        transport->lock = xSemaphoreCreateMutex();
-        if (transport_lock(transport) == NULL) {
-            memset(transport, 0, sizeof(*transport));
-            return -(int)M9P_ERR_EBUSY;
-        }
+    transport->tx_lock = NULL;
+    transport->rx_lock = NULL;
+    transport->exchange_lock = NULL;
+    transport->initialized = false;
+
+    transport->tx_lock = xSemaphoreCreateMutex();
+    transport->rx_lock = xSemaphoreCreateMutex();
+    transport->exchange_lock = xSemaphoreCreateMutex();
+    if (transport_tx_lock(transport) == NULL ||
+        transport_rx_lock(transport) == NULL ||
+        transport_exchange_lock(transport) == NULL) {
+        transport_delete_locks(transport);
+        memset(transport, 0, sizeof(*transport));
+        return -(int)M9P_ERR_EBUSY;
     }
 
     ret = esp_err_to_m9p(uart_driver_install((uart_port_t)config->uart_port,
@@ -429,7 +504,7 @@ int m9p_uart_transport_init(struct m9p_uart_transport *transport,
                                              NULL,
                                              0));
     if (ret < 0) {
-        vSemaphoreDelete(transport_lock(transport));
+        transport_delete_locks(transport);
         memset(transport, 0, sizeof(*transport));
         return ret;
     }
@@ -444,7 +519,7 @@ int m9p_uart_transport_init(struct m9p_uart_transport *transport,
     ret = esp_err_to_m9p(uart_param_config((uart_port_t)config->uart_port, &uart_cfg));
     if (ret < 0) {
         (void)uart_driver_delete((uart_port_t)config->uart_port);
-        vSemaphoreDelete(transport_lock(transport));
+        transport_delete_locks(transport);
         memset(transport, 0, sizeof(*transport));
         return ret;
     }
@@ -456,7 +531,7 @@ int m9p_uart_transport_init(struct m9p_uart_transport *transport,
                                       UART_PIN_NO_CHANGE));
     if (ret < 0) {
         (void)uart_driver_delete((uart_port_t)config->uart_port);
-        vSemaphoreDelete(transport_lock(transport));
+        transport_delete_locks(transport);
         memset(transport, 0, sizeof(*transport));
         return ret;
     }
@@ -473,7 +548,7 @@ int m9p_uart_transport_init(struct m9p_uart_transport *transport,
  * @param[in] tx_len 帧长度。
  * @retval 0 成功
  * @retval <0 错误码
- * @note 该接口只负责原始发帧，不额外等待对端响应。
+ * @note 该接口只拿 TX 锁；因此在 raw API 级别，发送和接收可以并行发生。
  */
 int m9p_uart_transport_send_frame(struct m9p_uart_transport *transport,
                                   const uint8_t *tx_data,
@@ -485,13 +560,13 @@ int m9p_uart_transport_send_frame(struct m9p_uart_transport *transport,
         return -(int)M9P_ERR_EINVAL;
     }
 
-    ret = transport_take_lock(transport);
+    ret = transport_take_tx_lock(transport);
     if (ret < 0) {
         return ret;
     }
 
     ret = send_frame_locked(transport, tx_data, tx_len);
-    transport_give_lock(transport);
+    transport_give_tx_lock(transport);
     return ret;
 }
 
@@ -503,7 +578,7 @@ int m9p_uart_transport_send_frame(struct m9p_uart_transport *transport,
  * @param[out] rx_len 实际接收长度。
  * @retval 0 成功
  * @retval <0 错误码
- * @note 该接口只做“收满一帧”，不自动调用任何协议处理器。
+ * @note 该接口只拿 RX 锁；因此在 raw API 级别，接收和发送可以并行发生。
  */
 int m9p_uart_transport_receive_frame(struct m9p_uart_transport *transport,
                                      uint8_t *rx_data,
@@ -519,7 +594,7 @@ int m9p_uart_transport_receive_frame(struct m9p_uart_transport *transport,
 
     *rx_len = 0u;
 
-    ret = transport_take_lock(transport);
+    ret = transport_take_rx_lock(transport);
     if (ret < 0) {
         return ret;
     }
@@ -527,20 +602,20 @@ int m9p_uart_transport_receive_frame(struct m9p_uart_transport *transport,
     if (transport->config.flush_before_receive) {
         ret = flush_input(transport);
         if (ret < 0) {
-            transport_give_lock(transport);
+            transport_give_rx_lock(transport);
             return ret;
         }
     }
 
     ret = receive_frame_locked(transport, rx_data, rx_cap, rx_len);
-    transport_give_lock(transport);
+    transport_give_rx_lock(transport);
     return ret;
 }
 
 /**
  * @brief 反初始化 UART 传输上下文（ESP32 实现）。
  * @param[in,out] transport 传输上下文指针。
- * @note 卸载 UART 驱动，释放互斥锁，清零结构体。
+ * @note 卸载 UART 驱动，释放 TX/RX/事务三把互斥锁，清零结构体。
  */
 void m9p_uart_transport_deinit(struct m9p_uart_transport *transport)
 {
@@ -549,9 +624,7 @@ void m9p_uart_transport_deinit(struct m9p_uart_transport *transport)
     }
 
     (void)uart_driver_delete((uart_port_t)transport->config.uart_port);
-    if (transport_lock(transport) != NULL) {
-        vSemaphoreDelete(transport_lock(transport));
-    }
+    transport_delete_locks(transport);
     memset(transport, 0, sizeof(*transport));
 }
 
@@ -565,7 +638,9 @@ void m9p_uart_transport_deinit(struct m9p_uart_transport *transport)
  * @param[out] rx_len 实际接收长度。
  * @retval 0 成功
  * @retval <0 错误码
- * @note 线程安全，自动处理超时、完整帧收发、错误码映射。
+ * @note 这是“单事务 helper”：它会同时占住 exchange/TX/RX，保证一轮 request/response
+ *       不会被其他 raw API 插入；若需要真正的双向并发调度，应改用 raw send/receive
+ *       再配合上层 dispatcher 做分发。
  */
 int m9p_uart_transport_request(void *transport_ctx,
                                const uint8_t *tx_data,
@@ -585,10 +660,20 @@ int m9p_uart_transport_request(void *transport_ctx,
     /* 先清零输出长度，避免调用方误用旧值。 */
     *rx_len = 0u;
 
-    /* 先拿锁，避免多个任务同时收发同一条 UART。 */
-    ret = transport_take_lock(transport);
+    /* 事务 helper 先拿 exchange 锁，再拿 RX/TX 锁，保证这一轮 request/response 原子完成。 */
+    ret = transport_take_exchange_lock(transport);
     if (ret < 0) {
         return ret;
+    }
+
+    ret = transport_take_rx_lock(transport);
+    if (ret < 0) {
+        goto out_exchange;
+    }
+
+    ret = transport_take_tx_lock(transport);
+    if (ret < 0) {
+        goto out_rx;
     }
 
     if (transport->config.flush_before_request) {
@@ -608,8 +693,12 @@ int m9p_uart_transport_request(void *transport_ctx,
     ret = receive_frame_locked(transport, rx_data, rx_cap, rx_len);
 
 out:
+    transport_give_tx_lock(transport);
+out_rx:
+    transport_give_rx_lock(transport);
+out_exchange:
     /* 无论成功失败都要放锁，否则后续调用会被永久卡住。 */
-    transport_give_lock(transport);
+    transport_give_exchange_lock(transport);
     return ret;
 }
 
@@ -626,7 +715,8 @@ out:
  * @param[out] tx_len 实际发出的响应帧长度。
  * @retval 0 成功
  * @retval <0 错误码
- * @note 这样一来同一套 transport 既能服务 m9p_client，也能服务未来的 m9p_server。
+ * @note 这同样是“单事务 helper”：它会同时占住 exchange/TX/RX，确保本轮
+ *       receive -> handler -> send 不会和其他 raw API 交织。
  */
 int m9p_uart_transport_serve_once(struct m9p_uart_transport *transport,
                                   m9p_server_transport_fn handler,
@@ -654,9 +744,19 @@ int m9p_uart_transport_serve_once(struct m9p_uart_transport *transport,
         *tx_len = 0u;
     }
 
-    ret = transport_take_lock(transport);
+    ret = transport_take_exchange_lock(transport);
     if (ret < 0) {
         return ret;
+    }
+
+    ret = transport_take_rx_lock(transport);
+    if (ret < 0) {
+        goto out_exchange;
+    }
+
+    ret = transport_take_tx_lock(transport);
+    if (ret < 0) {
+        goto out_rx;
     }
 
     if (transport->config.flush_before_receive) {
@@ -693,7 +793,11 @@ int m9p_uart_transport_serve_once(struct m9p_uart_transport *transport,
     }
 
 out:
-    transport_give_lock(transport);
+    transport_give_tx_lock(transport);
+out_rx:
+    transport_give_rx_lock(transport);
+out_exchange:
+    transport_give_exchange_lock(transport);
     return ret;
 }
 

@@ -4,11 +4,19 @@
 
 `uart_transport` 是 STM32 侧 mini9P 的 UART 传输层。
 
+当前 UART 外设本身按全双工使用；本次实现也把 transport 的 TX/RX 资源拆开了：
+- raw `send_frame` 只占用 TX 方向
+- raw `receive_frame` 只占用 RX 方向
+
+因此 raw frame 收发可以并行发生，更贴近 UART 的物理链路。
+
 它现在同时支持两类模式：
 - client 模式：主动发送一帧 request，再等待一帧 response
 - server 模式：被动接收一帧 request，调用 handler 处理，再回发一帧 response
 
 因此 STM32 不再只能做从机 server；如果上层需要，也可以直接把 `m9p_uart_transport_request` 挂给 `m9p_client`，主动向 ESP32 发起请求。
+
+但要注意：`request()` 和 `serve_once()` 仍然是单事务 helper。它们会把整轮 exchange 当成一个原子片段来处理，不是多路复用 dispatcher。
 
 ## 初始化
 
@@ -44,6 +52,8 @@ int m9p_uart_transport_receive_frame(struct m9p_uart_transport *transport,
 
 这两层只负责“发完整一帧”和“收完整一帧”，不关心帧的业务语义。
 
+它们现在分别只占用 TX 或 RX 方向，因此可作为全双工 primitive 独立组合。
+
 ## Client 入口
 
 ```c
@@ -63,6 +73,8 @@ send_frame
 ```
 
 这让 STM32 侧也可以直接复用主控侧 client 的调用模型。
+
+注意：该 helper 会同时占住 TX/RX/exchange 三个方向控制位，因此它本身仍按单事务运行。
 
 ## Server 入口
 
@@ -85,6 +97,8 @@ receive_frame
   -> handler(server_ctx, request, response)
   -> send_frame
 ```
+
+该 helper 同样不是多路复用 dispatcher，而是“一次处理一轮 exchange”的便利包装。
 
 ## Buffer 约定
 
@@ -116,7 +130,7 @@ transport 层返回负 mini9P 风格错误码：
 ```text
 -M9P_ERR_EINVAL  参数错误
 -M9P_ERR_EAGAIN  UART 超时
--M9P_ERR_EBUSY   transport 正在被其他事务占用
+-M9P_ERR_EBUSY   对应方向或整轮 exchange 当前正在被其他事务占用
 -M9P_ERR_EIO     UART 错误或帧头非法
 -M9P_ERR_EMSIZE  缓冲区太小
 ```
@@ -149,22 +163,23 @@ m9p_client_init(&client,
 
 ## Host 测试
 
-新增 host 单元测试：`pwos-slave/User/mini9p/test/test_slave_uart_transport_host.c`
+新增 host 单元测试：`pwos-slave/User/uart_transport/test/test_slave_uart_transport_host.c`
 
 它通过 fake HAL UART 桩验证：
 - `send_frame`
 - `receive_frame`
 - `request`
 - `serve_once`
+- TX 占用不阻塞 raw RX，RX 占用不阻塞 raw TX
 
 推荐本地编译命令：
 
 ```powershell
 gcc -std=c11 -Wall -Wextra \
-  -I. -I.\pwos-slave\User\mini9p -I.\pwos-slave\User\mini9p\test\stubs \
-  .\pwos-slave\User\mini9p\test\test_slave_uart_transport_host.c \
-  .\pwos-slave\User\mini9p\uart_transport.c \
-  .\pwos-slave\User\mini9p\mini9p_protocol.c \
+  -I. -I.\pwos-slave\User\uart_transport -I.\pwos-slave\User\uart_transport\test\stubs -I.\pwos-shared\mini9p \
+  .\pwos-slave\User\uart_transport\test\test_slave_uart_transport_host.c \
+  .\pwos-slave\User\uart_transport\uart_transport.c \
+  .\pwos-shared\mini9p\mini9p_protocol.c \
   -o .\build\test_slave_uart_transport_host.exe
 ```
 
@@ -174,7 +189,7 @@ gcc -std=c11 -Wall -Wextra \
 
 ```text
 阻塞式 HAL UART
-一次只处理一个事务
+raw send/receive 已可分方向并行，但 request/serve_once 仍按单事务处理
 不支持 multi-tag 并发
 坏帧后只返回 EIO，不做滑动重同步
 ```

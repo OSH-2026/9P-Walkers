@@ -35,7 +35,9 @@ struct m9p_uart_transport_config {
 
 struct m9p_uart_transport {
     struct m9p_uart_transport_config config;  /* 当前实际生效的配置。 */
-    void *lock;                               /* 平台相关锁对象；头文件里故意不用 FreeRTOS 类型。 */
+    void *tx_lock;                            /* 发送方向独立锁；允许 raw RX 与 raw TX 并行。 */
+    void *rx_lock;                            /* 接收方向独立锁；允许 raw TX 与 raw RX 并行。 */
+    void *exchange_lock;                      /* request/serve_once 使用的整轮事务锁。 */
     bool initialized;                         /* 是否已经完成初始化。 */
 };
 
