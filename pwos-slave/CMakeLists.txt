@@ -46,7 +46,7 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 )
 
 # Add sources to executable
-set(PWOS_SHARED_MINI9P_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mini9p)
+set(PWOS_MINI9P_DIR ${CMAKE_SOURCE_DIR}/User/mini9p)
 
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/User/fs/lfs.c
@@ -57,9 +57,9 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/User/app/vofa_firewater.c
     ${CMAKE_SOURCE_DIR}/User/backend/local_vfs.c
     ${CMAKE_SOURCE_DIR}/User/uart_transport/uart_transport.c
-    ${PWOS_SHARED_MINI9P_DIR}/mini9p_protocol.c
-    ${PWOS_SHARED_MINI9P_DIR}/mini9p_server.c
-    ${PWOS_SHARED_MINI9P_DIR}/mini9p_service.c
+    ${PWOS_MINI9P_DIR}/mini9p_protocol.c
+    ${PWOS_MINI9P_DIR}/mini9p_server.c
+    ${PWOS_MINI9P_DIR}/mini9p_service.c
 )
 
 # Add include paths
@@ -69,7 +69,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/User/app
     ${CMAKE_SOURCE_DIR}/User/backend
     ${CMAKE_SOURCE_DIR}/User/uart_transport
-    ${PWOS_SHARED_MINI9P_DIR}
+    ${PWOS_MINI9P_DIR}
 )
 
 # Add project symbols (macros)

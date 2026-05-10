@@ -6,7 +6,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)
-set(MINI9P_ROOT ${CMAKE_CURRENT_LIST_DIR}/../../pwos-shared/mini9p)
+set(MINI9P_ROOT ${CMAKE_CURRENT_LIST_DIR}/../../src/mini9p)
 
 add_executable(pc_master_emulator
     main.c

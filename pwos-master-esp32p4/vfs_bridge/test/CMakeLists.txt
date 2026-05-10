@@ -6,7 +6,7 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
 set(VFS_BRIDGE_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
-set(MINI9P_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../../pwos-shared/mini9p)
+set(MINI9P_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../mini9p)
 
 add_executable(cluster_vfs_test
     test_main.c

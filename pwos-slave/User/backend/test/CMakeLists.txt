@@ -5,7 +5,7 @@ project(local_vfs_test C)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
-set(MINI9P_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../../../pwos-shared/mini9p)
+set(MINI9P_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../mini9p)
 
 add_executable(local_vfs_test
     test_main.c

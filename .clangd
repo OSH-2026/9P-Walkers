@@ -4,7 +4,8 @@ CompileFlags:
     - -Wall
     - -Wextra
     - -Wno-unused-parameter
-    - -Ipwos-shared/mini9p
+    - -Ipwos-slave/User/mini9p
+    - -Ipwos-master-esp32p4/mini9p
     - -Ipwos-master-esp32p4/transport
     - -Ipwos-master-esp32p4/vfs_bridge
     - -Ipwos-master-esp32p4/shell
