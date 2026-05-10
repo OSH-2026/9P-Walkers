@@ -21,6 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "mini9p_service.h"
 
 /* USER CODE END Includes */
 
@@ -31,6 +32,9 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#ifndef PWOS_UART1_TX_SMOKE_TEST
+#define PWOS_UART1_TX_SMOKE_TEST 0
+#endif
 
 /* USER CODE END PD */
 
@@ -94,6 +98,12 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USB_OTG_FS_PCD_Init();
   /* USER CODE BEGIN 2 */
+#if !PWOS_UART1_TX_SMOKE_TEST
+  if (mini9p_service_init() != 0)
+  {
+    Error_Handler();
+  }
+#endif
 
   /* USER CODE END 2 */
 
@@ -104,9 +114,13 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+#if PWOS_UART1_TX_SMOKE_TEST
     const uint8_t msg[] = "stm32 uart1 alive\r\n";
     (void)HAL_UART_Transmit(&huart1, msg, sizeof(msg) - 1u, HAL_MAX_DELAY);
     HAL_Delay(1000);
+#else
+    (void)mini9p_service_poll_once();
+#endif
   }
   /* USER CODE END 3 */
 }
