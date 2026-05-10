@@ -57,6 +57,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/User/app/vofa_firewater.c
     ${CMAKE_SOURCE_DIR}/User/backend/local_vfs.c
     ${CMAKE_SOURCE_DIR}/User/uart_transport/uart_transport.c
+    ${PWOS_SHARED_MINI9P_DIR}/mini9p_peer_link.c
     ${PWOS_SHARED_MINI9P_DIR}/mini9p_protocol.c
     ${PWOS_SHARED_MINI9P_DIR}/mini9p_server.c
     ${PWOS_SHARED_MINI9P_DIR}/mini9p_service.c
