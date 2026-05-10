@@ -14,6 +14,8 @@
 #include <limits.h>
 #include <string.h>
 
+extern UART_HandleTypeDef huart2 __attribute__((weak));
+
 static struct m9p_uart_transport g_default_transport;
 
 static uint32_t transport_timeout_ms(const struct m9p_uart_transport *transport)

@@ -104,6 +104,9 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    const uint8_t msg[] = "stm32 uart1 alive\r\n";
+    (void)HAL_UART_Transmit(&huart1, msg, sizeof(msg) - 1u, HAL_MAX_DELAY);
+    HAL_Delay(1000);
   }
   /* USER CODE END 3 */
 }

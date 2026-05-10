@@ -20,10 +20,13 @@ static uint8_t g_mini9p_rx[MINI9P_SERVICE_FRAME_CAP];
 static uint8_t g_mini9p_tx[MINI9P_SERVICE_FRAME_CAP];
 static bool g_mini9p_service_initialized;
 
+extern UART_HandleTypeDef huart1;
+
 int mini9p_service_init(void)
 {
     struct local_vfs_config vfs_config;
     struct m9p_server_config server_config;
+    struct m9p_uart_transport_config uart_config;
     int rc;
 
     local_vfs_get_default_config(&vfs_config);
@@ -42,7 +45,10 @@ int mini9p_service_init(void)
         return rc;
     }
 
-    rc = m9p_uart_transport_init_default();
+    uart_config.uart = &huart1;
+    uart_config.io_timeout_ms = M9P_UART_TRANSPORT_DEFAULT_TIMEOUT_MS;
+    uart_config.flush_before_receive = false;
+    rc = m9p_uart_transport_init(m9p_uart_transport_default(), &uart_config);
     if (rc < 0) {
         return rc;
     }

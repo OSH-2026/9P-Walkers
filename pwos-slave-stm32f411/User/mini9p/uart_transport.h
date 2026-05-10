@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #include "mini9p_protocol.h"
-#include "usart.h"
+#include "main.h"
 
 #define M9P_UART_TRANSPORT_DEFAULT_TIMEOUT_MS 200u
 
