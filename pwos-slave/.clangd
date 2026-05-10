@@ -1,10 +1,19 @@
 CompileFlags:
   Add:
-    - '-ferror-limit=0'
-    - '-Wno-implicit-int'
+    - -ferror-limit=0
+    - -I../pwos-shared/mini9p
+    - -IUser/uart_transport
+    - -IUser/backend
+    - -IUser/app
+    - -IUser/fs
+    - -IUser/drivers/storage
+    - -ICore/Inc
+    - -IDrivers/STM32F4xx_HAL_Driver/Inc
+    - -IDrivers/STM32F4xx_HAL_Driver/Inc/Legacy
+    - -IDrivers/CMSIS/Device/ST/STM32F4xx/Include
+    - -IDrivers/CMSIS/Include
+    - -DUSE_HAL_DRIVER
+    - -DSTM32F407xx
 Diagnostics:
   Suppress:
     - unused-includes
-    - unknown_typename
-    - unknown_typename_suggest
-    - typename_requires_specqual

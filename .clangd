@@ -1,0 +1,66 @@
+CompileFlags:
+  Add:
+    - -ferror-limit=0
+    - -Wall
+    - -Wextra
+    - -Wno-unused-parameter
+    - -Ipwos-shared/mini9p
+    - -Ipwos-master-esp32p4/transport
+    - -Ipwos-master-esp32p4/vfs_bridge
+    - -Ipwos-master-esp32p4/shell
+    - -Ipwos-master-esp32p4/main
+    - -Ipwos-master-esp32p4/lua
+    - -Ipwos-slave/User/backend
+    - -Ipwos-slave/User/uart_transport
+    - -Ipwos-slave/User/app
+    - -Ipwos-slave/User/fs
+    - -Ipwos-slave/User/drivers/storage
+    - -Ipwos-slave/Core/Inc
+    - -Ipwos-slave/Drivers/STM32F4xx_HAL_Driver/Inc
+    - -Ipwos-slave/Drivers/STM32F4xx_HAL_Driver/Inc/Legacy
+    - -Ipwos-slave/Drivers/CMSIS/Device/ST/STM32F4xx/Include
+    - -Ipwos-slave/Drivers/CMSIS/Include
+Diagnostics:
+  Suppress:
+    - unused-includes
+---
+If:
+  PathMatch: ^pwos-slave/.*
+CompileFlags:
+  CompilationDatabase: pwos-slave/build/ZGT6Debug
+  Add:
+    - -DUSE_HAL_DRIVER
+    - -DSTM32F407xx
+---
+If:
+  PathMatch: ^pwos-master-esp32p4/(vfs_bridge|transport)/.*
+CompileFlags:
+  CompilationDatabase: pwos-master-esp32p4/vfs_bridge/test/build
+---
+If:
+  PathMatch: ^tools/pc_master_emulator/.*
+CompileFlags:
+  CompilationDatabase: tools/pc_master_emulator/build
+---
+If:
+  PathMatch: ^pwos-slave/User/backend/test/.*
+CompileFlags:
+  CompilationDatabase: pwos-slave/User/backend/test/build
+---
+If:
+  PathMatch: ^pwos-slave/User/uart_transport/test/.*
+CompileFlags:
+  CompilationDatabase: pwos-slave/User/uart_transport/test/build
+---
+If:
+  PathMatch: ^pwos-master-esp32p4/(transport|vfs_bridge)/test/.*
+CompileFlags:
+  Add:
+    - -Ipwos-master-esp32p4/transport/test/stubs
+    - -DESP_PLATFORM
+---
+If:
+  PathMatch: ^pwos-slave/User/uart_transport/test/.*
+CompileFlags:
+  Add:
+    - -Ipwos-slave/User/uart_transport/test/stubs
