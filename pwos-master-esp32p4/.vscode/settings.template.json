@@ -1,0 +1,22 @@
+// Copy this file to settings.json for local VS Code ESP-IDF setup.
+// Replace the placeholder paths with paths from your own machine.
+{
+  "idf.currentSetup": "${env:IDF_PATH}",
+  "idf.openOcdConfigs": [
+    "board/esp32p4-builtin.cfg"
+  ],
+  "idf.customExtraVars": {
+    "IDF_PATH": "/path/to/esp-idf",
+    "IDF_TOOLS_PATH": "/path/to/.espressif",
+    "IDF_PYTHON_ENV_PATH": "/path/to/.espressif/python_env/idf6.0_py3.x_env",
+    "IDF_TARGET": "esp32p4"
+  },
+  "idf.flashType": "UART",
+  "cmake.generator": "Ninja",
+  "cmake.configureEnvironment": {
+    "IDF_TARGET": "esp32p4"
+  },
+  "cmake.environment": {
+    "IDF_TARGET": "esp32p4"
+  }
+}

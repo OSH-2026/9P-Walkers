@@ -3,7 +3,9 @@ tools/pc_master_emulator/build/
 pwos-master/
 .vscode/
 pwos-slave/.vscode/
-# !pwos-master-esp32p4/.vscode
+!pwos-master-esp32p4/.vscode/
+pwos-master-esp32p4/.vscode/*
+!pwos-master-esp32p4/.vscode/settings.template.json
 .codex
 
 
