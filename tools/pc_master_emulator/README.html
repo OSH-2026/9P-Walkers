@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PC Master Emulator — 9P-Walkers</title>
+<style>
+  :root {
+    --bg: #fafbfc;
+    --card-bg: #ffffff;
+    --text: #1a1a2e;
+    --muted: #586069;
+    --border: #e1e4e8;
+    --accent: #0366d6;
+    --code-bg: #f0f4f8;
+    --pre-bg: #1e1e2e;
+    --pre-text: #cdd6f4;
+    --tag-bg: #ddf4ff;
+    --tag-text: #0366d6;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    min-height: 100vh;
+  }
+  .hero {
+    background: linear-gradient(135deg, #0d1117 0%, #161b22 40%, #1a2332 100%);
+    color: #fff;
+    padding: 3rem 2rem 2rem;
+    text-align: center;
+    border-bottom: 3px solid var(--accent);
+  }
+  .hero .badge {
+    display: inline-block;
+    background: var(--accent);
+    color: #fff;
+    font-size: .75rem;
+    font-weight: 600;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    padding: .25rem .75rem;
+    border-radius: 999px;
+    margin-bottom: 1rem;
+  }
+  .hero h1 { font-size: 2.2rem; font-weight: 700; letter-spacing: -.02em; }
+  .hero .subtitle { color: #8b949e; margin-top: .5rem; font-size: 1.05rem; }
+  main { max-width: 860px; margin: 0 auto; padding: 2rem; }
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.75rem 2rem;
+    margin-bottom: 1.5rem;
+    box-shadow: 0 1px 3px rgba(0,0,0,.04);
+  }
+  .card h2 {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: .75rem;
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+  }
+  .card h2 .icon { font-size: 1.1rem; }
+  .card p, .card li { color: var(--muted); font-size: .95rem; }
+  .card ul, .card ol { padding-left: 1.5rem; }
+  .card li { margin-bottom: .35rem; }
+  .card li:last-child { margin-bottom: 0; }
+  .card p + p { margin-top: .6rem; }
+  code {
+    font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace;
+    font-size: .88em;
+  }
+  :not(pre) > code {
+    background: var(--code-bg);
+    color: #1a1a2e;
+    padding: .15em .45em;
+    border-radius: 4px;
+    font-weight: 500;
+  }
+  pre {
+    background: var(--pre-bg);
+    color: var(--pre-text);
+    padding: 1.1em 1.3em;
+    border-radius: 8px;
+    overflow-x: auto;
+    margin: .75rem 0;
+    font-size: .88rem;
+    line-height: 1.6;
+  }
+  pre code { background: none; color: inherit; padding: 0; font-weight: 400; }
+  .cmdline { color: #a6e3a1; }
+  .kw { color: #89b4fa; }
+  .path { color: #fab387; }
+  .arg { color: #f9e2af; }
+  .flow-steps {
+    counter-reset: step;
+    list-style: none;
+    padding: 0;
+  }
+  .flow-steps li {
+    counter-increment: step;
+    display: flex;
+    align-items: baseline;
+    gap: .75rem;
+    padding: .5rem 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .flow-steps li:last-child { border-bottom: none; }
+  .flow-steps li::before {
+    content: counter(step);
+    background: var(--tag-bg);
+    color: var(--tag-text);
+    font-size: .78rem;
+    font-weight: 700;
+    min-width: 1.6rem;
+    height: 1.6rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .success-block {
+    background: #f0fff4;
+    border: 1px solid #bef5cb;
+    border-radius: 8px;
+    padding: 1rem 1.3rem;
+    margin-top: .75rem;
+  }
+  .success-block .ok { color: #22863a; font-weight: 600; }
+  .pinout { display: grid; gap: .5rem; margin-top: .25rem; }
+  .pinout .row {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    font-size: .9rem;
+  }
+  .pinout .arrow { color: var(--accent); font-weight: 700; }
+  .note {
+    background: #fff8e1;
+    border-left: 3px solid #f9a825;
+    border-radius: 0 8px 8px 0;
+    padding: .75rem 1rem;
+    margin-top: .75rem;
+    font-size: .92rem;
+    color: #5d4037;
+  }
+  footer {
+    text-align: center;
+    color: var(--muted);
+    font-size: .82rem;
+    padding: 1.5rem 2rem 3rem;
+  }
+  footer a { color: var(--accent); text-decoration: none; }
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <span class="badge">9P-Walkers</span>
+  <h1>PC Master Emulator</h1>
+  <p class="subtitle">Mini9P 主控模拟器 · USB-TTL 串口联调 STM32 从机</p>
+</div>
+
+<main>
+
+<div class="card">
+  <p>复用 <code>pwos-slave/User/mini9p/mini9p_protocol.c</code> 构造和解析 Mini9P 帧。当前覆盖一条固定的 smoke test 流程，验证从机侧 <code>uart_transport</code> + <code>mini9p_server</code> + <code>local_vfs</code> 是否连通。</p>
+</div>
+
+<div class="card">
+  <h2><span class="icon">&#x1f527;</span> 构建</h2>
+  <pre><code><span class="kw">cmake</span> -S <span class="path">tools/pc_master_emulator</span> -B <span class="path">tools/pc_master_emulator/build</span>
+<span class="kw">cmake</span> --build <span class="path">tools/pc_master_emulator/build</span></code></pre>
+</div>
+
+<div class="card">
+  <h2><span class="icon">&#x25b6;</span> 运行</h2>
+  <pre><code><span class="path">tools/pc_master_emulator/build/pc_master_emulator</span> &lt;<span class="arg">serial-dev</span>&gt; [<span class="arg">baud</span>]</code></pre>
+  <p>示例：</p>
+  <pre><code><span class="path">tools/pc_master_emulator/build/pc_master_emulator</span> <span class="arg">/dev/ttyUSB0</span> <span class="arg">115200</span></code></pre>
+  <p>如果省略波特率，工具默认使用 <code>1000000</code>。当前 <code>pwos-slave-stm32f411</code> 工程的 USART1 配置为 <code>115200</code>，运行时需要显式传入 <code>115200</code>，或者同步修改固件里的 <code>huart1.Init.BaudRate</code>。</p>
+</div>
+
+<div class="card">
+  <h2><span class="icon">&#x1f4cb;</span> 测试流程</h2>
+  <p>工具启动后会依次执行：</p>
+  <ol class="flow-steps">
+    <li><code>Tattach</code></li>
+    <li><code>Twalk /sys/health</code></li>
+    <li><code>Topen OREAD</code></li>
+    <li><code>Tread /sys/health</code></li>
+    <li><code>Tclunk</code></li>
+    <li><code>Twalk /missing</code> — 期望返回 <code>ENOENT</code></li>
+    <li><code>Topen bad fid</code> — 期望返回 <code>EFID</code></li>
+  </ol>
+  <div class="success-block">
+    成功标准：<code>/sys/health</code> 读到 <code>ok\n</code>，打印 <span class="ok">pc_master_emulator: ok</span>
+  </div>
+</div>
+
+<div class="card">
+  <h2><span class="icon">&#x1f50c;</span> 连接约定</h2>
+  <div class="pinout">
+    <div class="row"><span class="arrow">TX</span> USB-TTL → STM32 USART1 RX <code>PA10</code></div>
+    <div class="row"><span class="arrow">RX</span> USB-TTL ← STM32 USART1 TX <code>PA9</code></div>
+    <div class="row"><span class="arrow">GND</span> USB-TTL ↔ STM32 GND</div>
+  </div>
+  <p style="margin-top: .75rem;">使用 <strong>3.3V TTL 电平</strong></p>
+  <div class="note">
+    从机固件需开启 Mini9P 串口联调模式（如 <code>PWOS_ENABLE_MINI9P_SERIAL</code>）。该模式下对应 USART 应由 Mini9P 二进制帧独占，不应混入 VOFA 或其他文本日志。
+  </div>
+</div>
+
+<div class="card">
+  <h2><span class="icon">&#x26a0;</span> 当前边界</h2>
+  <ul>
+    <li>仅支持 Linux/POSIX 串口，使用 <code>termios</code></li>
+    <li>当前是硬件联调工具，不替代 backend/server 单元测试</li>
+    <li>当前流程固定，不提供交互式 Mini9P shell</li>
+    <li>若出现 <code>serial read timeout</code>，优先检查从机主循环是否阻塞、USART2 是否被日志污染、线序/电平/供电是否稳定</li>
+  </ul>
+</div>
+
+</main>
+
+<footer>
+  9P-Walkers · OSH-2026 · USTC
+</footer>
+
+</body>
+</html>
