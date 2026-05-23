@@ -10,6 +10,7 @@
 #include "freertos/task.h"
 #include "lauxlib.h"
 #include "lua.h"
+#include "lua_vfs_bindings.h"
 #include "lualib.h"
 #include "mini9p_protocol.h"
 #include "sdkconfig.h"
@@ -113,4 +114,7 @@ void pw_lua_register_bindings(lua_State *L)
 
     luaL_newlib(L, m9p_lib);
     lua_setglobal(L, "m9p");
+
+    /* vfs.* drives the cluster VFS (read/write/list/stat over Mini9P). */
+    pw_lua_register_vfs_bindings(L);
 }

@@ -14,6 +14,7 @@ idf_component_register(
     SRCS
         "hello_world_main.c"
         "lua_bindings.c"
+        "lua_vfs_bindings.c"
         "lua_port.c"
         "${PWOS_SHARED_MINI9P_DIR}/mini9p_client.c"
         "${PWOS_SHARED_MINI9P_DIR}/mini9p_peer_link.c"
