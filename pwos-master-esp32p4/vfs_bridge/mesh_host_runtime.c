@@ -51,19 +51,26 @@ static uint16_t mesh_host_runtime_next_seq(struct mesh_host_runtime *runtime)
     return seq;
 }
 
+/*
+ * ESP32-P4 是双核 RISC-V。dispatch_busy 会被 poll 任务和 shell 任务从两个核并发访问，
+ * 必须用原子 CAS 保护 check-then-set，否则两个核可能同时读到 false 并双双进入临界区。
+ */
 static int mesh_host_runtime_claim_dispatch(struct mesh_host_runtime *runtime)
 {
-    if (runtime->dispatch_busy) {
+    bool expected = false;
+
+    if (!__atomic_compare_exchange_n(
+            &runtime->dispatch_busy, &expected, true,
+            false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
         return -(int)M9P_ERR_EBUSY;
     }
 
-    runtime->dispatch_busy = true;
     return 0;
 }
 
 static void mesh_host_runtime_release_dispatch(struct mesh_host_runtime *runtime)
 {
-    runtime->dispatch_busy = false;
+    __atomic_store_n(&runtime->dispatch_busy, false, __ATOMIC_RELEASE);
 }
 
 static void mesh_host_runtime_init_slot(
@@ -296,7 +303,23 @@ static int mesh_host_runtime_client_request(
 
     *rx_len = 0u;
 
-    rc = mesh_host_runtime_claim_dispatch(runtime);
+    /*
+     * poll 任务在 receive_frame 内阻塞时（最长 io_timeout_ms，默认 200ms）持有
+     * dispatch 锁。最多重试 25 次 × 10ms = 250ms，保证 client 请求不因轮询任务
+     * 短暂占锁而立即失败。非 ESP 平台（单元测试）无 vTaskDelay，直接尝试一次。
+     */
+    {
+        int retry;
+        rc = -(int)M9P_ERR_EBUSY;
+        for (retry = 0; retry < 25 && rc != 0; ++retry) {
+            rc = mesh_host_runtime_claim_dispatch(runtime);
+#ifdef ESP_PLATFORM
+            if (rc != 0) {
+                vTaskDelay(pdMS_TO_TICKS(MESH_HOST_RUNTIME_IDLE_DELAY_MS));
+            }
+#endif
+        }
+    }
     if (rc != 0) {
         return rc;
     }
@@ -390,12 +413,11 @@ static int mesh_host_runtime_sync_registered_node(
     }
 
     /*
-     * m9p_client transport 需要在运行时槽位稳定后再绑定：
-     * - 这样同一 UID 重连时能继续复用同一个 client 对象；
-     * - transport_ctx 里带着 slot_index，可在发送请求时找到当前 mesh_addr。
+     * prepare_registered_client 已通过 m9p_client_init 把 transport_ctx 指向
+     * slot->transport_ctx，这里只需补上 transport 函数指针即可，不必再次查槽位。
+     * 重复调用 find_slot_by_uid 并解引用其结果既冗余，又在槽位已满时存在 NULL 解引用风险。
      */
     client->transport = mesh_host_runtime_client_request;
-    client->transport_ctx = &mesh_host_runtime_find_slot_by_uid(runtime, uid)->transport_ctx;
 
     return cluster_config_on_mesh_node_registered(mesh_addr, uid, client, NULL, NULL);
 }

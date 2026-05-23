@@ -1,8 +1,6 @@
 #include <inttypes.h>
 #include <stdio.h>
 
-#include "cluster_config.h"
-#include "node_connector.h"
 #include "esp_chip_info.h"
 #include "esp_flash.h"
 #include "esp_heap_caps.h"
@@ -40,26 +38,14 @@ void app_main(void)
     print_chip_banner();
 
     /*
-     * 启动真正的主机侧 mesh runtime。
-     *
-     * 该入口会一次性完成：
-     * 1. 初始化共享 mesh cluster + cluster_vfs 桥接层；
-     * 2. 初始化默认 UART raw transport；
-     * 3. 创建后台轮询任务，持续处理 REGISTER / LINK_STATE / MINI9P mesh 帧；
-     * 4. 在 REGISTER 到来时自动把 UID 同步到 VFS，并为该节点创建真实的
-     *    mesh-backed m9p_client。
+     * 启动 mesh host runtime：一次性完成 cluster 初始化、UART transport 初始化，
+     * 并创建后台 FreeRTOS 任务持续处理 REGISTER / LINK_STATE / MINI9P mesh 帧。
+     * 节点上线后 REGISTER 帧会自动触发 VFS 注册，无需手动添加静态节点。
      */
     if (mesh_host_runtime_start_default_task() != 0) {
         puts("fatal: mesh host runtime init failed");
         return;
     }
-
-    /*
-     * 注册静态直连从机（STM32F411，UART1 115200，TX=17 RX=18）。
-     * 若从机未连接，attach 会失败但不中断启动；
-     * 连接好后在 Lua shell 里执行 vfs.attach("mcu1") 重试。
-     */
-    node_connector_init_static_slave();
 
     if (!pw_lua_init()) {
         puts("fatal: Lua init failed");
