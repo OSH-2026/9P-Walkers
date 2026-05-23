@@ -1,10 +1,11 @@
 /**
  * @file mini9p_service.h
- * @brief STM32 slave 侧 Mini9P 串口服务组装层。
+ * @brief STM32 slave 侧 Mesh + Mini9P 串口服务组装层。
  *
- * 本模块把 local_vfs、mini9p_server、mini9p_peer_link 和 uart_transport
- * 串成一个可轮询的从机服务。它不改变协议层或 server 状态机，只负责把
- * “原始 UART 收发”提升为“可同时承接对端主动请求和本端主动请求”的链路层。
+ * 本模块把 local_vfs、mini9p_server、mesh_node_runtime 和 raw mesh UART
+ * transport 串成一个可轮询的从机服务。初始化成功后会立刻在当前 UART 链路上
+ * 发送一帧携带硬件 UID 的 REGISTER，后续再把发给本机的 mesh mini9P 请求
+ * 分发给本地 server。
  */
 
 #ifndef MINI9P_SERVICE_H
@@ -15,21 +16,33 @@ extern "C" {
 #endif
 
 /**
- * @brief 初始化 Mini9P 串口服务。
+ * @brief 初始化 Mesh + Mini9P 串口服务。
  *
- * 初始化顺序为 local_vfs -> mini9p_server -> 默认 UART transport -> mini9p_peer_link。
+ * 初始化顺序为 local_vfs -> mini9p_server -> raw mesh UART transport ->
+ * mesh_node_runtime，并在 init 成功后自动向当前串口发送 REGISTER。
  *
- * @return 0 成功，负 Mini9P 错误码失败。
+ * @return 0 成功，负 mesh/transport 错误码失败。
  */
 int mini9p_service_init(void);
 
 /**
- * @brief 处理至多一个 Mini9P UART 请求。
+ * @brief 显式通知“当前 UART 链路已连通”，立即重发一帧 REGISTER。
  *
- * 当前 poll 入口内部通过 mini9p_peer_link 从 raw UART 帧中分发请求与响应；
- * 在阻塞 HAL UART 超时的情况下，会返回 -M9P_ERR_EAGAIN。
+ * 当板级代码未来具备 link-up 检测时，可在事件回调里调用本接口。
+ * 当前 init 默认也会自动发一次 REGISTER。
  *
- * @return 0 成功处理一帧；负 Mini9P 错误码表示本轮未完成处理。
+ * @return 0 成功，负 mesh/transport 错误码失败。
+ */
+int mini9p_service_notify_link_up(void);
+
+/**
+ * @brief 处理至多一个 mesh UART 请求。
+ *
+ * 当前 poll 入口内部通过 mesh_node_runtime 拉取一帧 raw mesh 数据，再分发到
+ * 控制面或本地 mini9P server；在阻塞 HAL UART 超时的情况下，会返回可重试的
+ * 负 mesh 错误码。
+ *
+ * @return 0 成功处理一帧；负 mesh/transport 错误码表示本轮未完成处理。
  */
 int mini9p_service_poll_once(void);
 

@@ -42,14 +42,25 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined library search paths
 )
 
+set(PWOS_SHARED_MINI9P_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mini9p)
+set(PWOS_SHARED_MESH_CLUSTER_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/cluster)
+set(PWOS_SHARED_MESH_ENVELOPE_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/envelope)
+set(PWOS_SHARED_MESH_PROCESSER_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/processer)
+set(PWOS_SHARED_MESH_NODE_RUNTIME_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/node_runtime)
+set(PWOS_SHARED_MESH_TRANSPORT_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/transport)
+
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     User/backend/local_vfs.c
-    User/mini9p/mini9p_protocol.c
-    User/mini9p/mini9p_server.c
     User/mini9p/mini9p_service.c
-    User/mini9p/uart_transport.c
+    ${PWOS_SHARED_MINI9P_DIR}/mini9p_protocol.c
+    ${PWOS_SHARED_MINI9P_DIR}/mini9p_server.c
+    ${PWOS_SHARED_MESH_CLUSTER_DIR}/cluster.c
+    ${PWOS_SHARED_MESH_ENVELOPE_DIR}/mesh_protocal.c
+    ${PWOS_SHARED_MESH_PROCESSER_DIR}/mesh_processer.c
+    ${PWOS_SHARED_MESH_NODE_RUNTIME_DIR}/mesh_node_runtime.c
+    ${PWOS_SHARED_MESH_TRANSPORT_DIR}/mesh_uart_transport.c
 )
 
 # Add include paths
@@ -57,11 +68,18 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined include paths
     User/backend
     User/mini9p
+    ${PWOS_SHARED_MINI9P_DIR}
+    ${PWOS_SHARED_MESH_CLUSTER_DIR}
+    ${PWOS_SHARED_MESH_ENVELOPE_DIR}
+    ${PWOS_SHARED_MESH_PROCESSER_DIR}
+    ${PWOS_SHARED_MESH_NODE_RUNTIME_DIR}
+    ${PWOS_SHARED_MESH_TRANSPORT_DIR}
 )
 
 # Add project symbols (macros)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
+    MESH_UART_TRANSPORT_USE_STM32_HAL
 )
 
 # Remove wrong libob.a library dependency when using cpp files

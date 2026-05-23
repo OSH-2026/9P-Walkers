@@ -47,6 +47,11 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 
 # Add sources to executable
 set(PWOS_SHARED_MINI9P_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mini9p)
+set(PWOS_SHARED_MESH_CLUSTER_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/cluster)
+set(PWOS_SHARED_MESH_ENVELOPE_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/envelope)
+set(PWOS_SHARED_MESH_PROCESSER_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/processer)
+set(PWOS_SHARED_MESH_NODE_RUNTIME_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/node_runtime)
+set(PWOS_SHARED_MESH_TRANSPORT_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/transport)
 
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/User/fs/lfs.c
@@ -56,11 +61,14 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/User/app/fs_selftest.c
     ${CMAKE_SOURCE_DIR}/User/app/vofa_firewater.c
     ${CMAKE_SOURCE_DIR}/User/backend/local_vfs.c
-    ${CMAKE_SOURCE_DIR}/User/uart_transport/uart_transport.c
-    ${PWOS_SHARED_MINI9P_DIR}/mini9p_peer_link.c
     ${PWOS_SHARED_MINI9P_DIR}/mini9p_protocol.c
     ${PWOS_SHARED_MINI9P_DIR}/mini9p_server.c
     ${PWOS_SHARED_MINI9P_DIR}/mini9p_service.c
+    ${PWOS_SHARED_MESH_CLUSTER_DIR}/cluster.c
+    ${PWOS_SHARED_MESH_ENVELOPE_DIR}/mesh_protocal.c
+    ${PWOS_SHARED_MESH_PROCESSER_DIR}/mesh_processer.c
+    ${PWOS_SHARED_MESH_NODE_RUNTIME_DIR}/mesh_node_runtime.c
+    ${PWOS_SHARED_MESH_TRANSPORT_DIR}/mesh_uart_transport.c
 )
 
 # Add include paths
@@ -69,13 +77,18 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/User/drivers/storage
     ${CMAKE_SOURCE_DIR}/User/app
     ${CMAKE_SOURCE_DIR}/User/backend
-    ${CMAKE_SOURCE_DIR}/User/uart_transport
     ${PWOS_SHARED_MINI9P_DIR}
+    ${PWOS_SHARED_MESH_CLUSTER_DIR}
+    ${PWOS_SHARED_MESH_ENVELOPE_DIR}
+    ${PWOS_SHARED_MESH_PROCESSER_DIR}
+    ${PWOS_SHARED_MESH_NODE_RUNTIME_DIR}
+    ${PWOS_SHARED_MESH_TRANSPORT_DIR}
 )
 
 # Add project symbols (macros)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
+    MESH_UART_TRANSPORT_USE_STM32_HAL
 )
 
 if(PWOS_ENABLE_MINI9P_SERIAL)
