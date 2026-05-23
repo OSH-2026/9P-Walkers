@@ -37,6 +37,7 @@ struct m9p_client {
 };
 
 void m9p_client_init(struct m9p_client *client, m9p_transport_fn transport, void *transport_ctx);
+void m9p_client_reset_session(struct m9p_client *client);
 uint16_t m9p_client_alloc_fid(struct m9p_client *client);
 
 int m9p_client_attach(

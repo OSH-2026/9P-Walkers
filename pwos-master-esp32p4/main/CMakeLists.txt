@@ -1,5 +1,7 @@
 file(GLOB LUA_SRCS "${CMAKE_CURRENT_LIST_DIR}/../lua/*.c")
 set(PWOS_SHARED_MINI9P_DIR "${CMAKE_CURRENT_LIST_DIR}/../../pwos-shared/mini9p")
+set(PWOS_SHARED_MESH_CLUSTER_DIR "${CMAKE_CURRENT_LIST_DIR}/../../pwos-shared/mesh/cluster")
+set(PWOS_SHARED_MESH_ENVELOPE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../pwos-shared/mesh/envelope")
 
 list(REMOVE_ITEM LUA_SRCS
     "${CMAKE_CURRENT_LIST_DIR}/../lua/lua.c"
@@ -19,6 +21,8 @@ idf_component_register(
         "${PWOS_SHARED_MINI9P_DIR}/mini9p_client.c"
         "${PWOS_SHARED_MINI9P_DIR}/mini9p_peer_link.c"
         "${PWOS_SHARED_MINI9P_DIR}/mini9p_protocol.c"
+        "${PWOS_SHARED_MESH_ENVELOPE_DIR}/mesh_protocal.c"
+        "${PWOS_SHARED_MESH_CLUSTER_DIR}/cluster.c"
         "../transport/uart_transport.c"
         "../vfs_bridge/cluster_config.c"
         "../vfs_bridge/cluster_vfs.c"
@@ -41,6 +45,8 @@ idf_component_register(
         "."
         "../lua"
         "${PWOS_SHARED_MINI9P_DIR}"
+        "${PWOS_SHARED_MESH_CLUSTER_DIR}"
+        "${PWOS_SHARED_MESH_ENVELOPE_DIR}"
         "../transport"
         "../vfs_bridge"
         "../shell"

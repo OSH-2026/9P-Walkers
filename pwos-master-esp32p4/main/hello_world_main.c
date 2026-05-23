@@ -1,7 +1,7 @@
 #include <inttypes.h>
 #include <stdio.h>
 
-#include "cluster_vfs.h"
+#include "cluster_config.h"
 #include "esp_chip_info.h"
 #include "esp_flash.h"
 #include "esp_heap_caps.h"
@@ -37,8 +37,15 @@ void app_main(void)
 
     print_chip_banner();
 
-    /* Reset cluster VFS route/open tables before any vfs.* call. */
-    cluster_vfs_init();
+    /*
+     * 启动主机侧 mesh cluster + VFS 桥接层。
+     * 这里不再预注册静态 mcu1，而是等待后续 mesh 控制面把“节点发现/离线”
+     * 事件送入 cluster_config_on_node_discovered()/on_node_departed()。
+     */
+    if (cluster_config_init_mesh_host() != 0) {
+        puts("fatal: mesh host cluster/vfs init failed");
+        return;
+    }
 
     if (!pw_lua_init()) {
         puts("fatal: Lua init failed");

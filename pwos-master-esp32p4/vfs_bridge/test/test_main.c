@@ -396,6 +396,14 @@ static void run_test(const char *name, test_fn fn)
     }
 }
 
+static void fill_uid(uint8_t uid[CLUSTER_VFS_UID_LEN], uint8_t seed)
+{
+    for (size_t i = 0; i < CLUSTER_VFS_UID_LEN; ++i)
+    {
+        uid[i] = (uint8_t)(seed + (uint8_t)i);
+    }
+}
+
 /* 每个需要远端访问的测试都先建立一条 mcu1 直连路由，并完成 attach。
  * 这样 case 本身可以专注验证 open/stat/read/write/close 的行为。
  */
@@ -407,6 +415,25 @@ static void setup_attached_route(struct mock_ctx *ctx, struct m9p_client *client
     expect_int("add_direct", cluster_vfs_add_direct("mcu1", client), 0);
     expect_int("attach", cluster_vfs_attach("mcu1"), 0);
     expect_int("attach_count", ctx->attach_count, 1);
+}
+
+static void setup_discovered_node(struct mock_ctx *ctx,
+                                  struct m9p_client *client,
+                                  uint8_t mesh_addr,
+                                  uint8_t uid_seed,
+                                  const char **out_name)
+{
+    uint8_t uid[CLUSTER_VFS_UID_LEN];
+    bool reused = true;
+
+    memset(ctx, 0, sizeof(*ctx));
+    fill_uid(uid, uid_seed);
+    expect_int("mesh host init", cluster_config_init_mesh_host(), 0);
+    m9p_client_init(client, mock_transport, ctx);
+    expect_int("discover node",
+               cluster_config_on_node_discovered(mesh_addr, uid, client, out_name, &reused),
+               0);
+    expect_int("discover reused mapping", reused, 0);
 }
 
 /* 重复 target 会让 resolve_path 只命中第一条路由，后续条目变成不可达死路由。 */
@@ -447,23 +474,143 @@ static void test_get_route_state(void)
     expect_int("state detached", state, CLUSTER_VFS_ROUTE_READY);
 }
 
-/* 静态注册层应在没有真实 transport 的情况下继续启动。
- * 当前 stub attach 会失败，因此 mcu1 只完成注册，尚不可访问。
- */
-static void test_static_nodes_attach_failure_continues(void)
+/* 新主机初始化不再预注册静态 mcu1，而是只启动 mesh cluster + VFS 桥接层。 */
+static void test_mesh_host_init_starts_empty(void)
+{
+    enum cluster_vfs_route_state state = CLUSTER_VFS_ROUTE_EMPTY;
+    struct cluster *mesh_cluster = NULL;
+
+    expect_int("mesh host init", cluster_config_init_mesh_host(), 0);
+    mesh_cluster = cluster_config_mesh_cluster();
+    expect_int("mesh cluster exists", mesh_cluster != NULL, 1);
+    expect_int("mesh host empty", cluster_vfs_get_route_state("mcu1", &state), -(int)M9P_ERR_ENOENT);
+}
+
+/* 新发现的节点应分配新名字、保存 UID，并在 cluster 中可达。 */
+static void test_discover_node_allocates_name_and_tracks_uid(void)
 {
     struct mock_ctx ctx;
     struct m9p_client client;
+    struct cluster_vfs_node_info info;
+    struct cluster *mesh_cluster;
+    uint8_t uid[CLUSTER_VFS_UID_LEN];
+    const char *name = NULL;
+    bool reachable = false;
+
+    fill_uid(uid, 0x10u);
+    setup_discovered_node(&ctx, &client, 0x11u, 0x10u, &name);
+    mesh_cluster = cluster_config_mesh_cluster();
+
+    expect_str("discover name", name, "mcu1");
+    expect_int("discover attach count", ctx.attach_count, 0);
+    expect_int("discover info rc", cluster_vfs_get_node_info("mcu1", &info), 0);
+    expect_int("discover info addr", info.mesh_addr, 0x11u);
+    expect_int("discover info online", info.online, 1);
+    expect_int("discover info route state", info.route_state, CLUSTER_VFS_ROUTE_READY);
+    expect_int("discover info m9p state", info.m9p_state, CLUSTER_VFS_M9P_NEW);
+    expect_int("discover info has uid", info.has_hw_uid, 1);
+    expect_mem("discover info uid", info.hw_uid, uid, CLUSTER_VFS_UID_LEN);
+    expect_int("discover reachable rc", cluster_can_reach(mesh_cluster, 0x11u, &reachable), 0);
+    expect_int("discover reachable", reachable, 1);
+}
+
+/* 同一 UID 重连时应复用原节点名，但 9P 状态需要回到 NEW 并重新 attach。 */
+static void test_rediscover_same_uid_reuses_name(void)
+{
+    struct mock_ctx ctx1;
+    struct mock_ctx ctx2;
+    struct m9p_client client1;
+    struct m9p_client client2;
+    struct cluster_vfs_node_info info;
+    uint8_t uid[CLUSTER_VFS_UID_LEN];
+    const char *name1 = NULL;
+    const char *name2 = NULL;
+    bool reused = false;
+    bool reachable = true;
+
+    memset(&ctx1, 0, sizeof(ctx1));
+    memset(&ctx2, 0, sizeof(ctx2));
+    fill_uid(uid, 0x20u);
+
+    expect_int("reuse init", cluster_config_init_mesh_host(), 0);
+    m9p_client_init(&client1, mock_transport, &ctx1);
+    expect_int("reuse discover first",
+               cluster_config_on_node_discovered(0x11u, uid, &client1, &name1, &reused),
+               0);
+    expect_int("reuse first reused", reused, 0);
+    expect_str("reuse first name", name1, "mcu1");
+    expect_int("reuse first attach", cluster_vfs_attach(name1), 0);
+    expect_int("reuse first attach count", ctx1.attach_count, 1);
+
+    expect_int("reuse depart", cluster_config_on_node_departed(0x11u, &reachable), 0);
+    expect_int("reuse depart reachable", reachable, 0);
+
+    m9p_client_init(&client2, mock_transport, &ctx2);
+    reused = false;
+    expect_int("reuse discover second",
+               cluster_config_on_node_discovered(0x22u, uid, &client2, &name2, &reused),
+               0);
+    expect_int("reuse second reused", reused, 1);
+    expect_str("reuse second name", name2, "mcu1");
+    expect_int("reuse second info rc", cluster_vfs_get_node_info("mcu1", &info), 0);
+    expect_int("reuse second addr", info.mesh_addr, 0x22u);
+    expect_int("reuse second route state", info.route_state, CLUSTER_VFS_ROUTE_READY);
+    expect_int("reuse second m9p state", info.m9p_state, CLUSTER_VFS_M9P_NEW);
+    expect_int("reuse second attach", cluster_vfs_attach("mcu1"), 0);
+    expect_int("reuse second attach count", ctx2.attach_count, 1);
+}
+
+/* 节点离线后应摘图并把 VFS 会话回退到 NEW，同时使旧 fd 失效。 */
+static void test_node_departure_marks_new_and_invalidates_fd(void)
+{
+    struct mock_ctx ctx;
+    struct m9p_client client;
+    struct cluster_vfs_node_info info;
+    const char *name = NULL;
+    bool reachable = true;
     uint16_t fd = 0xffffu;
 
-    memset(&ctx, 0, sizeof(ctx));
-    cluster_vfs_init();
+    setup_discovered_node(&ctx, &client, 0x11u, 0x30u, &name);
+    expect_int("depart attach", cluster_vfs_attach(name), 0);
+    expect_int("depart open", cluster_vfs_open("/mcu1/dev/temp", M9P_OREAD, &fd), 0);
 
-    expect_int("static init", cluster_init_static_nodes(), 0);
+    expect_int("depart event", cluster_config_on_node_departed(0x11u, &reachable), 0);
+    expect_int("depart reachable", reachable, 0);
+    expect_int("depart info rc", cluster_vfs_get_node_info("mcu1", &info), 0);
+    expect_int("depart info route state", info.route_state, CLUSTER_VFS_ROUTE_OFFLINE);
+    expect_int("depart info m9p state", info.m9p_state, CLUSTER_VFS_M9P_NEW);
+    expect_int("depart info online", info.online, 0);
+    expect_int("depart info addr", info.mesh_addr, CLUSTER_VFS_UNASSIGNED_ADDR);
+    expect_int("depart fd invalid", cluster_vfs_close(fd), -(int)M9P_ERR_EFID);
 
-    m9p_client_init(&client, mock_transport, &ctx);
-    expect_int("static duplicate mcu1", cluster_vfs_add_direct("mcu1", &client), -(int)M9P_ERR_EBUSY);
-    expect_int("static unattached open", cluster_vfs_open("/mcu1/dev/temp", M9P_OREAD, &fd), -(int)M9P_ERR_ENOENT);
+    fd = 0xffffu;
+    expect_int("depart open blocked",
+               cluster_vfs_open("/mcu1/dev/temp", M9P_OREAD, &fd),
+               -(int)M9P_ERR_ENOENT);
+}
+
+/* 链路图变化后应通过 mesh cluster 的连通性查询驱动 VFS 回退到离线/NEW。 */
+static void test_refresh_connectivity_marks_offline_after_link_loss(void)
+{
+    struct mock_ctx ctx;
+    struct m9p_client client;
+    struct cluster_vfs_node_info info;
+    struct cluster *mesh_cluster;
+    const char *name = NULL;
+    bool reachable = true;
+
+    setup_discovered_node(&ctx, &client, 0x11u, 0x40u, &name);
+    expect_int("refresh attach", cluster_vfs_attach(name), 0);
+
+    mesh_cluster = cluster_config_mesh_cluster();
+    expect_int("refresh remove link",
+               cluster_remove_link(mesh_cluster, 0x00u, 0x11u, true),
+               0);
+    expect_int("refresh rc", cluster_config_refresh_node_connectivity(0x11u, &reachable), 0);
+    expect_int("refresh reachable", reachable, 0);
+    expect_int("refresh info rc", cluster_vfs_get_node_info("mcu1", &info), 0);
+    expect_int("refresh route state", info.route_state, CLUSTER_VFS_ROUTE_OFFLINE);
+    expect_int("refresh m9p state", info.m9p_state, CLUSTER_VFS_M9P_NEW);
 }
 
 /* "/" 是 cluster_vfs 本地合成的虚拟根目录，不应该被转发给远端节点。 */
@@ -743,7 +890,11 @@ int main(void)
 
     run_test("test_duplicate_route", test_duplicate_route);
     run_test("test_get_route_state", test_get_route_state);
-    run_test("test_static_nodes_attach_failure_continues", test_static_nodes_attach_failure_continues);
+    run_test("test_mesh_host_init_starts_empty", test_mesh_host_init_starts_empty);
+    run_test("test_discover_node_allocates_name_and_tracks_uid", test_discover_node_allocates_name_and_tracks_uid);
+    run_test("test_rediscover_same_uid_reuses_name", test_rediscover_same_uid_reuses_name);
+    run_test("test_node_departure_marks_new_and_invalidates_fd", test_node_departure_marks_new_and_invalidates_fd);
+    run_test("test_refresh_connectivity_marks_offline_after_link_loss", test_refresh_connectivity_marks_offline_after_link_loss);
     run_test("test_root_stat", test_root_stat);
     run_test("test_path_boundary", test_path_boundary);
     run_test("test_open_read_close", test_open_read_close);

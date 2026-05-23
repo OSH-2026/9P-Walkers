@@ -1,9 +1,10 @@
 # Mesh 模块整体说明（接口导向）
 
-本文档聚焦 mesh 模块在系统中的两条关键接口边界：
+本文档聚焦 mesh 模块在系统中的三条关键接口边界：
 
 1. 向上对 mini9P 模块暴露的数据面接口。
 2. 向下对串口/链路层暴露的收发接口。
+3. 向主机侧 VFS 暴露的“节点发现 / 节点离线 / 名字映射 / 9P 状态”接口。
 
 目标是把“谁负责什么”讲清楚，避免后续接入时出现重复封装或职责重叠。
 
@@ -15,6 +16,11 @@
 - processer：统一做收帧、解帧、路由分流、转发、本机控制分发。
 - cluster：维护本机路由/拓扑状态，并提供处理器可直接绑定的回调接口。
 
+在主机侧，mesh 之外还有一层“mesh -> VFS 桥接”：
+
+- cluster_config：把 mesh cluster 与主机 VFS 接起来。
+- cluster_vfs：维护节点名、硬件 UID 映射，以及 9P attach 状态。
+
 推荐链路如下：
 
 ```text
@@ -25,10 +31,14 @@ receive_frame/send_frame 回调
         |
         v
 mesh_processer (解封装、转发、分流)
-   |                         |
-   | 控制面                  | 数据面(MINI9P)
-   v                         v
-cluster_control_handler      mini9p_server/client_handler
+        |                         |
+        | 控制面                  | 数据面(MINI9P)
+        v                         v
+mesh cluster <-----------> mini9p server/client
+        |
+        | 主机侧发现/离线事件
+        v
+cluster_config -> cluster_vfs -> /mcuN/... 命名空间
 ```
 
 ## 2. 对 mini9P 模块的接口
@@ -137,7 +147,80 @@ processor_cfg.control_handler_ctx = NULL; /* 回退到 cluster_ctx */
 - 本机控制帧：processor 调 `control_handler`，必要时发送控制回包。
 - 本机 mini9P 帧：processor 按 T*/R* 分流给 mini9P 回调。
 
-## 5. 推荐接入顺序
+## 5. 主机侧 VFS 发现与离线同步
+
+### 5.1 为什么主机侧必须接 mesh cluster
+
+主机侧如果只保留一套“本地静态节点表”，会有三个问题：
+
+1. 无法根据 mesh 控制面实时发现新节点。
+2. 无法把“节点名”和“硬件唯一序列号”建立稳定映射。
+3. 节点离线后，VFS 不知道应该把 9P 会话回退到未 attach 状态。
+
+因此新版本采用以下约定：
+
+- 主机唯一的拓扑/路由来源是 `pwos-shared/mesh/cluster`。
+- 原来 master 本地那套“静态 cluster”思路废弃，不再单独维护另一份图。
+- 主机侧 `cluster_config` 只做桥接，不再自己保存独立路由真相。
+
+### 5.2 节点发现流程
+
+当主机通过 mesh 控制面确认“某个新节点已经加入链路”时，应调用：
+
+```c
+cluster_config_on_node_discovered(mesh_addr, hw_uid, client, &node_name, &reused);
+```
+
+该调用会同时做两件事：
+
+1. 在 mesh cluster 中把该节点加入主机拓扑视图。
+2. 在 cluster_vfs 中按 `hw_uid` 建立或复用节点名映射。
+
+名字分配规则：
+
+- 若 `hw_uid` 已存在历史映射，则复用旧节点名。
+- 若 `hw_uid` 首次出现，则新分配 `mcuN` 名称。
+
+发现完成后，VFS 中该节点的 9P 状态是：
+
+- `NEW`（未 attach）
+
+也就是说，发现节点不等于已经建立 9P 会话；attach 仍由上层显式触发。
+
+### 5.3 节点离线流程
+
+当主机确认“节点已经退出 / 已不可达”时，应调用：
+
+```c
+bool reachable = false;
+cluster_config_on_node_departed(mesh_addr, &reachable);
+```
+
+该调用会：
+
+1. 在 mesh cluster 中把该节点摘出当前图。
+2. 在 cluster_vfs 中保留名字 <-> UID 映射。
+3. 清除当前 mesh 地址绑定。
+4. 把该节点 9P 状态回退为 `NEW`。
+
+这保证了后续同一块硬件重新上线时，可以继续复用旧名字，但必须重新 attach。
+
+### 5.4 链路变化后的二次确认
+
+有些场景不是“节点彻底退出”，而是“某条链路断了”。这时应先更新 mesh cluster 图，再调用：
+
+```c
+cluster_config_refresh_node_connectivity(mesh_addr, &reachable);
+```
+
+语义：
+
+- 若图更新后节点仍可达，则 VFS 不改变在线映射。
+- 若图更新后节点不可达，则 VFS 自动回退到离线 + `NEW` 状态。
+
+这样 VFS 的可访问状态始终跟随 mesh cluster 的真实连通性。
+
+## 6. 推荐接入顺序
 
 建议按以下顺序渐进接入：
 
@@ -153,10 +236,12 @@ processor_cfg.control_handler_ctx = NULL; /* 回退到 cluster_ctx */
 - 控制面问题：在步骤 3 暴露。
 - 业务协议问题：在步骤 4 暴露。
 
-## 6. 常见实现注意点
+## 7. 常见实现注意点
 
 1. hop 必须在转发时递减，耗尽应丢帧。
 2. 控制回包必须是完整 mesh 帧，processor 不会二次补头。
 3. mini9P server 回调输出的是 mini9P 帧，不是 mesh 帧。
 4. `local_addr` 未分配阶段建议保持 `0xFF`，并优先完成 ASSIGN 流程。
 5. 串口层不要解析 mini9P 或控制负载，避免分层耦合。
+6. 主机侧节点名分配必须以硬件 UID 为主键，而不是以 mesh 地址为主键。
+7. 节点离线后不要删除 UID 映射；应保留映射并只把 9P 状态回退到 `NEW`。

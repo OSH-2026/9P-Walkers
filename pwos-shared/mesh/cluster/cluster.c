@@ -210,6 +210,46 @@ static int remove_link_by_key(struct cluster *cluster, uint8_t from, uint8_t to,
     return 0;
 }
 
+static void remove_routes_using_addr(struct cluster *cluster, uint8_t addr)
+{
+    size_t i;
+
+    if (cluster == NULL) {
+        return;
+    }
+
+    for (i = 0u; i < CLUSTER_MAX_ROUTES; ++i) {
+        if (!cluster->routes[i].valid) {
+            continue;
+        }
+        if (cluster->routes[i].dst == addr || cluster->routes[i].next_hop == addr) {
+            memset(&cluster->routes[i], 0, sizeof(cluster->routes[i]));
+            cluster->routes[i].dst = CLUSTER_INVALID_ADDR;
+            cluster->routes[i].next_hop = CLUSTER_INVALID_ADDR;
+        }
+    }
+}
+
+static void remove_links_using_addr(struct cluster *cluster, uint8_t addr)
+{
+    size_t i;
+
+    if (cluster == NULL) {
+        return;
+    }
+
+    for (i = 0u; i < CLUSTER_MAX_LINKS; ++i) {
+        if (!cluster->links[i].valid) {
+            continue;
+        }
+        if (cluster->links[i].from == addr || cluster->links[i].to == addr) {
+            memset(&cluster->links[i], 0, sizeof(cluster->links[i]));
+            cluster->links[i].from = CLUSTER_INVALID_ADDR;
+            cluster->links[i].to = CLUSTER_INVALID_ADDR;
+        }
+    }
+}
+
 static int cluster_rebuild_routes_from_topology(struct cluster *cluster)
 {
     uint8_t node_addrs[CLUSTER_MAX_NODES];
@@ -459,6 +499,23 @@ int cluster_set_node_online(struct cluster *cluster, uint8_t addr, bool online)
     return 0;
 }
 
+int cluster_get_node_online(struct cluster *cluster, uint8_t addr, bool *out_online)
+{
+    struct cluster_node *node;
+
+    if (cluster == NULL || out_online == NULL || !cluster->initialized) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    node = find_node(cluster, addr);
+    if (node == NULL || !node->valid) {
+        return -(int)MESH_ERR_NO_ROUTE;
+    }
+
+    *out_online = node->online;
+    return 0;
+}
+
 /*
  * 插入或更新静态路由。
  *
@@ -532,6 +589,26 @@ int cluster_remove_link(struct cluster *cluster, uint8_t from, uint8_t to, bool 
     return remove_link_by_key(cluster, from, to, bidirectional);
 }
 
+int cluster_mark_node_offline(struct cluster *cluster, uint8_t addr)
+{
+    struct cluster_node *node;
+
+    if (cluster == NULL || !cluster->initialized) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    node = find_node(cluster, addr);
+    if (node == NULL || !node->valid) {
+        return -(int)MESH_ERR_NO_ROUTE;
+    }
+
+    node->online = false;
+    remove_routes_using_addr(cluster, addr);
+    remove_links_using_addr(cluster, addr);
+    cluster->routes_dirty = (cluster->config.mode == CLUSTER_MODE_TOPOLOGY);
+    return 0;
+}
+
 /* 对外暴露的重算接口。 */
 int cluster_rebuild_routes(struct cluster *cluster)
 {
@@ -580,6 +657,29 @@ int cluster_lookup_next_hop(
     *out_next_hop = route->next_hop;
     *out_is_local = route->local;
     return 0;
+}
+
+int cluster_can_reach(struct cluster *cluster, uint8_t dst, bool *out_reachable)
+{
+    uint8_t next_hop = 0u;
+    bool is_local = false;
+    int rc;
+
+    if (cluster == NULL || out_reachable == NULL) {
+        return -(int)MESH_ERR_BAD_FRAME;
+    }
+
+    rc = cluster_lookup_next_hop(cluster, dst, &next_hop, &is_local);
+    if (rc == 0) {
+        *out_reachable = true;
+        return 0;
+    }
+    if (rc == -(int)MESH_ERR_NO_ROUTE) {
+        *out_reachable = false;
+        return 0;
+    }
+
+    return rc;
 }
 
 /*

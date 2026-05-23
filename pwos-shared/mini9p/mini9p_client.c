@@ -85,6 +85,22 @@ void m9p_client_init(struct m9p_client *client, m9p_transport_fn transport, void
     client->negotiated_msize = 256u;
 }
 
+void m9p_client_reset_session(struct m9p_client *client)
+{
+    if (client == NULL) {
+        return;
+    }
+
+    client->next_tag = 1u;
+    client->next_fid = M9P_FIRST_DYNAMIC_FID;
+    client->negotiated_msize = 256u;
+    client->max_fids = 0u;
+    client->max_inflight = 0u;
+    client->feature_bits = 0u;
+    client->attached = false;
+    memset(&client->root_qid, 0, sizeof(client->root_qid));
+}
+
 /**
  * @brief 客户端 fid 分配函数
  * 

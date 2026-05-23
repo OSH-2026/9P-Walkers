@@ -1,83 +1,144 @@
 #include "cluster_config.h"
 
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <stdio.h>
-
 #include "cluster_vfs.h"
-#include "mini9p_client.h"
-#include "mini9p_peer_link.h"
-#include "uart_transport.h"
 
-struct cluster_static_node {
-    const char *name;             /* 用户可见的节点名，例如 "mcu1" */
-    struct m9p_client *client;    /* 通往该节点的 Mini9P client */
-    bool auto_attach;             /* 启动注册后是否立即尝试 attach */
-};
+#define CLUSTER_CONFIG_HOST_ADDR 0x00u
+#define CLUSTER_CONFIG_DIRECT_LINK_METRIC 1u
 
-static struct m9p_client g_mcu1_client;
-static struct m9p_peer_link g_mcu1_peer_link;
-static uint8_t g_mcu1_peer_link_rx[M9P_DEFAULT_MSIZE];
-static uint8_t g_mcu1_peer_link_tx[M9P_DEFAULT_MSIZE];
+static struct cluster g_mesh_cluster;
+static bool g_mesh_cluster_initialized;
 
-int cluster_init_static_nodes(void)
+static int ensure_mesh_host_initialized(void)
 {
-    struct m9p_peer_link_config peer_link_config;
-    int ret;
+    if (g_mesh_cluster_initialized) {
+        return 0;
+    }
 
-    /* 第一版只注册一个静态节点。真实 UART/SPI transport 接好后，
-     * 只需要替换 g_mcu1_client 的 transport 初始化，不需要改 cluster_vfs。
-     */
-    static const struct cluster_static_node nodes[] = {
-        {
-            .name = "mcu1",
-            .client = &g_mcu1_client,
-            .auto_attach = true,
-        },
-    };
+    return cluster_config_init_mesh_host();
+}
 
-    ret = m9p_uart_transport_init_default();
-    if (ret < 0) {
-        return ret;
+int cluster_config_init_mesh_host(void)
+{
+    struct cluster_config cfg;
+    int rc;
+
+    cluster_get_default_config(&cfg);
+    cfg.local_addr = CLUSTER_CONFIG_HOST_ADDR;
+    cfg.mode = CLUSTER_MODE_TOPOLOGY;
+
+    rc = cluster_init(&g_mesh_cluster, &cfg);
+    if (rc != 0) {
+        return rc;
+    }
+
+    rc = cluster_vfs_init();
+    if (rc != 0) {
+        return rc;
+    }
+
+    rc = cluster_vfs_bind_mesh_cluster(&g_mesh_cluster);
+    if (rc != 0) {
+        return rc;
+    }
+
+    g_mesh_cluster_initialized = true;
+    return 0;
+}
+
+struct cluster *cluster_config_mesh_cluster(void)
+{
+    if (!g_mesh_cluster_initialized) {
+        return NULL;
+    }
+
+    return &g_mesh_cluster;
+}
+
+int cluster_config_on_node_discovered(
+    uint8_t mesh_addr,
+    const uint8_t hw_uid[MESH_UID_LEN],
+    struct m9p_client *client,
+    const char **out_name,
+    bool *out_reused_mapping)
+{
+    int rc;
+
+    if (hw_uid == NULL || client == NULL) {
+        return -(int)M9P_ERR_EINVAL;
+    }
+
+    rc = ensure_mesh_host_initialized();
+    if (rc != 0) {
+        return rc;
     }
 
     /*
-     * Master 当前还没有本地 mini9p_server backend，因此这里只把 raw UART transport
-     * 包成 peer_link，用来确保“等待本端响应”和“接收对端主动请求”不会混帧。
-     * 若对端此时主动发来 T*，peer_link 会回 Rerror ENOTSUP，而不是把它误认为本端响应。
+     * 当前主机实现把“新节点加入链路”视为 host 与该节点之间出现一条直连边。
+     * 若未来 discovery 来自更复杂的多跳控制面，可以把这里替换成更精细的
+     * 链路注入逻辑，而 VFS 接口无需变化。
      */
-    m9p_peer_link_get_default_config(&peer_link_config);
-    peer_link_config.send_frame = (m9p_peer_link_send_frame_fn)m9p_uart_transport_send_frame;
-    peer_link_config.receive_frame = (m9p_peer_link_receive_frame_fn)m9p_uart_transport_receive_frame;
-    peer_link_config.transport_ctx = m9p_uart_transport_default();
-    peer_link_config.dispatch_rx_buffer = g_mcu1_peer_link_rx;
-    peer_link_config.dispatch_rx_cap = sizeof(g_mcu1_peer_link_rx);
-    peer_link_config.dispatch_tx_buffer = g_mcu1_peer_link_tx;
-    peer_link_config.dispatch_tx_cap = sizeof(g_mcu1_peer_link_tx);
-    ret = m9p_peer_link_init(&g_mcu1_peer_link, &peer_link_config);
-    if (ret < 0) {
-        return ret;
+    rc = cluster_add_link(
+        &g_mesh_cluster,
+        g_mesh_cluster.config.local_addr,
+        mesh_addr,
+        CLUSTER_CONFIG_DIRECT_LINK_METRIC,
+        true);
+    if (rc != 0) {
+        return rc;
     }
 
-    m9p_client_init(&g_mcu1_client,
-                    m9p_peer_link_request,
-                    &g_mcu1_peer_link);
+    rc = cluster_set_node_online(&g_mesh_cluster, mesh_addr, true);
+    if (rc != 0) {
+        return rc;
+    }
 
-    for (size_t i = 0; i < sizeof(nodes) / sizeof(nodes[0]); ++i) {
-        ret = cluster_vfs_add_direct(nodes[i].name, nodes[i].client);
-        if (ret < 0) {
-            return ret;
-        }
+    return cluster_vfs_discover_node(mesh_addr, hw_uid, client, out_name, out_reused_mapping);
+}
 
-        if (nodes[i].auto_attach) {
-            ret = cluster_vfs_attach(nodes[i].name);
-            if (ret < 0) {
-                /* 当前策略允许从机未接入时 Master 继续启动。 */
-                printf("cluster_config: %s attach deferred, rc=%d\n", nodes[i].name, ret);
-            }
-        }
+int cluster_config_refresh_node_connectivity(uint8_t mesh_addr, bool *out_reachable)
+{
+    int rc;
+
+    if (out_reachable == NULL) {
+        return -(int)M9P_ERR_EINVAL;
+    }
+
+    rc = ensure_mesh_host_initialized();
+    if (rc != 0) {
+        return rc;
+    }
+
+    return cluster_vfs_refresh_node_from_cluster(mesh_addr, out_reachable);
+}
+
+int cluster_config_on_node_departed(uint8_t mesh_addr, bool *out_reachable)
+{
+    bool reachable = false;
+    int rc;
+
+    rc = ensure_mesh_host_initialized();
+    if (rc != 0) {
+        return rc;
+    }
+
+    rc = cluster_mark_node_offline(&g_mesh_cluster, mesh_addr);
+    if (rc != 0) {
+        return rc;
+    }
+
+    rc = cluster_config_refresh_node_connectivity(mesh_addr, &reachable);
+    if (rc != 0) {
+        return rc;
+    }
+
+    if (out_reachable != NULL) {
+        *out_reachable = reachable;
     }
 
     return 0;
+}
+
+int cluster_init_static_nodes(void)
+{
+    return cluster_config_init_mesh_host();
 }

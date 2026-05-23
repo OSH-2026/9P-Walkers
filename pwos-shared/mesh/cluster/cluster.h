@@ -131,6 +131,9 @@ int cluster_set_mode(struct cluster *cluster, enum cluster_mode mode);
  */
 int cluster_set_node_online(struct cluster *cluster, uint8_t addr, bool online);
 
+/* 查询某个节点当前是否被标记为在线。 */
+int cluster_get_node_online(struct cluster *cluster, uint8_t addr, bool *out_online);
+
 /*
  * 添加一条静态路由。
  *
@@ -157,6 +160,15 @@ int cluster_add_link(struct cluster *cluster, uint8_t from, uint8_t to, uint8_t 
 int cluster_remove_link(struct cluster *cluster, uint8_t from, uint8_t to, bool bidirectional);
 
 /*
+ * 将某个节点标记为离线，并清理与它相关的链路和依赖它的路由。
+ *
+ * 适用场景：
+ * - 主机明确确认某个节点已经退出 mesh。
+ * - 需要把该节点从当前连通图中摘掉，再重新评估其可达性。
+ */
+int cluster_mark_node_offline(struct cluster *cluster, uint8_t addr);
+
+/*
  * 根据当前拓扑重新派生路由表。
  *
  * 仅在 TOPOLOGY 模式下有意义；
@@ -180,6 +192,14 @@ int cluster_lookup_next_hop(
     uint8_t dst,
     uint8_t *out_next_hop,
     bool *out_is_local);
+
+/*
+ * 查询某个目标地址当前是否仍然可达。
+ *
+ * 该接口是 cluster_lookup_next_hop() 的布尔封装，便于上层在节点离线、
+ * 链路断开等场景中只做“还通不通”的判断，而不关心具体 next_hop。
+ */
+int cluster_can_reach(struct cluster *cluster, uint8_t dst, bool *out_reachable);
 
 /*
  * 处理 ROUTE_UPDATE 控制消息。
