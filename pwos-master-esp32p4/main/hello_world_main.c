@@ -1,6 +1,7 @@
 #include <inttypes.h>
 #include <stdio.h>
 
+#include "cluster_vfs.h"
 #include "esp_chip_info.h"
 #include "esp_flash.h"
 #include "esp_heap_caps.h"
@@ -35,6 +36,9 @@ void app_main(void)
     setvbuf(stdout, NULL, _IONBF, 0);
 
     print_chip_banner();
+
+    /* Reset cluster VFS route/open tables before any vfs.* call. */
+    cluster_vfs_init();
 
     if (!pw_lua_init()) {
         puts("fatal: Lua init failed");
