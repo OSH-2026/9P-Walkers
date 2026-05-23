@@ -8,6 +8,7 @@
 #include "esp_system.h"
 #include "http_server.h"
 #include "lua_port.h"
+#include "mesh_host_runtime.h"
 #include "sdkconfig.h"
 #include "shell.h"
 #include "wifi_softap.h"
@@ -38,12 +39,17 @@ void app_main(void)
     print_chip_banner();
 
     /*
-     * 启动主机侧 mesh cluster + VFS 桥接层。
-     * 这里不再预注册静态 mcu1，而是等待后续 mesh 控制面把“节点发现/离线”
-     * 事件送入 cluster_config_on_node_discovered()/on_node_departed()。
+     * 启动真正的主机侧 mesh runtime。
+     *
+     * 该入口会一次性完成：
+     * 1. 初始化共享 mesh cluster + cluster_vfs 桥接层；
+     * 2. 初始化默认 UART raw transport；
+     * 3. 创建后台轮询任务，持续处理 REGISTER / LINK_STATE / MINI9P mesh 帧；
+     * 4. 在 REGISTER 到来时自动把 UID 同步到 VFS，并为该节点创建真实的
+     *    mesh-backed m9p_client。
      */
-    if (cluster_config_init_mesh_host() != 0) {
-        puts("fatal: mesh host cluster/vfs init failed");
+    if (mesh_host_runtime_start_default_task() != 0) {
+        puts("fatal: mesh host runtime init failed");
         return;
     }
 

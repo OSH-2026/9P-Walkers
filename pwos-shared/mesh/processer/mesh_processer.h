@@ -249,6 +249,11 @@ void mesh_processer_deinit(struct mesh_processer *processor);
  * 1. 解 mesh envelope。
  * 2. 如果不是发给自己，则按 cluster 路由转发。
  * 3. 如果是发给自己，则根据消息类型分到控制面或 mini9P。
+ *
+ * 特殊规则：
+ * - REGISTER 是 bootstrap 控制帧，协议 helper 默认把 dst 编成
+ *   MESH_ADDR_UNASSIGNED；processor 会把这类 REGISTER 也视为“本机应处理”的
+ *   控制帧，而不是普通转发流量。
  */
 int mesh_processer_process_frame(
     struct mesh_processer *processor,

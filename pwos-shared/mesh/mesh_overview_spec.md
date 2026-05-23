@@ -165,13 +165,26 @@ processor_cfg.control_handler_ctx = NULL; /* 回退到 cluster_ctx */
 
 ### 5.2 节点发现流程
 
-当主机通过 mesh 控制面确认“某个新节点已经加入链路”时，应调用：
+当主机通过真正的 mesh runtime 收到 REGISTER 时，默认接线路径是：
+
+```c
+mesh_processer_process_frame(...)
+        -> mesh_host_runtime_control_handler(...)
+        -> cluster_config_on_mesh_node_registered(mesh_addr, hw_uid, client, ...)
+```
+
+若当前还是人工或测试注入的“直连发现”路径，也可以继续调用：
 
 ```c
 cluster_config_on_node_discovered(mesh_addr, hw_uid, client, &node_name, &reused);
 ```
 
-该调用会同时做两件事：
+其中：
+
+- `cluster_config_on_mesh_node_registered()`：用于真正 runtime REGISTER 路径，不伪造 host 直连边，只同步 UID 与 VFS/client 绑定。
+- `cluster_config_on_node_discovered()`：保留给直连测试或手工注入场景，会额外注入一条 host 直连边。
+
+runtime REGISTER 路径会同时做两件事：
 
 1. 在 mesh cluster 中把该节点加入主机拓扑视图。
 2. 在 cluster_vfs 中按 `hw_uid` 建立或复用节点名映射。
@@ -207,7 +220,13 @@ cluster_config_on_node_departed(mesh_addr, &reachable);
 
 ### 5.4 链路变化后的二次确认
 
-有些场景不是“节点彻底退出”，而是“某条链路断了”。这时应先更新 mesh cluster 图，再调用：
+有些场景不是“节点彻底退出”，而是“某条链路断了”。这时真正的 runtime 不应只刷新某一个地址，而应先更新 mesh cluster 图，再调用：
+
+```c
+cluster_config_refresh_all_nodes_connectivity(&offline_count);
+```
+
+若只是上层诊断代码想点查单个地址，仍可调用：
 
 ```c
 cluster_config_refresh_node_connectivity(mesh_addr, &reachable);
@@ -215,6 +234,7 @@ cluster_config_refresh_node_connectivity(mesh_addr, &reachable);
 
 语义：
 
+- `cluster_config_refresh_all_nodes_connectivity()`：适合 LINK_STATE / ROUTE_UPDATE 之后的批量回退，避免遗漏更远的下游节点。
 - 若图更新后节点仍可达，则 VFS 不改变在线映射。
 - 若图更新后节点不可达，则 VFS 自动回退到离线 + `NEW` 状态。
 

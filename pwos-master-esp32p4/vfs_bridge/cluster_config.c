@@ -95,6 +95,37 @@ int cluster_config_on_node_discovered(
     return cluster_vfs_discover_node(mesh_addr, hw_uid, client, out_name, out_reused_mapping);
 }
 
+int cluster_config_on_mesh_node_registered(
+    uint8_t mesh_addr,
+    const uint8_t hw_uid[MESH_UID_LEN],
+    struct m9p_client *client,
+    const char **out_name,
+    bool *out_reused_mapping)
+{
+    int rc;
+
+    if (hw_uid == NULL || client == NULL) {
+        return -(int)M9P_ERR_EINVAL;
+    }
+
+    rc = ensure_mesh_host_initialized();
+    if (rc != 0) {
+        return rc;
+    }
+
+    /*
+     * runtime REGISTER 路径下，真实链路/路由关系已经由 mesh processor +
+     * shared cluster 按控制面事件维护；这里不再额外注入一条 host 直连边，
+     * 只确保 node online 位与 VFS UID 映射同步即可。
+     */
+    rc = cluster_set_node_online(&g_mesh_cluster, mesh_addr, true);
+    if (rc != 0) {
+        return rc;
+    }
+
+    return cluster_vfs_discover_node(mesh_addr, hw_uid, client, out_name, out_reused_mapping);
+}
+
 int cluster_config_refresh_node_connectivity(uint8_t mesh_addr, bool *out_reachable)
 {
     int rc;
@@ -109,6 +140,18 @@ int cluster_config_refresh_node_connectivity(uint8_t mesh_addr, bool *out_reacha
     }
 
     return cluster_vfs_refresh_node_from_cluster(mesh_addr, out_reachable);
+}
+
+int cluster_config_refresh_all_nodes_connectivity(size_t *out_offline_count)
+{
+    int rc;
+
+    rc = ensure_mesh_host_initialized();
+    if (rc != 0) {
+        return rc;
+    }
+
+    return cluster_vfs_refresh_all_nodes_from_cluster(out_offline_count);
 }
 
 int cluster_config_on_node_departed(uint8_t mesh_addr, bool *out_reachable)

@@ -562,6 +562,60 @@ int cluster_vfs_refresh_node_from_cluster(uint8_t mesh_addr, bool *out_reachable
     return 0;
 }
 
+int cluster_vfs_refresh_all_nodes_from_cluster(size_t *out_offline_count)
+{
+    size_t offline_count = 0u;
+    size_t i;
+
+    if (g_mesh_cluster == NULL)
+    {
+        return -(int)M9P_ERR_EINVAL;
+    }
+
+    for (i = 0u; i < CLUSTER_VFS_MAX_ROUTES; ++i)
+    {
+        bool reachable = false;
+        bool was_online;
+        int rc;
+
+        if (g_routes[i].state == CLUSTER_VFS_ROUTE_EMPTY)
+        {
+            continue;
+        }
+        if (g_routes[i].mesh_addr == CLUSTER_VFS_UNASSIGNED_ADDR)
+        {
+            continue;
+        }
+
+        was_online = g_routes[i].online;
+        rc = cluster_can_reach(g_mesh_cluster, g_routes[i].mesh_addr, &reachable);
+        if (rc != 0)
+        {
+            return rc;
+        }
+
+        if (!reachable)
+        {
+            rc = cluster_vfs_mark_node_offline(g_routes[i].mesh_addr);
+            if (rc != 0 && rc != -(int)M9P_ERR_ENOENT)
+            {
+                return rc;
+            }
+            if (was_online)
+            {
+                ++offline_count;
+            }
+        }
+    }
+
+    if (out_offline_count != NULL)
+    {
+        *out_offline_count = offline_count;
+    }
+
+    return 0;
+}
+
 int cluster_vfs_attach(const char *target)
 {
     struct cluster_vfs_route *route;
