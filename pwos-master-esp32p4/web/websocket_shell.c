@@ -1,56 +1,206 @@
 #include "websocket_shell.h"
-#include <stdio.h>
-#include <string.h>
-#include <stdarg.h>
-#include "shell.h"
-#include "esp_log.h"
 
-// 简单 WebSocket 缓冲区
-#define WS_BUFFER_SIZE 1024
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "esp_http_server.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/portmacro.h"
+#include "shell.h"
+
+#define WS_BROADCAST_CAP 1024
+#define WS_CMD_MAX_LEN   256
+#define MAX_WS_CLIENTS   4
 
 static const char *TAG = "web_shell";
-static char ws_out_buffer[WS_BUFFER_SIZE];
+
+/* Server handle passed in after httpd_start(); needed for httpd_queue_work. */
+static httpd_handle_t s_server = NULL;
+
+/* Active WebSocket client socket FDs (protected by spinlock). */
+static int           s_client_fds[MAX_WS_CLIENTS];
+static int           s_client_count = 0;
+static portMUX_TYPE  s_client_lock  = portMUX_INITIALIZER_UNLOCKED;
+
+/* ------------------------------------------------------------------ */
+/* Client bookkeeping                                                   */
+/* ------------------------------------------------------------------ */
+
+void websocket_shell_set_server(httpd_handle_t hd)
+{
+    s_server = hd;
+}
+
+void websocket_shell_client_connected(int fd)
+{
+    taskENTER_CRITICAL(&s_client_lock);
+    if (s_client_count < MAX_WS_CLIENTS) {
+        s_client_fds[s_client_count++] = fd;
+        ESP_LOGI(TAG, "WS client connected fd=%d (total=%d)", fd, s_client_count);
+    } else {
+        ESP_LOGW(TAG, "WS client table full, rejecting fd=%d", fd);
+    }
+    taskEXIT_CRITICAL(&s_client_lock);
+}
+
+void websocket_shell_client_disconnected(int fd)
+{
+    taskENTER_CRITICAL(&s_client_lock);
+    for (int i = 0; i < s_client_count; i++) {
+        if (s_client_fds[i] == fd) {
+            /* Swap-remove for O(1) deletion without preserving order. */
+            s_client_fds[i] = s_client_fds[--s_client_count];
+            ESP_LOGI(TAG, "WS client disconnected fd=%d (total=%d)", fd, s_client_count);
+            break;
+        }
+    }
+    taskEXIT_CRITICAL(&s_client_lock);
+}
+
+/* ------------------------------------------------------------------ */
+/* Async send machinery                                                 */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Work item heap-allocated per send per client.
+ * httpd_queue_work runs the callback in the httpd task, from which
+ * httpd_ws_send_frame_async is safe to call.
+ */
+typedef struct {
+    int    fd;
+    size_t len;
+    uint8_t data[]; /* flexible array: payload follows struct */
+} ws_send_work_t;
+
+static void ws_send_work_fn(void *arg)
+{
+    ws_send_work_t *work = (ws_send_work_t *)arg;
+
+    httpd_ws_frame_t frame = {
+        .type    = HTTPD_WS_TYPE_TEXT,
+        .payload = work->data,
+        .len     = work->len,
+        .final   = true,
+    };
+
+    esp_err_t err = httpd_ws_send_frame_async(s_server, work->fd, &frame);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "WS send failed fd=%d err=0x%x, removing client", work->fd, err);
+        websocket_shell_client_disconnected(work->fd);
+    }
+    free(work);
+}
+
+/* Send raw bytes to every connected client via httpd_queue_work. */
+static void ws_send_raw_to_all(const char *data, size_t len)
+{
+    if (s_server == NULL || len == 0) {
+        return;
+    }
+
+    /* Snapshot client list while holding the spinlock. */
+    taskENTER_CRITICAL(&s_client_lock);
+    int count = s_client_count;
+    int fds[MAX_WS_CLIENTS];
+    memcpy(fds, s_client_fds, (size_t)count * sizeof(int));
+    taskEXIT_CRITICAL(&s_client_lock);
+
+    for (int i = 0; i < count; i++) {
+        ws_send_work_t *work = malloc(sizeof(ws_send_work_t) + len + 1);
+        if (work == NULL) {
+            ESP_LOGE(TAG, "OOM allocating WS send work for fd=%d", fds[i]);
+            continue;
+        }
+        work->fd  = fds[i];
+        work->len = len;
+        memcpy(work->data, data, len);
+        work->data[len] = '\0';
+
+        esp_err_t err = httpd_queue_work(s_server, ws_send_work_fn, work);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "httpd_queue_work failed fd=%d err=0x%x", fds[i], err);
+            free(work);
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Shell output hook                                                    */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Registered as shell_set_print_hook while a WebSocket command runs.
+ * Forwards each printed string to all connected browsers.
+ */
+static void shell_output_hook(const char *text)
+{
+    ws_send_raw_to_all(text, strlen(text));
+}
+
+/* ------------------------------------------------------------------ */
+/* Public API                                                           */
+/* ------------------------------------------------------------------ */
 
 void websocket_shell_init(void)
 {
-    // 这里未来可以初始化队列或者同步原语，用于向所有活跃连接推送数据
-    ESP_LOGI(TAG, "WebSocket shell integration initialized.");
+    memset(s_client_fds, -1, sizeof(s_client_fds));
+    s_client_count = 0;
+    ESP_LOGI(TAG, "WebSocket shell bridge ready (max %d clients)", MAX_WS_CLIENTS);
 }
 
 void websocket_shell_receive_text(const char *data, size_t len)
 {
-    if (len >= WS_BUFFER_SIZE) {
-        ESP_LOGW(TAG, "Received frame too large, ignoring.");
+    if (len == 0) {
         return;
     }
-    
-    char line[WS_BUFFER_SIZE];
+    if (len >= WS_CMD_MAX_LEN) {
+        ESP_LOGW(TAG, "WS frame too large (%u bytes), ignoring", (unsigned)len);
+        ws_send_raw_to_all("[ERR] Command too long\r\n", 24);
+        return;
+    }
+
+    /* Copy to NUL-terminated buffer. */
+    char line[WS_CMD_MAX_LEN];
     memcpy(line, data, len);
     line[len] = '\0';
-    
-    // Web 发送的可能带有换行，在 shell_execute_line 里已经被 trim_line() 处理了
-    ESP_LOGI(TAG, "Shell executing WS command: %s", line);
-    
-    // 执行底层的 Shell 命令 (会涉及到 mini9P, Lua 调度等)
+
+    ESP_LOGI(TAG, "WS cmd: %s", line);
+
+    /* Echo "pwos> <cmd>" back to the browser so xterm shows a prompt. */
+    char echo_buf[WS_CMD_MAX_LEN + 16];
+    int  echo_len = snprintf(echo_buf, sizeof(echo_buf), "pwos> %s\r\n", line);
+    if (echo_len > 0) {
+        ws_send_raw_to_all(echo_buf, (size_t)echo_len);
+    }
+
+    /* Hook shell output so printf/puts inside shell_execute_line reach WS. */
+    shell_set_print_hook(shell_output_hook);
     int rc = shell_execute_line(line);
-    
-    // 简易回应，证明命令到达底层。实际应该 Hook printf 或者重定向标准输出流
-    if (rc == 0) {
-        websocket_shell_broadcast("[WS] Executed: '%s' SUCCESS\r\n", line);
-    } else {
-        websocket_shell_broadcast("[WS] Executed: '%s' FAILED (rc=%d)\r\n", line, rc);
+    shell_set_print_hook(NULL);
+
+    /* For non-zero, non-(-1) return codes surface the error to the browser. */
+    if (rc > 0) {
+        char rc_buf[24];
+        int  n = snprintf(rc_buf, sizeof(rc_buf), "[rc=%d]\r\n", rc);
+        if (n > 0) {
+            ws_send_raw_to_all(rc_buf, (size_t)n);
+        }
     }
 }
 
-// 模拟的群发回调（依赖于 http_server.c 中的活跃连接句柄）
-// 当前实现仅作为占位，打印至控制台。在后续的完善中会调用 httpd_ws_send_frame_async 发送到各浏览器
 void websocket_shell_broadcast(const char *fmt, ...)
 {
-    va_list args;
-    va_start(args, fmt);
-    vsnprintf(ws_out_buffer, WS_BUFFER_SIZE, fmt, args);
-    va_end(args);
-    
-    // TODO: 实现由 ESP-IDF HTTPD WS 发送异步帧到 Socket Client
-    printf("TODO_WS_BROADCAST: %s", ws_out_buffer);
+    char    buf[WS_BROADCAST_CAP];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+
+    if (n > 0) {
+        size_t len = (size_t)n < sizeof(buf) ? (size_t)n : sizeof(buf) - 1;
+        ws_send_raw_to_all(buf, len);
+    }
 }
