@@ -192,6 +192,18 @@ int pw_lua_run_demo(void)
         "print('mini9p version', m9p.version())\n"
         "print('m9p ENOENT', m9p.error_name(2))\n"
         "host.echo('bindings are live')\n"
+        /* Exercise the vfs.* bindings. With no routes attached yet the root
+         * listing is simply empty, so this demonstrates the binding works
+         * without requiring a slave to be connected. */
+        "local items, err = vfs.list('/')\n"
+        "if items then\n"
+        "  print('vfs.list / ->', #items, 'node(s)')\n"
+        "  for i, e in ipairs(items) do\n"
+        "    print('  '..i..': '..e.name..(e.is_dir and '/' or ''))\n"
+        "  end\n"
+        "else\n"
+        "  print('vfs.list / failed:', err)\n"
+        "end\n"
         "return 6 * 7\n";
 
     return pw_lua_run_buffer("boot_demo", demo_script);
