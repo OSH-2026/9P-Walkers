@@ -6,11 +6,11 @@ extern "C" {
 #endif
 
 /*
- * Initialise NVS, netif, and the event loop, then start the ESP32-P4 as a
- * WiFi Access Point so browsers can reach the Web Shell without a router.
+ * 初始化 NVS、netif 和事件循环，然后以 WiFi 接入点 (SoftAP)
+ * 模式启动 ESP32-P4，以便浏览器可以在没有路由器的情况下访问 Web Shell。
  *
- * Default AP:  SSID "9P-Walkers"  Password "pwos1234"
- * Default IP:  192.168.4.1  (matches the fallback in index.html)
+ * 默认 AP:  SSID "9P-Walkers"  密码 "pwos1234"
+ * 默认 IP:  192.168.4.1  (与 index.html 中的回退地址一致)
  */
 void wifi_softap_init(void);
 
