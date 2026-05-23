@@ -1,6 +1,7 @@
 #include "shell.h"
 
 #include <stdbool.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,6 +17,43 @@
 #define SHELL_TASK_STACK_SIZE 4096
 #define SHELL_TASK_PRIORITY 5
 #define SHELL_LINE_CAP 256
+#define SHELL_EMIT_CAP 512
+
+/* Optional hook for mirroring shell output to an external sink (e.g. WS). */
+static shell_print_hook_t s_print_hook = NULL;
+
+void shell_set_print_hook(shell_print_hook_t hook)
+{
+    s_print_hook = hook;
+}
+
+/* Emit pre-formatted text to stdout AND the optional hook. */
+static void shell_emit(const char *text)
+{
+    fputs(text, stdout);
+    if (s_print_hook) {
+        s_print_hook(text);
+    }
+}
+
+/* printf-style wrapper that routes through shell_emit. */
+static void shell_printf(const char *fmt, ...)
+{
+    char buf[SHELL_EMIT_CAP];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    shell_emit(buf);
+}
+
+/* puts-style wrapper (appends '\n' like puts does). */
+static void shell_puts(const char *s)
+{
+    char buf[SHELL_EMIT_CAP];
+    snprintf(buf, sizeof(buf), "%s\n", s);
+    shell_emit(buf);
+}
 
 /* 用于测试 Shell 命令操作的模拟 m9p 客户端环境 */
 static struct m9p_client shell_m9p_client;
@@ -32,9 +70,9 @@ static int mock_transport(void *transport_ctx, const uint8_t *tx_data, size_t tx
     (void)tx_data;
     (void)rx_data;
     (void)rx_cap;
-    printf("[mock m9p] Transmitting %u bytes...\n", (unsigned)tx_len);
-    *rx_len = 0; /* 伪造空的返回数据 */
-    return 0;    /* 返回成功 */
+    shell_printf("[mock m9p] Transmitting %u bytes...\n", (unsigned)tx_len);
+    *rx_len = 0;
+    return 0;
 }
 
 /**
@@ -86,20 +124,20 @@ static void trim_line(char *line)
  */
 static void print_banner(void)
 {
-    puts("");
-    puts("pwos shell");
-    puts("  help      显示命令菜单(show commands)");
-    puts("  heap      打印可用堆内存信息(print free heap)");
-    puts("  echo ...  回显输入文本(print text)");
-    puts("  ls <dir>  模拟枚举目录节点内容(list directory - mock m9p)");
-    puts("  cat <file>模拟打印节点文件(read file - mock m9p)");
-    puts("  lua       执行内置测试用Lua剧本(run built-in Lua demo)");
-    puts("  lua ...   执行随后输入的一行Lua语句(execute inline Lua chunk)");
-    puts("  m9p_attach 测试向客户端服务端发起链接(test mini9p attach)");
-    puts("  m9p_walk  测试根据路径分配ID(test mini9p walk)");
-    puts("  m9p N     查阅 mini9p 状态码名称(print mini9p error name)");
-    puts("  reboot    系统重启(restart the board)");
-    puts("");
+    shell_puts("");
+    shell_puts("pwos shell");
+    shell_puts("  help      显示命令菜单(show commands)");
+    shell_puts("  heap      打印可用堆内存信息(print free heap)");
+    shell_puts("  echo ...  回显输入文本(print text)");
+    shell_puts("  ls <dir>  模拟枚举目录节点内容(list directory - mock m9p)");
+    shell_puts("  cat <file>模拟打印节点文件(read file - mock m9p)");
+    shell_puts("  lua       执行内置测试用Lua剧本(run built-in Lua demo)");
+    shell_puts("  lua ...   执行随后输入的一行Lua语句(execute inline Lua chunk)");
+    shell_puts("  m9p_attach 测试向客户端服务端发起链接(test mini9p attach)");
+    shell_puts("  m9p_walk  测试根据路径分配ID(test mini9p walk)");
+    shell_puts("  m9p N     查阅 mini9p 状态码名称(print mini9p error name)");
+    shell_puts("  reboot    系统重启(restart the board)");
+    shell_puts("");
 }
 
 /**
@@ -126,17 +164,17 @@ static int handle_m9p(const char *args)
     long code;
 
     if (args == NULL || *args == '\0') {
-        puts("usage: m9p <code>");
+        shell_puts("usage: m9p <code>");
         return -1;
     }
 
     code = strtol(args, &end, 0);
     if (end == args) {
-        puts("invalid code");
+        shell_puts("invalid code");
         return -1;
     }
 
-    printf("m9p[%ld] = %s\n", code, m9p_error_name((uint16_t)code));
+    shell_printf("m9p[%ld] = %s\n", code, m9p_error_name((uint16_t)code));
     return 0;
 }
 
@@ -147,10 +185,10 @@ static int handle_m9p(const char *args)
 static int handle_echo(const char *args)
 {
     if (args == NULL) {
-        puts("");
+        shell_puts("");
         return 0;
     }
-    puts(args);
+    shell_puts(args);
     return 0;
 }
 
@@ -165,22 +203,22 @@ static int handle_echo(const char *args)
 static int handle_ls(const char *args)
 {
     if (args == NULL || *args == '\0') {
-        puts("usage: ls <path>");
+        shell_puts("usage: ls <path>");
         return -1;
     }
-    printf("Listing path %s...\n", args);
+    shell_printf("Listing path %s...\n", args);
     ensure_m9p_mock_client();
-    
+
     /* 仅仅为了测试执行目录开启的打包请求流程 */
     uint16_t fid;
     struct m9p_open_result out_res;
     int rc = m9p_client_open_path(&shell_m9p_client, args, M9P_OREAD, &fid, &out_res);
-    
+
     if (rc == 0) {
-        printf("Successfully opened path: %s (fid=%u)\n", args, fid);
+        shell_printf("Successfully opened path: %s (fid=%u)\n", args, fid);
         m9p_client_clunk(&shell_m9p_client, fid);
     } else {
-        printf("Mock ls failed (expected without real transport): rc=%d\n", rc);
+        shell_printf("Mock ls failed (expected without real transport): rc=%d\n", rc);
     }
     return 0;
 }
@@ -195,10 +233,10 @@ static int handle_ls(const char *args)
 static int handle_cat(const char *args)
 {
     if (args == NULL || *args == '\0') {
-        puts("usage: cat <path>");
+        shell_puts("usage: cat <path>");
         return -1;
     }
-    printf("Reading file %s...\n", args);
+    shell_printf("Reading file %s...\n", args);
     ensure_m9p_mock_client();
 
     uint16_t fid;
@@ -209,11 +247,11 @@ static int handle_cat(const char *args)
         uint16_t count = sizeof(buf);
         rc = m9p_client_read(&shell_m9p_client, fid, 0, buf, &count);
         if (rc == 0) {
-            printf("Mock cat read %u bytes.\n", count);
+            shell_printf("Mock cat read %u bytes.\n", count);
         }
         m9p_client_clunk(&shell_m9p_client, fid);
     } else {
-         printf("Mock cat failed (expected without real transport): rc=%d\n", rc);
+        shell_printf("Mock cat failed (expected without real transport): rc=%d\n", rc);
     }
     return 0;
 }
@@ -224,12 +262,12 @@ static int handle_cat(const char *args)
  */
 static int handle_m9p_attach(const char *args)
 {
-    printf("Attaching to mock mini9p server...\n");
+    shell_puts("Attaching to mock mini9p server...");
     ensure_m9p_mock_client();
     (void)args;
-    
+
     int rc = m9p_client_attach(&shell_m9p_client, 256, 1, 0);
-    printf("mock attach result: %d\n", rc);
+    shell_printf("mock attach result: %d\n", rc);
     return rc;
 }
 
@@ -240,16 +278,16 @@ static int handle_m9p_attach(const char *args)
 static int handle_m9p_walk(const char *args)
 {
     if (args == NULL || *args == '\0') {
-        puts("usage: m9p_walk <path>");
+        shell_puts("usage: m9p_walk <path>");
         return -1;
     }
-    printf("Walking to %s via mock mini9p...\n", args);
+    shell_printf("Walking to %s via mock mini9p...\n", args);
     ensure_m9p_mock_client();
 
     uint16_t fid;
     struct m9p_qid qid;
     int rc = m9p_client_walk_path(&shell_m9p_client, args, &fid, &qid);
-    printf("mock walk path rc=%d, matched fid=%u\n", rc, fid);
+    shell_printf("mock walk path rc=%d, matched fid=%u\n", rc, fid);
     return rc;
 }
 
@@ -312,7 +350,7 @@ int shell_execute_line(const char *line)
         return 0;
     }
     if (strcmp(command, "heap") == 0) {
-        printf("free heap: %u bytes\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
+        shell_printf("free heap: %u bytes\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
         return 0;
     }
     if (strcmp(command, "lua") == 0) {
@@ -322,13 +360,12 @@ int shell_execute_line(const char *line)
         return handle_m9p(args);
     }
     if (strcmp(command, "reboot") == 0) {
-        puts("restarting...");
-        fflush(stdout);
+        shell_puts("restarting...");
         esp_restart();
         return 0;
     }
 
-    printf("unknown command: %s\n", command);
+    shell_printf("unknown command: %s\n", command);
     return -1;
 }
 
@@ -342,9 +379,9 @@ void shell_run_boot_demo(void)
      * so a fresh boot already demonstrates useful behavior.
      */
     print_banner();
-    puts("[boot] running Lua demo...");
+    shell_puts("[boot] running Lua demo...");
     (void)shell_execute_line("lua");
-    puts("");
+    shell_puts("");
 }
 
 /**
@@ -361,7 +398,8 @@ static void shell_task(void *arg)
      * 因此这个无限循环可以非常符合经典终端的表现，阻塞态地等待 I/O 到来。
      */
     for (;;) {
-        printf("pwos> ");
+        /* Prompt only to UART (not the WS hook) — the browser has its own echo. */
+        fputs("pwos> ", stdout);
         fflush(stdout);
 
         if (fgets(line, sizeof(line), stdin) == NULL) {
