@@ -199,6 +199,25 @@ int cluster_vfs_mark_node_offline(uint8_t mesh_addr);
 int cluster_vfs_refresh_node_from_cluster(uint8_t mesh_addr, bool *out_reachable);
 
 /**
+ * @brief 结合绑定的 mesh cluster，重新检查所有已知节点当前是否仍可达。
+ *
+ * 这个接口用于真正的 mesh runtime：
+ * - REGISTER 会让某个 UID 与当前 mesh_addr 建立绑定；
+ * - 之后任何 LINK_STATE / ROUTE_UPDATE 变化，都可能让若干节点的可达性发生变化；
+ * - runtime 不应只刷新单个地址，而应把当前仍持有 mesh_addr 绑定的全部节点都重检一遍。
+ *
+ * 当前实现策略：
+ * 1. 遍历所有非 EMPTY 且仍持有 mesh_addr 的 route；
+ * 2. 对每个 route 调用 cluster_can_reach()；
+ * 3. 对已不可达的节点执行 mark_node_offline 语义；
+ * 4. 统计本轮新回退为 OFFLINE 的节点个数。
+ *
+ * @param out_offline_count 输出本轮新回退为离线的节点数，可为 NULL。
+ * @return 0 表示检查完成；负错误码表示未绑定 cluster 或 cluster 查询失败。
+ */
+int cluster_vfs_refresh_all_nodes_from_cluster(size_t *out_offline_count);
+
+/**
  * @brief 对目标节点对应的下一跳执行 Mini9P attach。
  *
  * 该函数用于确认路由背后的 peer 是否在线，并建立根 fid 会话。

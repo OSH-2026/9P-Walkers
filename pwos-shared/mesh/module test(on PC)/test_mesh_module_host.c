@@ -242,6 +242,48 @@ static void test_local_ping_generates_pong_reply(void)
     assert(pong_view.dst == 0x20u);
 }
 
+/*
+ * REGISTER helper 默认把 dst 编成 MESH_ADDR_UNASSIGNED。
+ * processor 必须把这类 bootstrap REGISTER 当成本机控制帧处理，
+ * 否则主机 runtime 就无法通过真实 REGISTER 自动发现新节点。
+ */
+static void test_register_broadcast_hits_local_control_handler(void)
+{
+    struct mesh_processer processor;
+    struct fake_transport transport;
+    struct fake_server_ctx server_ctx;
+    struct fake_client_ctx client_ctx;
+    struct cluster cluster;
+    struct cluster_config cluster_cfg;
+    struct mesh_register_payload payload;
+    uint8_t register_frame[128];
+    size_t register_len = 0u;
+    bool online = false;
+
+    memset(&server_ctx, 0, sizeof(server_ctx));
+    memset(&client_ctx, 0, sizeof(client_ctx));
+    fake_transport_reset(&transport);
+
+    cluster_get_default_config(&cluster_cfg);
+    cluster_cfg.local_addr = 0x10u;
+    cluster_cfg.mode = CLUSTER_MODE_DIRECT_TABLE;
+    assert(cluster_init(&cluster, &cluster_cfg) == 0);
+
+    init_processor(&processor, &transport, &cluster, &server_ctx, &client_ctx, 0x10u);
+
+    memset(&payload, 0, sizeof(payload));
+    memset(payload.uid, 0x5Au, sizeof(payload.uid));
+    payload.boot_nonce = 0x12345678u;
+    payload.capability_bits = 0x0001u;
+    payload.port_bitmap = 0x01u;
+
+    assert(mesh_build_register(0x20u, 0x7788u, 6u, &payload, register_frame, sizeof(register_frame), &register_len));
+    assert(mesh_processer_process_frame(&processor, register_frame, register_len) == 0);
+    assert(cluster_get_node_online(&cluster, 0x20u, &online) == 0);
+    assert(online);
+    assert(transport.tx_count == 0u);
+}
+
 static void test_local_mini9p_request_to_server(void)
 {
     struct mesh_processer processor;
@@ -739,6 +781,7 @@ int main(void)
 {
     test_forward_non_local_frame();
     test_local_ping_generates_pong_reply();
+    test_register_broadcast_hits_local_control_handler();
     test_local_mini9p_request_to_server();
     test_poll_once_dispatches_local_mini9p_response();
     test_bad_crc_frame_rejected();

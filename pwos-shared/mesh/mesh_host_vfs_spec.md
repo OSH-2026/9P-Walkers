@@ -155,8 +155,15 @@ cluster_config_refresh_node_connectivity(mesh_addr, &reachable);
 - `cluster_config_init_mesh_host`
 - `cluster_config_mesh_cluster`
 - `cluster_config_on_node_discovered`
+- `cluster_config_on_mesh_node_registered`
 - `cluster_config_refresh_node_connectivity`
+- `cluster_config_refresh_all_nodes_connectivity`
 - `cluster_config_on_node_departed`
+
+主机 runtime 入口：
+
+- `mesh_host_runtime_init_default`
+- `mesh_host_runtime_start_default_task`
 
 VFS 节点管理接口：
 
@@ -182,13 +189,15 @@ cluster 连通性接口：
 2. 新 UID 自动分配新名字。
 3. 节点离线后保留映射、回退 9P 状态。
 4. cluster 图变化后按可达性刷新 VFS 状态。
+5. runtime 已自动把广播 REGISTER 和 LINK_STATE 事件接入 cluster_config / cluster_vfs。
+6. runtime 已为每个已发现 UID 绑定真实的 mesh-backed mini9P client。
 
 当前实现尚未自动完成：
 
-1. 真正的 mesh 控制面事件源到 `cluster_config_on_node_discovered/on_node_departed` 的 runtime 自动接线。
-2. 多跳场景下按真实 next_hop 自动构造 per-node mini9P client。
+1. 默认 runtime 目前采用“同一时刻只允许一个同步 mini9P 请求占用接收链路”的串行模型，尚未扩展到多请求并发调度。
+2. 主机侧目前仍未为“远端主动发到主机的 mini9P T*”挂接本地 server handler。
 
 因此现阶段的正式约定是：
 
-- 接口和状态机已经明确并已通过主机侧回归测试。
-- 运行时事件注入层可以后续继续接到 processor/control plane 上。
+- 接口、状态机与 runtime 自动接线都已落地，并已通过主机侧回归测试。
+- 若后续需要更高吞吐或双向主机服务能力，应在现有 runtime 之上继续扩展并发请求表与本地 mini9P server 接入。

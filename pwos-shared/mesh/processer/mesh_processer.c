@@ -32,6 +32,28 @@ static bool mesh_processer_is_request_type(uint8_t type)
 }
 
 /*
+ * 正常情况下，“本机命中”由 dst == local_addr 判定。
+ *
+ * 但 REGISTER 是 bootstrap 特例：
+ * - 协议 helper 会把 REGISTER 的 dst 固定编码成 MESH_ADDR_UNASSIGNED；
+ * - 主机必须把这类帧收进控制面，否则真正的 runtime 无法通过 REGISTER
+ *   自动发现新节点。
+ */
+static bool mesh_processer_targets_local(
+    const struct mesh_processer *processor,
+    const struct mesh_frame_view *frame)
+{
+    if (processor == NULL || frame == NULL) {
+        return false;
+    }
+    if (frame->dst == processor->config.local_addr) {
+        return true;
+    }
+
+    return frame->type == MESH_TYPE_REGISTER && frame->dst == MESH_ADDR_UNASSIGNED;
+}
+
+/*
  * 询问 cluster：某个 dst 是否为本机，以及需要发往哪个下一跳。
  *
  * 这个 helper 不做任何缓存，也不维护路由表；它只是把查询动作集中起来，
@@ -350,7 +372,7 @@ int mesh_processer_process_frame(
     }
 
     /* 非本机目标：按 cluster 查询下一跳后转发。 */
-    if (frame.dst != processor->config.local_addr) {
+    if (!mesh_processer_targets_local(processor, &frame)) {
         return mesh_processer_forward_decoded_frame(processor, &frame);
     }
 
