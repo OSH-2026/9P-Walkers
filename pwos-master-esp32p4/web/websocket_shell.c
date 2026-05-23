@@ -17,16 +17,16 @@
 
 static const char *TAG = "web_shell";
 
-/* Server handle passed in after httpd_start(); needed for httpd_queue_work. */
+/* httpd_start() 后传入的服务器句柄；httpd_queue_work 需要用到。 */
 static httpd_handle_t s_server = NULL;
 
-/* Active WebSocket client socket FDs (protected by spinlock). */
+/* 活跃的 WebSocket 客户端套接字 FD（通过自旋锁保护）。 */
 static int           s_client_fds[MAX_WS_CLIENTS];
 static int           s_client_count = 0;
 static portMUX_TYPE  s_client_lock  = portMUX_INITIALIZER_UNLOCKED;
 
 /* ------------------------------------------------------------------ */
-/* Client bookkeeping                                                   */
+/* 客户端记账管理                                                       */
 /* ------------------------------------------------------------------ */
 
 void websocket_shell_set_server(httpd_handle_t hd)
@@ -51,7 +51,7 @@ void websocket_shell_client_disconnected(int fd)
     taskENTER_CRITICAL(&s_client_lock);
     for (int i = 0; i < s_client_count; i++) {
         if (s_client_fds[i] == fd) {
-            /* Swap-remove for O(1) deletion without preserving order. */
+            /* 交换删除以实现不保留顺序的 O(1) 删除。 */
             s_client_fds[i] = s_client_fds[--s_client_count];
             ESP_LOGI(TAG, "WS client disconnected fd=%d (total=%d)", fd, s_client_count);
             break;
@@ -61,18 +61,18 @@ void websocket_shell_client_disconnected(int fd)
 }
 
 /* ------------------------------------------------------------------ */
-/* Async send machinery                                                 */
+/* 异步发送机制                                                         */
 /* ------------------------------------------------------------------ */
 
 /*
- * Work item heap-allocated per send per client.
- * httpd_queue_work runs the callback in the httpd task, from which
- * httpd_ws_send_frame_async is safe to call.
+ * 每个客户端每次发送时分配到堆上的工作项。
+ * httpd_queue_work 在 httpd 任务中运行其回调函数，在这个任务里
+ * 调用 httpd_ws_send_frame_async 是安全的。
  */
 typedef struct {
     int    fd;
     size_t len;
-    uint8_t data[]; /* flexible array: payload follows struct */
+    uint8_t data[]; /* 柔性数组：有效负载在结构体之后 */
 } ws_send_work_t;
 
 static void ws_send_work_fn(void *arg)
@@ -94,14 +94,14 @@ static void ws_send_work_fn(void *arg)
     free(work);
 }
 
-/* Send raw bytes to every connected client via httpd_queue_work. */
+/* 通过 httpd_queue_work 向每个已连接的客户端发送原始字节。 */
 static void ws_send_raw_to_all(const char *data, size_t len)
 {
     if (s_server == NULL || len == 0) {
         return;
     }
 
-    /* Snapshot client list while holding the spinlock. */
+    /* 在持有自旋锁时对客户端列表进行快照。 */
     taskENTER_CRITICAL(&s_client_lock);
     int count = s_client_count;
     int fds[MAX_WS_CLIENTS];
@@ -128,12 +128,12 @@ static void ws_send_raw_to_all(const char *data, size_t len)
 }
 
 /* ------------------------------------------------------------------ */
-/* Shell output hook                                                    */
+/* Shell 输出钩子                                                       */
 /* ------------------------------------------------------------------ */
 
 /*
- * Registered as shell_set_print_hook while a WebSocket command runs.
- * Forwards each printed string to all connected browsers.
+ * 在 WebSocket 命令运行期间被注册为 shell_set_print_hook。
+ * 将控制台打印的每个字符串转发到所有已连接的浏览器。
  */
 static void shell_output_hook(const char *text)
 {
@@ -141,7 +141,7 @@ static void shell_output_hook(const char *text)
 }
 
 /* ------------------------------------------------------------------ */
-/* Public API                                                           */
+/* 公共 API                                                             */
 /* ------------------------------------------------------------------ */
 
 void websocket_shell_init(void)
@@ -162,26 +162,26 @@ void websocket_shell_receive_text(const char *data, size_t len)
         return;
     }
 
-    /* Copy to NUL-terminated buffer. */
+    /* 复制为以 NUL 结尾的缓冲区。 */
     char line[WS_CMD_MAX_LEN];
     memcpy(line, data, len);
     line[len] = '\0';
 
     ESP_LOGI(TAG, "WS cmd: %s", line);
 
-    /* Echo "pwos> <cmd>" back to the browser so xterm shows a prompt. */
+    /* 将 "pwos> <cmd>" 回显回浏览器，以便 xterm 可以显示提示符。 */
     char echo_buf[WS_CMD_MAX_LEN + 16];
     int  echo_len = snprintf(echo_buf, sizeof(echo_buf), "pwos> %s\r\n", line);
     if (echo_len > 0) {
         ws_send_raw_to_all(echo_buf, (size_t)echo_len);
     }
 
-    /* Hook shell output so printf/puts inside shell_execute_line reach WS. */
+    /* 挂钩 shell 打印输出，这样在 shell_execute_line 内部的 printf/puts 会发送到 WS。 */
     shell_set_print_hook(shell_output_hook);
     int rc = shell_execute_line(line);
     shell_set_print_hook(NULL);
 
-    /* For non-zero, non-(-1) return codes surface the error to the browser. */
+    /* 对于非零、非 (-1) 的返回码，将错误呈现给浏览器。 */
     if (rc > 0) {
         char rc_buf[24];
         int  n = snprintf(rc_buf, sizeof(rc_buf), "[rc=%d]\r\n", rc);

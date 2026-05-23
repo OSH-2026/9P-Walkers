@@ -29,7 +29,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
 
 void wifi_softap_init(void)
 {
-    /* NVS is required by the WiFi driver for calibration data. */
+    /* WiFi 驱动程序需要 NVS 来存储校准数据。 */
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());

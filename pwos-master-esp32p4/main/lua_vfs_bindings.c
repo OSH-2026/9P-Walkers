@@ -10,15 +10,15 @@
 #include "mini9p_client.h"
 #include "mini9p_protocol.h"
 
-/* Default chunk size for streaming reads when the caller gives no length. */
+/* 当调用者没有提供长度时，流式读取的默认分块大小。 */
 #define VFS_READ_CHUNK   256u
-/* Upper bound on directory entries returned by vfs.list in one call. */
+/* vfs.list 在一次调用中返回的目录项数的上限。 */
 #define VFS_LIST_MAX     32u
 
 /*
- * cluster_vfs_* return 0 on success or a negative Mini9P error code
- * (i.e. -(int)M9P_ERR_xxx). Translate a negative rc into the Lua idiom
- * (nil, "<ERRNAME>") and return the count of pushed values (2).
+ * cluster_vfs_* 成功时返回 0，失败时返回负的 Mini9P 错误码
+ * （即 -(int)M9P_ERR_xxx）。将负的 rc 转换为 Lua 习惯用法
+ * (nil, "<ERRNAME>")，并返回压入栈的值的数量 (2)。
  */
 static int push_vfs_error(lua_State *L, int rc)
 {
@@ -28,7 +28,7 @@ static int push_vfs_error(lua_State *L, int rc)
     return 2;
 }
 
-/* Validate a Lua integer fits in the uint16_t fd space used by cluster_vfs. */
+/* 验证 Lua 整数是否适合 cluster_vfs 使用的 uint16_t fd 空间。 */
 static uint16_t check_fd(lua_State *L, int arg)
 {
     lua_Integer fd = luaL_checkinteger(L, arg);
@@ -39,11 +39,11 @@ static uint16_t check_fd(lua_State *L, int arg)
 }
 
 /* ------------------------------------------------------------------ */
-/* High-level path APIs                                                 */
+/* 高级路径 API                                                         */
 /* ------------------------------------------------------------------ */
 
 /* vfs.read(path) -> string | nil, errname
- * Streams the whole file by repeatedly reading VFS_READ_CHUNK bytes. */
+ * 通过不断读取 VFS_READ_CHUNK 字节来流式读取整个文件。 */
 static int l_vfs_read(lua_State *L)
 {
     const char *path = luaL_checkstring(L, 1);
@@ -65,7 +65,7 @@ static int l_vfs_read(lua_State *L)
             return push_vfs_error(L, rc);
         }
         if (len == 0u) {
-            break; /* EOF */
+            break; /* EOF (文件结束) */
         }
         luaL_addlstring(&buf, (const char *)chunk, len);
     }
@@ -132,7 +132,7 @@ static int l_vfs_list(lua_State *L)
         lua_pushinteger(L, (lua_Integer)entries[i].qid.type);
         lua_setfield(L, -2, "qid_type");
 
-        lua_rawseti(L, -2, (lua_Integer)(i + 1u)); /* Lua arrays are 1-based */
+        lua_rawseti(L, -2, (lua_Integer)(i + 1u)); /* Lua 数组索引从 1 开始 */
     }
 
     free(entries);
@@ -166,10 +166,10 @@ static int l_vfs_stat(lua_State *L)
 }
 
 /* ------------------------------------------------------------------ */
-/* Low-level fd APIs                                                    */
+/* 低级 fd API                                                          */
 /* ------------------------------------------------------------------ */
 
-/* vfs.open(path[, mode]) -> fd | nil, errname  (mode defaults to OREAD) */
+/* vfs.open(path[, mode]) -> fd | nil, errname  (mode 默认为 OREAD) */
 static int l_vfs_open(lua_State *L)
 {
     const char *path = luaL_checkstring(L, 1);
@@ -185,7 +185,7 @@ static int l_vfs_open(lua_State *L)
     return 1;
 }
 
-/* vfs.read_fd(fd[, len]) -> string | nil, errname  (len defaults to chunk) */
+/* vfs.read_fd(fd[, len]) -> string | nil, errname  (len 默认为 chunk) */
 static int l_vfs_read_fd(lua_State *L)
 {
     uint16_t fd = check_fd(L, 1);
@@ -246,7 +246,7 @@ static int l_vfs_close(lua_State *L)
 }
 
 /* ------------------------------------------------------------------ */
-/* Route management APIs                                                */
+/* 路由管理 API                                                         */
 /* ------------------------------------------------------------------ */
 
 /* vfs.attach(target) -> true | nil, errname */
@@ -296,23 +296,23 @@ static int l_vfs_route_state(lua_State *L)
 }
 
 /* ------------------------------------------------------------------ */
-/* Registration                                                         */
+/* 注册                                                                 */
 /* ------------------------------------------------------------------ */
 
 void pw_lua_register_vfs_bindings(lua_State *L)
 {
     static const luaL_Reg vfs_lib[] = {
-        /* high-level path helpers */
+        /* 高级路径助手函数 */
         {"read",        l_vfs_read},
         {"write",       l_vfs_write},
         {"list",        l_vfs_list},
         {"stat",        l_vfs_stat},
-        /* low-level fd lifecycle */
+        /* 低级 fd 生命周期 */
         {"open",        l_vfs_open},
         {"read_fd",     l_vfs_read_fd},
         {"write_fd",    l_vfs_write_fd},
         {"close",       l_vfs_close},
-        /* route management */
+        /* 路由管理 */
         {"attach",      l_vfs_attach},
         {"detach",      l_vfs_detach},
         {"route_state", l_vfs_route_state},
@@ -321,7 +321,7 @@ void pw_lua_register_vfs_bindings(lua_State *L)
 
     luaL_newlib(L, vfs_lib);
 
-    /* Open-mode constants so scripts read vfs.OWRITE instead of magic ints. */
+    /* Open 模式常量，以便脚本读取 vfs.OWRITE 而不是魔术整数。 */
     lua_pushinteger(L, M9P_OREAD);
     lua_setfield(L, -2, "OREAD");
     lua_pushinteger(L, M9P_OWRITE);
