@@ -2,6 +2,7 @@
 #include <stdio.h>
 
 #include "cluster_config.h"
+#include "node_connector.h"
 #include "esp_chip_info.h"
 #include "esp_flash.h"
 #include "esp_heap_caps.h"
@@ -46,6 +47,13 @@ void app_main(void)
         puts("fatal: mesh host cluster/vfs init failed");
         return;
     }
+
+    /*
+     * 注册静态直连从机（STM32F411，UART1 115200，TX=17 RX=18）。
+     * 若从机未连接，attach 会失败但不中断启动；
+     * 连接好后在 Lua shell 里执行 vfs.attach("mcu1") 重试。
+     */
+    node_connector_init_static_slave();
 
     if (!pw_lua_init()) {
         puts("fatal: Lua init failed");

@@ -26,6 +26,7 @@ idf_component_register(
         "../transport/uart_transport.c"
         "../vfs_bridge/cluster_config.c"
         "../vfs_bridge/cluster_vfs.c"
+        "../vfs_bridge/node_connector.c"
         "../shell/shell.c"
         "../web/http_server.c"
         "../web/websocket_shell.c"

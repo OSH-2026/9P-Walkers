@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "cluster_vfs.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
@@ -129,8 +130,8 @@ static void print_banner(void)
     shell_puts("  help      显示命令菜单(show commands)");
     shell_puts("  heap      打印可用堆内存信息(print free heap)");
     shell_puts("  echo ...  回显输入文本(print text)");
-    shell_puts("  ls <dir>  模拟枚举目录节点内容(list directory - mock m9p)");
-    shell_puts("  cat <file>模拟打印节点文件(read file - mock m9p)");
+    shell_puts("  ls [dir]  枚举集群目录节点内容(list cluster directory)");
+    shell_puts("  cat <file>读取集群节点文件内容(read cluster file)");
     shell_puts("  lua       执行内置测试用Lua剧本(run built-in Lua demo)");
     shell_puts("  lua ...   执行随后输入的一行Lua语句(execute inline Lua chunk)");
     shell_puts("  m9p_attach 测试向客户端服务端发起链接(test mini9p attach)");
@@ -192,66 +193,48 @@ static int handle_echo(const char *args)
     return 0;
 }
 
-/**
- * @brief 列表(ls)命令处理器示例
- * 模拟获取目录结构的操作。在此测试阶段中：
- *  1. 保证了在未连接从机的情况下，初始化本地 Mock 传输层；
- *  2. 构造一次 `m9p_client_open_path` (使用 M9P_OREAD 只读标志)，
- *     向目标文件描述符发起申请。
- *  3. 操作结束后如果通过，则关闭释放该 fid。
- */
 static int handle_ls(const char *args)
 {
-    if (args == NULL || *args == '\0') {
-        shell_puts("usage: ls <path>");
-        return -1;
+    const char *path = (args != NULL && *args != '\0') ? args : "/";
+    struct m9p_dirent entries[32];
+    size_t count = 0;
+    int rc;
+
+    shell_printf("ls %s\n", path);
+    rc = cluster_vfs_list(path, entries, sizeof(entries) / sizeof(entries[0]), &count);
+    if (rc != 0) {
+        shell_printf("ls: error %d (%s)\n", rc, m9p_error_name((uint16_t)(-rc)));
+        return rc;
     }
-    shell_printf("Listing path %s...\n", args);
-    ensure_m9p_mock_client();
-
-    /* 仅仅为了测试执行目录开启的打包请求流程 */
-    uint16_t fid;
-    struct m9p_open_result out_res;
-    int rc = m9p_client_open_path(&shell_m9p_client, args, M9P_OREAD, &fid, &out_res);
-
-    if (rc == 0) {
-        shell_printf("Successfully opened path: %s (fid=%u)\n", args, fid);
-        m9p_client_clunk(&shell_m9p_client, fid);
-    } else {
-        shell_printf("Mock ls failed (expected without real transport): rc=%d\n", rc);
+    if (count == 0) {
+        shell_puts("(empty)");
+        return 0;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        bool is_dir = (entries[i].qid.type & M9P_QID_DIR) != 0;
+        shell_printf("  %s%s\n", entries[i].name, is_dir ? "/" : "");
     }
     return 0;
 }
 
-/**
- * @brief 查看文本(cat)命令处理器示例
- * 发起模拟的文件内容读取操作。在此阶段中：
- *  1. 发送文件句柄 open 请求；
- *  2. 发起基于该 `fid` 以 0 个字节偏移去发起的 `read` 请求，同时准备接收最多 64B 的模拟缓冲区；
- *  3. 当所有流程完成后执行 clunk 取消挂接。
- */
 static int handle_cat(const char *args)
 {
     if (args == NULL || *args == '\0') {
         shell_puts("usage: cat <path>");
         return -1;
     }
-    shell_printf("Reading file %s...\n", args);
-    ensure_m9p_mock_client();
 
-    uint16_t fid;
-    struct m9p_open_result out_res;
-    int rc = m9p_client_open_path(&shell_m9p_client, args, M9P_OREAD, &fid, &out_res);
-    if (rc == 0) {
-        uint8_t buf[64];
-        uint16_t count = sizeof(buf);
-        rc = m9p_client_read(&shell_m9p_client, fid, 0, buf, &count);
-        if (rc == 0) {
-            shell_printf("Mock cat read %u bytes.\n", count);
-        }
-        m9p_client_clunk(&shell_m9p_client, fid);
-    } else {
-        shell_printf("Mock cat failed (expected without real transport): rc=%d\n", rc);
+    uint8_t buf[256];
+    uint16_t len = sizeof(buf) - 1u;
+    int rc = cluster_vfs_read_path(args, buf, &len);
+    if (rc != 0) {
+        shell_printf("cat: error %d (%s)\n", rc, m9p_error_name((uint16_t)(-rc)));
+        return rc;
+    }
+    buf[len] = '\0';
+    shell_printf("%s", (char *)buf);
+    if (len > 0 && buf[len - 1u] != '\n') {
+        shell_puts("");
     }
     return 0;
 }
