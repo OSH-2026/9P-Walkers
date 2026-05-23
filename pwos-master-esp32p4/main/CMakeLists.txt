@@ -22,14 +22,25 @@ idf_component_register(
         "../vfs_bridge/cluster_config.c"
         "../vfs_bridge/cluster_vfs.c"
         "../shell/shell.c"
+        "../web/http_server.c"
+        "../web/websocket_shell.c"
+        "../web/wifi_softap.c"
         ${LUA_SRCS}
+    EMBED_FILES
+        "../web/index.html"
     PRIV_REQUIRES
         esp_timer
         spi_flash
+        esp_http_server
+        esp_wifi
+        esp_event
+        esp_netif
+        nvs_flash
     INCLUDE_DIRS
         "."
         "../lua"
         "${PWOS_SHARED_MINI9P_DIR}"
         "../transport"
         "../vfs_bridge"
-        "../shell")
+        "../shell"
+        "../web")
