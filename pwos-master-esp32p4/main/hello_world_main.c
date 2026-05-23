@@ -1,13 +1,16 @@
 #include <inttypes.h>
 #include <stdio.h>
 
+#include "cluster_vfs.h"
 #include "esp_chip_info.h"
 #include "esp_flash.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
+#include "http_server.h"
 #include "lua_port.h"
 #include "sdkconfig.h"
 #include "shell.h"
+#include "wifi_softap.h"
 
 // 打印系统初始信息
 static void print_chip_banner(void)
@@ -29,19 +32,26 @@ static void print_chip_banner(void)
 
 void app_main(void)
 {
-    // 禁用 stdin 和 stdout 的缓冲，以确保输出立即显示
-    setvbuf(stdin, NULL, _IONBF, 0);
+    setvbuf(stdin,  NULL, _IONBF, 0);
     setvbuf(stdout, NULL, _IONBF, 0);
 
     print_chip_banner();
 
-    // 初始化 Lua 环境
+    /* Reset cluster VFS route/open tables before any vfs.* call. */
+    cluster_vfs_init();
+
     if (!pw_lua_init()) {
         puts("fatal: Lua init failed");
         return;
     }
 
-    // 启动 demo shell
+    /* Bring up WiFi SoftAP so browsers can reach the web server.
+     * SSID: 9P-Walkers  Password: pwos1234  IP: 192.168.4.1 */
+    wifi_softap_init();
+
+    /* Start HTTP + WebSocket server (port 80). */
+    web_server_start();
+
     shell_run_boot_demo();
     shell_start();
 }
