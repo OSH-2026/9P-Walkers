@@ -11,7 +11,6 @@ cluster_vfs 是轻量级集群 VFS 桥接层，不是完整文件系统；
 #include <stdint.h>
 
 #include "mini9p_client.h"
-#include "../../pwos-shared/mesh/cluster/cluster.h"
 
 /* 当前节点最多维护的静态路由数量。 */
 #define CLUSTER_VFS_MAX_ROUTES 8
@@ -19,23 +18,6 @@ cluster_vfs 是轻量级集群 VFS 桥接层，不是完整文件系统；
 #define CLUSTER_VFS_MAX_NAME   16
 /* cluster_vfs 同时打开的文件/目录数量上限。 */
 #define CLUSTER_VFS_MAX_OPEN 16
-/* VFS 侧记录的唯一硬件序列号长度，直接复用 mesh REGISTER 的 UID 长度。 */
-#define CLUSTER_VFS_UID_LEN MESH_UID_LEN
-/* VFS 中“当前无 mesh 地址绑定”的占位值。 */
-#define CLUSTER_VFS_UNASSIGNED_ADDR MESH_ADDR_UNASSIGNED
-
-/*
- * VFS 内部维护的 9P 会话状态。
- *
- * 注意这里与 route_state 的职责不同：
- * - route_state 更偏“当前是否在线、是否允许通过名字访问”。
- * - m9p_state 更偏“和该节点的 9P 会话是否已经 attach”。
- */
-enum cluster_vfs_m9p_state {
-    CLUSTER_VFS_M9P_EMPTY = 0,
-    CLUSTER_VFS_M9P_NEW,
-    CLUSTER_VFS_M9P_ATTACHED,
-};
 
 enum cluster_vfs_route_state {
     CLUSTER_VFS_ROUTE_EMPTY = 0,
@@ -48,30 +30,7 @@ struct cluster_vfs_route {
     char target[CLUSTER_VFS_MAX_NAME];     /* 最终目标节点，如 "mcu3" */
     char next_hop[CLUSTER_VFS_MAX_NAME];   /* 下一跳节点，如 "mcu1" */
     struct m9p_client *client;             /* 通往 next_hop 的 Mini9P client */
-    uint8_t mesh_addr;                     /* 当前绑定的 mesh 地址；未绑定时为 0xFF。 */
-    uint8_t hw_uid[CLUSTER_VFS_UID_LEN];   /* 来自 mesh REGISTER 的唯一硬件序列号。 */
-    bool has_hw_uid;                       /* 是否已经收到并保存硬件序列号。 */
-    bool online;                           /* cluster 判定该节点当前是否在线。 */
     enum cluster_vfs_route_state state;
-    enum cluster_vfs_m9p_state m9p_state;
-};
-
-/*
- * 对外暴露的节点元信息快照。
- *
- * 该结构体用于：
- * - 调试/日志查看当前名字 <-> UID 映射；
- * - 上层确认节点当前 mesh 地址、在线状态和 9P attach 状态；
- * - 测试验证“离线后回到 NEW”“同 UID 重连复用旧名字”等语义。
- */
-struct cluster_vfs_node_info {
-    char target[CLUSTER_VFS_MAX_NAME];
-    uint8_t mesh_addr;
-    uint8_t hw_uid[CLUSTER_VFS_UID_LEN];
-    bool has_hw_uid;
-    bool online;
-    enum cluster_vfs_route_state route_state;
-    enum cluster_vfs_m9p_state m9p_state;
 };
 
 struct cluster_vfs_file {
@@ -95,17 +54,6 @@ struct cluster_vfs_file {
 int cluster_vfs_init(void);
 
 /**
- * @brief 绑定 mesh cluster 对象。
- *
- * 绑定后，cluster_vfs 可以直接调用共享 mesh cluster 的连通性查询接口，
- * 例如在链路变化后重新判断某个节点是否仍可达。
- *
- * @param mesh_cluster 共享 mesh cluster 对象。
- * @return 0 表示成功；负错误码表示参数非法。
- */
-int cluster_vfs_bind_mesh_cluster(struct cluster *mesh_cluster);
-
-/**
  * @brief 添加一条直连路由。add_route 只注册不验证，attach 才确认节点在线。
  *
  * 等价于 target == next_hop 的路由，例如把 `/mcu1/...` 映射到
@@ -118,29 +66,6 @@ int cluster_vfs_bind_mesh_cluster(struct cluster *mesh_cluster);
  */
 int cluster_vfs_add_direct(const char *target,
                            struct m9p_client *client);
-
-/**
- * @brief 处理 mesh 侧“发现新节点/旧节点重连”的事件。
- *
- * 语义：
- * 1. 输入 mesh 地址和硬件序列号。
- * 2. 若该 UID 已有历史映射，则复用已有 target 名称。
- * 3. 若该 UID 首次出现，则自动分配新的节点名（mcuN）。
- * 4. 不论是新节点还是重连节点，9P 状态都会回到 NEW（未 attach）。
- *
- * @param mesh_addr 当前分配给该节点的 mesh 地址。
- * @param hw_uid 节点唯一硬件序列号，长度固定为 CLUSTER_VFS_UID_LEN。
- * @param client 通往该节点的 mini9P client。
- * @param out_target 输出复用/新分配的节点名，可为 NULL。
- * @param out_reused_mapping 输出是否复用了历史名字映射，可为 NULL。
- * @return 0 表示成功；负错误码表示参数非法或路由表已满。
- */
-int cluster_vfs_discover_node(
-    uint8_t mesh_addr,
-    const uint8_t hw_uid[CLUSTER_VFS_UID_LEN],
-    struct m9p_client *client,
-    const char **out_target,
-    bool *out_reused_mapping);
 
 /**
  * @brief 添加一条静态路由。
@@ -170,52 +95,6 @@ int cluster_vfs_add_route(const char *target,
  * @return 0 表示成功；负错误码表示未找到、仍在使用或参数非法。
  */
 int cluster_vfs_remove_route(const char *target);
-
-/**
- * @brief 按 mesh 地址把节点标记为离线，并把 9P 状态回退到 NEW。
- *
- * 该接口用于“节点离线/退出”场景：
- * - 保留名字 <-> UID 的历史映射；
- * - 清空当前 mesh 地址绑定；
- * - 把 9P 会话状态回退到未 attach；
- * - 使后续同 UID 重连时可以复用旧名字。
- *
- * @param mesh_addr 当前离线节点的 mesh 地址。
- * @return 0 表示成功；负错误码表示未找到该地址对应的已知节点。
- */
-int cluster_vfs_mark_node_offline(uint8_t mesh_addr);
-
-/**
- * @brief 结合绑定的 mesh cluster 重新检查某个节点是否仍可达。
- *
- * 该接口用于链路变化后的“二次确认”：
- * - 若 cluster 判定仍可达，则保持当前 VFS 节点在线状态；
- * - 若 cluster 判定已不可达，则自动执行 mark_node_offline 语义。
- *
- * @param mesh_addr 需要检查的目标地址。
- * @param out_reachable 输出当前是否仍可达。
- * @return 0 表示检查完成；负错误码表示参数非法、未绑定 cluster 或 cluster 查询失败。
- */
-int cluster_vfs_refresh_node_from_cluster(uint8_t mesh_addr, bool *out_reachable);
-
-/**
- * @brief 结合绑定的 mesh cluster，重新检查所有已知节点当前是否仍可达。
- *
- * 这个接口用于真正的 mesh runtime：
- * - REGISTER 会让某个 UID 与当前 mesh_addr 建立绑定；
- * - 之后任何 LINK_STATE / ROUTE_UPDATE 变化，都可能让若干节点的可达性发生变化；
- * - runtime 不应只刷新单个地址，而应把当前仍持有 mesh_addr 绑定的全部节点都重检一遍。
- *
- * 当前实现策略：
- * 1. 遍历所有非 EMPTY 且仍持有 mesh_addr 的 route；
- * 2. 对每个 route 调用 cluster_can_reach()；
- * 3. 对已不可达的节点执行 mark_node_offline 语义；
- * 4. 统计本轮新回退为 OFFLINE 的节点个数。
- *
- * @param out_offline_count 输出本轮新回退为离线的节点数，可为 NULL。
- * @return 0 表示检查完成；负错误码表示未绑定 cluster 或 cluster 查询失败。
- */
-int cluster_vfs_refresh_all_nodes_from_cluster(size_t *out_offline_count);
 
 /**
  * @brief 对目标节点对应的下一跳执行 Mini9P attach。
@@ -252,22 +131,6 @@ int cluster_vfs_detach(const char *target);
  */
 int cluster_vfs_get_route_state(const char *target,
                                 enum cluster_vfs_route_state *out_state);
-
-/**
- * @brief 查询某个节点完整的 VFS 元信息。
- *
- * 该接口比 get_route_state 更详细，额外返回：
- * - 当前 mesh 地址
- * - 硬件 UID
- * - 在线状态
- * - 9P attach 状态
- *
- * @param target 节点名，例如 "mcu1"。
- * @param out_info 输出节点信息快照。
- * @return 0 表示成功；负错误码表示目标不存在或参数非法。
- */
-int cluster_vfs_get_node_info(const char *target,
-                              struct cluster_vfs_node_info *out_info);
 
 /**
  * @brief 打开集群统一路径下的文件或目录。

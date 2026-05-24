@@ -5,7 +5,19 @@
 ![team logo](docs/figs/logo.png)
 
 ## Poster
+
 ![poster](docs/figs/poster.png)
+
+## 项目简介
+
+本项目是中国科学技术大学 2026 春季学期 OSH-2026 课程小组 **9P Walkers** 的仓库，目标是实现一个基于 **Mini9P 协议** 的 MCU 集群分布式系统。
+
+系统以 ESP32-P4 作为主控节点，以 STM32 系列 MCU 作为从节点。主控通过 UART/SPI/WiFi 等链路连接多个从机，并在上层提供 C Shell、Lua 运行时和 Web Shell。从机将本地文件、状态和外设抽象成文件节点，主控通过统一的集群 VFS 路径访问这些资源，例如：
+
+```bash
+cat /mcu1/sys/health
+echo 100 > /mcu2/motor/speed
+```
 
 ## 项目成员
 
@@ -15,44 +27,177 @@
 - 刘子源
 - 武文韬
 
-## 简介
+## 核心功能
 
+- **外设即文件**：从机通过 `local_vfs` 暴露本地文件、状态和外设，Mini9P server 将文件操作转发给后端回调。
+- **统一集群命名空间**：主控 `cluster_vfs` 将 `/mcuN/...` 形式的全局路径映射到对应 Mini9P client 和远端 fid。
+- **Web 远程 Shell**：ESP32-P4 主控提供 HTTP/WebSocket 页面，浏览器可直接访问设备 Shell。
+- **嵌入式 Lua 运行时**：主控内嵌 Lua，用于脚本化编排文件访问和设备控制。
+- **Mesh/路由层**：`pwos-shared/mesh` 提供集群 envelope、节点运行时、处理器和 UART transport 组件，为后续多跳转发和去中心化路由预留基础。
+- **PC 联调工具**：`tools/pc_master_emulator` 可通过 USB-TTL 对从机执行 Mini9P smoke test。
 
-本项目是中国科学技术大学 2026 春季学期 OSH-2026 课程小组 **9P Walkers** 的仓库，目标是实现一个基于 **9P 协议** 的 MCU 集群分布式系统。
+## 系统架构
 
-### 核心构思
+```text
+Shell / Lua / WebShell
+  -> cluster_vfs
+  -> mini9p_client
+  -> transport 或 mesh peer_link
+  -> Mini9P frame link
+  -> mini9p_server
+  -> local_vfs backend / 文件树 / 外设回调
+```
 
-对于单个 MCU，现有的 RTOS 已经相当成熟。我们的想法是将视野扩展到 **MCU 集群**：通过一个主控 MCU，以 UART、SPI 或 WiFi 等通信方式连接多个从机 MCU，构建一个轻量级的分布式系统。
+### 主要目录
 
-### 系统架构
+| 目录 | 说明 |
+| --- | --- |
+| `pwos-master-esp32p4/` | ESP32-P4 主控工程，包含 Shell、Lua、Web Shell、VFS bridge、transport 组装 |
+| `pwos-slave/` | STM32F407 风格从机工程，包含 HAL、littleFS、local VFS、Mini9P service 集成 |
+| `pwos-slave-stm32f411/` | STM32F411 从机变体，包含 Mini9P 串口联调 preset |
+| `pwos-shared/mini9p/` | 主从共享 Mini9P 协议、client、server、peer_link、service 代码 |
+| `pwos-shared/mesh/` | 共享 mesh envelope、cluster、processer、node_runtime、transport 代码 |
+| `tools/pc_master_emulator/` | PC 端 Mini9P 主控模拟器，用于硬件串口 smoke test |
+| `docs/` | 展示、报告和图片资料 |
 
-整个系统由以下四个层次构成：
+### Mini9P 层
 
-1. **轻量级 RTOS**：在每个 MCU 上运行一个极简的实时操作系统（参考 [atomthreads](https://github.com/kelvinlawson/atomthreads)），负责任务调度与资源管理。
-2. **嵌入式文件系统**：在每个 MCU 上运行 [littleFS](https://github.com/littlefs-project/littlefs)，提供可靠的本地文件存储。
-3. **嵌入式 Lua 运行时**：在主控 MCU 上运行一个轻量的 Lua 解释器，作为通用任务脚本化的执行环境。
-4. **C 语言 Shell**：在主控 MCU 上用 C 实现一个交互式 Shell，作为用户与整个分布式系统交互的入口。
+Mini9P 是本项目使用的轻量级 9P 变体。帧格式包括 magic `0x39 0x50`、小端长度、版本、消息类型、tag、payload 和 CRC-16/CCITT-FALSE。
 
-### 主要功能
+共享实现位于 `pwos-shared/mini9p/`：
 
-- **Web 远程 Shell**：主控 MCU 上运行一个微服务器，提供 Web 页面。同一局域网下的上位机可通过浏览器访问该页面，直接使用主控的 Shell。
-- **外设即文件**：将所有 MCU 的外设统一映射为文件节点，挂载到各自 MCU 的 littleFS 中，再通过 9P 协议统一挂载到主控的 VFS 下。用户可以通过熟悉的 Bash 命令透明地访问和控制任意 MCU 的外设。例如：
-  - `echo 100 > /mcu1/motor/speed` 控制电机速度
-  - `cat /mcu2/temperature` 读取温度传感器数据
-- **脚本化任务**：基于 Lua 运行时，将文本编辑器（如 nano）移植到系统中。用户可以直接在目标设备上编写 Lua 脚本，通过文件读写原生地编写和运行通用任务，无需每次都回到上位机编译烧录。
-- **边缘计算**：将一些特殊计算任务（如 Jacobi 迭代、矩阵乘法、神经网络推理等）提前用 C 编译并烧录到各 MCU 中。上位机通过 Lua 脚本编排和调度这些任务，充分利用 MCU 集群的边缘计算能力。
+- `mini9p_protocol`：帧编解码、请求解析、响应构造和 CRC 校验。
+- `mini9p_client`：主控侧 attach/walk/open/read/write/stat/clunk 封装。
+- `mini9p_server`：从机侧 session、fid 表、权限检查和 backend 分发。
+- `mini9p_peer_link`：在双向链路上区分本端等待的 `R*` 响应和对端主动发来的 `T*` 请求。
+- `mini9p_service`：从机上板联调组装层，连接 `local_vfs`、server、peer_link 和 UART buffer。
 
-### 硬件选型
+协议细节见：
 
-计划使用 ESP32-P4 作为主控，STM32F4/ESP32-S 作为从机。ESP32-P4 性价比高，性能强劲，内置 WiFi，非常适合主控使用；STM32F4/ESP32-S 则适合从机，提供丰富的外设接口。
+- `pwos-master-esp32p4/README.md`
+- `pwos-shared/mini9p/README.md`
 
-## 进展
+### Cluster VFS
 
-|阶段|日期|进展|安排|
-|----|----|----|----|
-|前期调研|3/9~3/15|各队员进行初步调研，收集选题|董宇皓: AIos安全管控; 霍斌: MCU集群上的分布式操作系统设计; 刘亦航: inferno优化; 武文韬: 网络协议栈优化; 刘子源: 分布式文件系统设计|
-|集中调研|3/16~3/20|各组员各自进行集中深度调研|董宇皓: AIos安全管控; 霍斌: MCU集群上的分布式操作系统设计; 刘亦航: inferno优化; 武文韬: 网络协议栈优化; 刘子源: 分布式文件系统设计|
-|会议立项|3/21|在会议中确定了选题为 MCU集群项目|初步确定实现路径，各组员各自调研/学习相关知识|
-|会议讨论|4/2|在会议中讨论了具体实现方案，决定初步分工|董宇皓: Slave 虚拟文件树、mini9p_server、驱动模块; 霍斌: mini9p_client、通信层、协议规范; 刘亦航: cluster_vfs、调度器、Shell; 刘子源: RTOS 层、计算模块; 武文韬: Lua 运行时、Web Shell、文档报告|
-|早期开发|4/3~4/15|搭建了初步系统框架|-|
-|会议讨论|4/16|可行性分析报告|完成了可行性报告分析|
+`pwos-master-esp32p4/vfs_bridge/cluster_vfs.c` 是主控上的统一命名空间桥接层。它不是完整 POSIX 文件系统，而是维护静态路由表和本地 fd 表：
+
+- 直连路由：`/mcu1/dev/temp` 命中 `mcu1`，发送到从机时转为 `/dev/temp`。
+- 本地 fd：`local_fd -> route + remote_fid`，其中 `remote_fid` 是 Mini9P session 内的远端句柄。
+- 当前已实现 direct route、attach/detach、open/read/write/stat/close、路径级 read/write 和目录 list。
+- 中继路由、多跳转发、动态路由、自动重连仍是扩展方向。
+
+详细设计见 `pwos-master-esp32p4/vfs_bridge/design.md`。
+
+## 构建与运行
+
+### ESP32-P4 主控
+
+需要先导出 ESP-IDF 环境，使 `IDF_PATH` 可用。
+
+```bash
+cd pwos-master-esp32p4
+idf.py build
+idf.py flash
+idf.py monitor
+# 或一条命令完成
+idf.py build flash monitor
+```
+
+主控 `main/CMakeLists.txt` 会嵌入 `web/index.html`，并编译 `pwos-shared/mini9p` 与 `pwos-shared/mesh` 中的共享代码。
+
+ESP-IDF pytest：
+
+```bash
+cd pwos-master-esp32p4
+pytest pytest_hello_world.py
+```
+
+### STM32 从机
+
+```bash
+cd pwos-slave
+cmake --preset Debug
+cmake --build --preset Debug
+cmake --build --preset Release
+```
+
+### STM32F411 从机变体
+
+```bash
+cd pwos-slave-stm32f411
+cmake --preset Debug
+cmake --build --preset Debug
+cmake --preset ZGT6Debug
+cmake --build --preset ZGT6Debug
+```
+
+`ZGT6Debug` 会启用 `PWOS_BOARD_ZGT6` 和 `PWOS_ENABLE_MINI9P_SERIAL`。Mini9P 串口联调模式下，对应 USART 应只传输 Mini9P 二进制帧，不应混入 VOFA 或文本日志。
+
+## 测试
+
+### Cluster VFS host test
+
+```bash
+cmake -S pwos-master-esp32p4/vfs_bridge/test -B pwos-master-esp32p4/vfs_bridge/test/build
+cmake --build pwos-master-esp32p4/vfs_bridge/test/build
+pwos-master-esp32p4/vfs_bridge/test/build/cluster_vfs_test
+```
+
+### 从机 local VFS backend test
+
+```bash
+cmake -S pwos-slave/User/backend/test -B pwos-slave/User/backend/test/build
+cmake --build pwos-slave/User/backend/test/build
+pwos-slave/User/backend/test/build/local_vfs_test
+```
+
+### 从机 Mini9P server 与 UART transport host tests
+
+```bash
+cmake -S pwos-slave/User/uart_transport/test -B pwos-slave/User/uart_transport/test/build
+cmake --build pwos-slave/User/uart_transport/test/build
+pwos-slave/User/uart_transport/test/build/mini9p_server_test
+pwos-slave/User/uart_transport/test/build/slave_uart_transport_host_test
+```
+
+### STM32F411 Mini9P server test
+
+```bash
+cmake -S pwos-slave-stm32f411/User/mini9p/test -B pwos-slave-stm32f411/User/mini9p/test/build
+cmake --build pwos-slave-stm32f411/User/mini9p/test/build
+pwos-slave-stm32f411/User/mini9p/test/build/mini9p_server_test
+```
+
+### PC 主控模拟器硬件 smoke test
+
+```bash
+cmake -S tools/pc_master_emulator -B tools/pc_master_emulator/build
+cmake --build tools/pc_master_emulator/build
+tools/pc_master_emulator/build/pc_master_emulator /dev/ttyUSB0 115200
+```
+
+该工具会依次执行 `Tattach`、`Twalk /sys/health`、`Topen`、`Tread`、`Tclunk`，并检查 `/missing` 和 bad fid 的错误路径。成功时输出：
+
+```text
+pc_master_emulator: ok
+```
+
+连接约定见 `tools/pc_master_emulator/README.md`。
+
+## 开发约定
+
+- Mini9P 协议、client、server、peer_link 的共享实现优先修改 `pwos-shared/mini9p/`。
+- 从机侧热路径尽量保持固定 buffer、静态表和可预测执行时间。
+- 主控上层入口应优先通过 `cluster_vfs` 访问远端资源，不直接耦合底层 UART/SPI/WiFi transport。
+- 外设控制尽量保持“文件节点 + read/write 回调”的模型。
+
+## 项目进展
+
+| 阶段 | 日期 | 进展 |
+| --- | --- | --- |
+| 前期调研 | 3/9~3/15 | 调研 MCU 集群、分布式文件系统、轻量 RTOS、脚本运行时等方向 |
+| 集中调研 | 3/16~3/20 | 深入调研各模块可行性 |
+| 会议立项 | 3/21 | 确定选题为 MCU 集群项目 |
+| 方案讨论 | 4/2 | 确定主从架构、Mini9P、Shell、Lua、Web Shell、VFS 等模块分工 |
+| 早期开发 | 4/3~4/15 | 搭建主控、从机、协议和 VFS 的初步系统框架 |
+| 中期推进 | 4/16 之后 | 补充共享 Mini9P、cluster VFS、mesh、host test 和 PC 串口联调工具 |
