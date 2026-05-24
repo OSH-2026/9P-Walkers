@@ -290,19 +290,8 @@ int cluster_config_on_node_departed(uint8_t mesh_addr, bool *out_reachable);
 
 #### 状态查询接口
 
-```c
-int cluster_vfs_get_route_state(const char *target,
-                                enum cluster_vfs_route_state *out_state);
-
-int cluster_vfs_get_node_info(const char *target,
-                              struct cluster_vfs_node_info *out_info);
-```
-
-用途：
-
-- 查询节点是否存在。
-- 查询节点当前是否在线。
-- 查询当前 mesh 地址、UID、route_state、m9p_state。
+节点在线状态、可达性和下一跳由 shared mesh cluster / `cluster_config_*`
+查询。VFS 只负责按节点名发起 Mini9P 会话和文件访问，不再暴露节点信息快照。
 
 #### 会话接口
 
@@ -342,7 +331,7 @@ int cluster_vfs_stat(const char *path, struct m9p_stat *out_stat);
 
 1. 启动时调用 `mesh_host_runtime_start_default_task()`。
 2. 等待 runtime 自动发现节点。
-3. 用 `cluster_vfs_get_node_info()` 查询节点是否进入 `READY`。
+3. 用 shared mesh cluster 或 `cluster_config_*` 查询节点是否在线/可达。
 4. 对需要访问的节点执行 `cluster_vfs_attach("mcuN")`。
 5. 通过 `cluster_vfs_read_path()` / `cluster_vfs_write_path()` / `cluster_vfs_list()` 访问。
 

@@ -48,14 +48,16 @@
 
 ## 3. 核心数据结构
 
-路由表记录当前节点如何到达目标节点：
+VFS 节点表只记录全局名字、UID 到 Mini9P client/session 的绑定；mesh 地址可达性和下一跳由 `pwos-shared/mesh/cluster` 维护：
 
 ```c
 struct cluster_vfs_route {
     char target[CLUSTER_VFS_MAX_NAME];
-    char next_hop[CLUSTER_VFS_MAX_NAME];
     struct m9p_client *client;
-    enum cluster_vfs_route_state state;
+    uint8_t mesh_addr;
+    uint8_t hw_uid[CLUSTER_VFS_UID_LEN];
+    bool has_hw_uid;
+    enum cluster_vfs_m9p_state m9p_state;
 };
 ```
 
@@ -63,9 +65,9 @@ struct cluster_vfs_route {
 
 ```text
 EMPTY     空路由项
-READY     已注册 route 和 client，但尚未 attach  **ps：这里的注册不验证节点存在，只是在路由表上记录**
+READY     mesh cluster 判定节点可达，但尚未 attach
 ATTACHED  已完成 Mini9P attach，可用于 open/stat
-OFFLINE   预留状态
+OFFLINE   mesh cluster 判定节点不可达，或当前没有 mesh 地址绑定
 ```
 
 打开文件表记录本地 fd 和远端 fid 的关系：
@@ -108,8 +110,7 @@ mcu1/dev       -> 非绝对路径，返回 EINVAL
 - 匹配时跳过路径开头的 `/`，用 `mcu1/...` 与 route target 比较。
 - target 后一个字符必须是字符串结束或 `/`，避免 `/mcu10` 误命中 `mcu1`。
 - `resolve_path()` 只匹配 `ATTACHED` 状态路由。
-- 直连路由 `target == next_hop` 时剥掉 `/mcuN` 前缀。
-- 后续中继路由 `target != next_hop` 时，可保留全局路径发给下一跳 router。
+- VFS 始终剥掉 `/mcuN` 前缀；mesh 下一跳由 shared cluster / runtime 决定。
 
 ## 5. 对外接口
 
@@ -118,10 +119,11 @@ mcu1/dev       -> 非绝对路径，返回 EINVAL
 ```c
 int cluster_vfs_init(void);
 
-int cluster_vfs_add_direct(const char *target,
-                           struct m9p_client *client);
-
-int cluster_vfs_remove_route(const char *target);
+int cluster_vfs_discover_node(uint8_t mesh_addr,
+                              const uint8_t hw_uid[CLUSTER_VFS_UID_LEN],
+                              struct m9p_client *client,
+                              const char **out_target,
+                              bool *out_reused_mapping);
 
 int cluster_vfs_attach(const char *target);
 int cluster_vfs_detach(const char *target);
@@ -147,15 +149,13 @@ int cluster_vfs_close(uint16_t fd);
 
 ```text
 m9p_client_init
-cluster_vfs_init
-cluster_vfs_add_direct("mcu1", &client)
+cluster_config_init_mesh_host
+cluster_config_on_node_discovered(mesh_addr, hw_uid, &client, &name, &reused)
 cluster_vfs_attach("mcu1")
 cluster_vfs_open("/mcu1/dev/temp", M9P_OREAD, &fd)
 cluster_vfs_read(fd, buf, &len)
 cluster_vfs_close(fd)
 ```
-
-头文件中保留了 `cluster_vfs_add_route()`，用于后续静态一跳中继；当前 `cluster_vfs.c` 尚未实现该函数。
 
 ## 6. 关键行为
 
@@ -202,26 +202,27 @@ stat 使用临时 fid。即使远端 stat 返回错误，也要先 clunk 临时 
 
 `close` 先释放本地 fd，再调用远端 `m9p_client_clunk()`。这样可以避免本地 fd 泄漏，同时把远端 clunk 错误返回给调用者。
 
-## 7. 去中心化扩展方向
+## 7. Mesh 转发模型
 
-当前代码主要跑通直连路由：
+VFS 只关心稳定节点名到最终目标节点的 Mini9P 会话：
 
 ```text
-/mcu1/... -> target=mcu1,next_hop=mcu1 -> client_to_mcu1
+/mcu1/... -> target=mcu1 -> mesh_addr=0x11 -> m9p_client(target=0x11)
 ```
 
-后续中继路由可扩展为：
+如果目标需要多跳，下一跳不存放在 VFS route 中，而是由 shared cluster/runtime 在发送帧时查询：
 
 ```text
-/mcu3/... -> target=mcu3,next_hop=mcu1 -> client_to_mcu1
+target mesh_addr: 0x33
+cluster lookup:   0x33 -> next_hop 0x11
+transport send:   frame(dst=0x33) via next_hop=0x11
 ```
 
-MVP 可先采用全局路径转发：
+中继节点只转发 mesh frame，不解析 Mini9P attach/open/read/write 语义；最终目标节点处理 Mini9P 并返回应答：
 
 ```text
-用户路径: /mcu3/dev/temp
-下一跳:   mcu1
-发送路径: /mcu3/dev/temp
+host Mini9P request -> mesh next_hop(s) -> target node
+target Mini9P reply -> mesh next_hop(s) -> host
 ```
 
 长期更干净的方案是在 Mini9P 外层增加 routing header：
@@ -238,8 +239,7 @@ payload:        原始 Mini9P frame
 已实现：
 
 - `cluster_vfs_init`
-- `cluster_vfs_add_direct`
-- `cluster_vfs_remove_route`
+- `cluster_vfs_discover_node`
 - `cluster_vfs_attach / cluster_vfs_detach`
 - `cluster_vfs_open`
 - `cluster_vfs_read`
@@ -249,7 +249,6 @@ payload:        原始 Mini9P frame
 - `cluster_vfs_list`
 - `cluster_vfs_stat`
 - `cluster_vfs_close`
-- `cluster_vfs_get_route_state`
 
 已覆盖的修复点：
 
@@ -259,7 +258,6 @@ payload:        原始 Mini9P frame
 - stat 错误路径会 clunk 临时 fid。
 - close 返回远端 clunk 错误码。
 - 重复 target 返回 busy。
-- remove route 防御空 route 指针。
 - `/` 支持虚拟根目录 stat。
 - `M9P_OREAD == 0` 的读权限判断已修正。
 - 路径级 `read_path/write_path` 已封装 open/read-write/close。
@@ -267,12 +265,11 @@ payload:        原始 Mini9P frame
 - `list("/")` 会本地合成已注册节点挂载点。
 - `list("/mcuN/...")` 会读取并解析远端目录项。
 - `list` 对普通文件返回 `ENOTDIR`，避免把文件内容误解析为目录项。
-- 可通过 `cluster_vfs_get_route_state()` 查询单个节点路由状态。
-- remove route 和 detach 都会在仍有打开 fd 时返回 busy。
+- 节点在线/可达性通过 shared mesh cluster 或 `cluster_config_*` 查询；VFS 不再暴露节点信息快照。
+- detach 会在仍有打开 fd 时返回 busy。
 
 尚未实现或仍是规划：
 
-- `cluster_vfs_add_route()` 的中继路由实现。
 - `cluster_vfs_list_routes()` 这类批量路由枚举接口。
 - routing header、多跳转发、动态路由。
 - `OFFLINE` 状态的主动使用和自动重连策略。
@@ -304,7 +301,7 @@ pwos-master-esp32p4/vfs_bridge/test/test_main.c
 - 对目录 read_path 返回 `EISDIR`。
 - 对普通文件 list 返回 `ENOTDIR`。
 - 单节点 route state 查询。
-- remove route / detach 在 fd 未关闭时返回 busy。
+- detach 在 fd 未关闭时返回 busy。
 - stat 成功和失败路径的 clunk。
 - close 返回远端 clunk 错误。
 

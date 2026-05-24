@@ -404,19 +404,6 @@ static void fill_uid(uint8_t uid[CLUSTER_VFS_UID_LEN], uint8_t seed)
     }
 }
 
-/* 每个需要远端访问的测试都先建立一条 mcu1 直连路由，并完成 attach。
- * 这样 case 本身可以专注验证 open/stat/read/write/close 的行为。
- */
-static void setup_attached_route(struct mock_ctx *ctx, struct m9p_client *client)
-{
-    memset(ctx, 0, sizeof(*ctx));
-    cluster_vfs_init();
-    m9p_client_init(client, mock_transport, ctx);
-    expect_int("add_direct", cluster_vfs_add_direct("mcu1", client), 0);
-    expect_int("attach", cluster_vfs_attach("mcu1"), 0);
-    expect_int("attach_count", ctx->attach_count, 1);
-}
-
 static void setup_discovered_node(struct mock_ctx *ctx,
                                   struct m9p_client *client,
                                   uint8_t mesh_addr,
@@ -436,54 +423,53 @@ static void setup_discovered_node(struct mock_ctx *ctx,
     expect_int("discover reused mapping", reused, 0);
 }
 
-/* 重复 target 会让 resolve_path 只命中第一条路由，后续条目变成不可达死路由。 */
-static void test_duplicate_route(void)
+/* 每个需要远端访问的测试都先通过 mesh discovery 建立 mcu1，并完成 attach。
+ * 这样 case 本身可以专注验证 open/stat/read/write/close 的行为。
+ */
+static void setup_attached_node(struct mock_ctx *ctx, struct m9p_client *client)
 {
-    struct mock_ctx ctx;
-    struct m9p_client client;
+    const char *name = NULL;
 
-    memset(&ctx, 0, sizeof(ctx));
-    cluster_vfs_init();
-    m9p_client_init(&client, mock_transport, &ctx);
-    expect_int("duplicate first add", cluster_vfs_add_direct("mcu1", &client), 0);
-    expect_int("duplicate second add", cluster_vfs_add_direct("mcu1", &client), -(int)M9P_ERR_EBUSY);
+    setup_discovered_node(ctx, client, 0x11u, 0x70u, &name);
+    expect_str("attached node name", name, "mcu1");
+    expect_int("attach", cluster_vfs_attach(name), 0);
+    expect_int("attach_count", ctx->attach_count, 1);
 }
 
-/* route state 查询只暴露状态值，不允许外部拿到内部路由表指针。 */
-static void test_get_route_state(void)
+/* 同一 UID/地址重复发现应复用原节点名，而不是创建重复挂载点。 */
+static void test_duplicate_discovery_reuses_route(void)
 {
     struct mock_ctx ctx;
     struct m9p_client client;
-    enum cluster_vfs_route_state state = CLUSTER_VFS_ROUTE_EMPTY;
+    uint8_t uid[CLUSTER_VFS_UID_LEN];
+    const char *name1 = NULL;
+    const char *name2 = NULL;
+    bool reused = false;
 
     memset(&ctx, 0, sizeof(ctx));
-    cluster_vfs_init();
+    fill_uid(uid, 0x60u);
+    expect_int("duplicate init", cluster_config_init_mesh_host(), 0);
     m9p_client_init(&client, mock_transport, &ctx);
-
-    expect_int("missing route state", cluster_vfs_get_route_state("mcu1", &state), -(int)M9P_ERR_ENOENT);
-    expect_int("state add", cluster_vfs_add_direct("mcu1", &client), 0);
-    expect_int("state ready rc", cluster_vfs_get_route_state("mcu1", &state), 0);
-    expect_int("state ready", state, CLUSTER_VFS_ROUTE_READY);
-
-    expect_int("state attach", cluster_vfs_attach("mcu1"), 0);
-    expect_int("state attached rc", cluster_vfs_get_route_state("mcu1", &state), 0);
-    expect_int("state attached", state, CLUSTER_VFS_ROUTE_ATTACHED);
-
-    expect_int("state detach", cluster_vfs_detach("mcu1"), 0);
-    expect_int("state detached rc", cluster_vfs_get_route_state("mcu1", &state), 0);
-    expect_int("state detached", state, CLUSTER_VFS_ROUTE_READY);
+    expect_int("duplicate first discover",
+               cluster_config_on_node_discovered(0x11u, uid, &client, &name1, &reused),
+               0);
+    expect_int("duplicate first reused", reused, 0);
+    expect_int("duplicate second discover",
+               cluster_config_on_node_discovered(0x11u, uid, &client, &name2, &reused),
+               0);
+    expect_int("duplicate second reused", reused, 1);
+    expect_str("duplicate same name", name2, name1);
 }
 
 /* 新主机初始化不再预注册静态 mcu1，而是只启动 mesh cluster + VFS 桥接层。 */
 static void test_mesh_host_init_starts_empty(void)
 {
-    enum cluster_vfs_route_state state = CLUSTER_VFS_ROUTE_EMPTY;
     struct cluster *mesh_cluster = NULL;
 
     expect_int("mesh host init", cluster_config_init_mesh_host(), 0);
     mesh_cluster = cluster_config_mesh_cluster();
     expect_int("mesh cluster exists", mesh_cluster != NULL, 1);
-    expect_int("mesh host empty", cluster_vfs_get_route_state("mcu1", &state), -(int)M9P_ERR_ENOENT);
+    expect_int("mesh host attach missing", cluster_vfs_attach("mcu1"), -(int)M9P_ERR_ENOENT);
 }
 
 /* 新发现的节点应分配新名字、保存 UID，并在 cluster 中可达。 */
@@ -491,7 +477,6 @@ static void test_discover_node_allocates_name_and_tracks_uid(void)
 {
     struct mock_ctx ctx;
     struct m9p_client client;
-    struct cluster_vfs_node_info info;
     struct cluster *mesh_cluster;
     uint8_t uid[CLUSTER_VFS_UID_LEN];
     const char *name = NULL;
@@ -503,15 +488,9 @@ static void test_discover_node_allocates_name_and_tracks_uid(void)
 
     expect_str("discover name", name, "mcu1");
     expect_int("discover attach count", ctx.attach_count, 0);
-    expect_int("discover info rc", cluster_vfs_get_node_info("mcu1", &info), 0);
-    expect_int("discover info addr", info.mesh_addr, 0x11u);
-    expect_int("discover info online", info.online, 1);
-    expect_int("discover info route state", info.route_state, CLUSTER_VFS_ROUTE_READY);
-    expect_int("discover info m9p state", info.m9p_state, CLUSTER_VFS_M9P_NEW);
-    expect_int("discover info has uid", info.has_hw_uid, 1);
-    expect_mem("discover info uid", info.hw_uid, uid, CLUSTER_VFS_UID_LEN);
     expect_int("discover reachable rc", cluster_can_reach(mesh_cluster, 0x11u, &reachable), 0);
     expect_int("discover reachable", reachable, 1);
+    expect_int("discover attach", cluster_vfs_attach("mcu1"), 0);
 }
 
 /* 同一 UID 重连时应复用原节点名，但 9P 状态需要回到 NEW 并重新 attach。 */
@@ -521,7 +500,6 @@ static void test_rediscover_same_uid_reuses_name(void)
     struct mock_ctx ctx2;
     struct m9p_client client1;
     struct m9p_client client2;
-    struct cluster_vfs_node_info info;
     uint8_t uid[CLUSTER_VFS_UID_LEN];
     const char *name1 = NULL;
     const char *name2 = NULL;
@@ -552,10 +530,6 @@ static void test_rediscover_same_uid_reuses_name(void)
                0);
     expect_int("reuse second reused", reused, 1);
     expect_str("reuse second name", name2, "mcu1");
-    expect_int("reuse second info rc", cluster_vfs_get_node_info("mcu1", &info), 0);
-    expect_int("reuse second addr", info.mesh_addr, 0x22u);
-    expect_int("reuse second route state", info.route_state, CLUSTER_VFS_ROUTE_READY);
-    expect_int("reuse second m9p state", info.m9p_state, CLUSTER_VFS_M9P_NEW);
     expect_int("reuse second attach", cluster_vfs_attach("mcu1"), 0);
     expect_int("reuse second attach count", ctx2.attach_count, 1);
 }
@@ -565,7 +539,6 @@ static void test_node_departure_marks_new_and_invalidates_fd(void)
 {
     struct mock_ctx ctx;
     struct m9p_client client;
-    struct cluster_vfs_node_info info;
     const char *name = NULL;
     bool reachable = true;
     uint16_t fd = 0xffffu;
@@ -576,11 +549,6 @@ static void test_node_departure_marks_new_and_invalidates_fd(void)
 
     expect_int("depart event", cluster_config_on_node_departed(0x11u, &reachable), 0);
     expect_int("depart reachable", reachable, 0);
-    expect_int("depart info rc", cluster_vfs_get_node_info("mcu1", &info), 0);
-    expect_int("depart info route state", info.route_state, CLUSTER_VFS_ROUTE_OFFLINE);
-    expect_int("depart info m9p state", info.m9p_state, CLUSTER_VFS_M9P_NEW);
-    expect_int("depart info online", info.online, 0);
-    expect_int("depart info addr", info.mesh_addr, CLUSTER_VFS_UNASSIGNED_ADDR);
     expect_int("depart fd invalid", cluster_vfs_close(fd), -(int)M9P_ERR_EFID);
 
     fd = 0xffffu;
@@ -594,7 +562,6 @@ static void test_refresh_connectivity_marks_offline_after_link_loss(void)
 {
     struct mock_ctx ctx;
     struct m9p_client client;
-    struct cluster_vfs_node_info info;
     struct cluster *mesh_cluster;
     const char *name = NULL;
     bool reachable = true;
@@ -608,9 +575,7 @@ static void test_refresh_connectivity_marks_offline_after_link_loss(void)
                0);
     expect_int("refresh rc", cluster_config_refresh_node_connectivity(0x11u, &reachable), 0);
     expect_int("refresh reachable", reachable, 0);
-    expect_int("refresh info rc", cluster_vfs_get_node_info("mcu1", &info), 0);
-    expect_int("refresh route state", info.route_state, CLUSTER_VFS_ROUTE_OFFLINE);
-    expect_int("refresh m9p state", info.m9p_state, CLUSTER_VFS_M9P_NEW);
+    expect_int("refresh attach blocked", cluster_vfs_attach("mcu1"), -(int)M9P_ERR_EAGAIN);
 }
 
 /* "/" 是 cluster_vfs 本地合成的虚拟根目录，不应该被转发给远端节点。 */
@@ -631,7 +596,7 @@ static void test_path_boundary(void)
     struct m9p_client client;
     uint16_t fd = 0xffffu;
 
-    setup_attached_route(&ctx, &client);
+    setup_attached_node(&ctx, &client);
     expect_int("path boundary", cluster_vfs_open("/mcu10/dev/temp", M9P_OREAD, &fd), -(int)M9P_ERR_ENOENT);
     expect_int("boundary walk count", ctx.walk_count, 0);
 }
@@ -648,7 +613,7 @@ static void test_open_read_close(void)
     uint8_t buf[8] = {0};
     uint16_t len = sizeof(buf);
 
-    setup_attached_route(&ctx, &client);
+    setup_attached_node(&ctx, &client);
     expect_int("open read path", cluster_vfs_open("/mcu1/dev/temp", M9P_OREAD, &fd), 0);
     expect_str("open mapped path", ctx.last_walk_path, "/dev/temp");
     expect_u16("open fid follows walk", ctx.last_open_fid, ctx.last_walk_newfid);
@@ -673,7 +638,7 @@ static void test_write_ordwr(void)
     uint16_t written = 0u;
     static const uint8_t data[] = {'o', 'k', '\n'};
 
-    setup_attached_route(&ctx, &client);
+    setup_attached_node(&ctx, &client);
     expect_int("open write path", cluster_vfs_open("/mcu1/dev/temp", M9P_ORDWR, &fd), 0);
     expect_int("write", cluster_vfs_write(fd, data, (uint16_t)sizeof(data), &written), 0);
     expect_u16("write count", written, (uint16_t)sizeof(data));
@@ -690,7 +655,7 @@ static void test_read_path_helper(void)
     uint8_t buf[8] = {0};
     uint16_t len = sizeof(buf);
 
-    setup_attached_route(&ctx, &client);
+    setup_attached_node(&ctx, &client);
     expect_int("read_path", cluster_vfs_read_path("/mcu1/dev/temp", buf, &len), 0);
     expect_str("read_path mapped path", ctx.last_walk_path, "/dev/temp");
     expect_u16("read_path len", len, (uint16_t)sizeof(expected));
@@ -707,7 +672,7 @@ static void test_read_path_dir_returns_eisdir(void)
     uint8_t buf[8] = {0};
     uint16_t len = sizeof(buf);
 
-    setup_attached_route(&ctx, &client);
+    setup_attached_node(&ctx, &client);
     expect_int("read_path dir", cluster_vfs_read_path("/mcu1/dev", buf, &len), -(int)M9P_ERR_EISDIR);
     expect_int("read_path dir no read", ctx.read_count, 0);
     expect_int("read_path dir clunk count", ctx.clunk_count, 1);
@@ -722,7 +687,7 @@ static void test_write_path_helper(void)
     struct m9p_client client;
     uint16_t written = 0u;
 
-    setup_attached_route(&ctx, &client);
+    setup_attached_node(&ctx, &client);
     expect_int("write_path", cluster_vfs_write_path("/mcu1/dev/temp", data, (uint16_t)sizeof(data), &written), 0);
     expect_str("write_path mapped path", ctx.last_walk_path, "/dev/temp");
     expect_int("write_path open mode", ctx.last_open_mode, M9P_OWRITE);
@@ -740,7 +705,7 @@ static void test_write_path_dir_returns_eisdir(void)
     struct m9p_client client;
     uint16_t written = 0u;
 
-    setup_attached_route(&ctx, &client);
+    setup_attached_node(&ctx, &client);
     expect_int("write_path dir",
                cluster_vfs_write_path("/mcu1/dev", data, (uint16_t)sizeof(data), &written),
                -(int)M9P_ERR_EISDIR);
@@ -757,11 +722,8 @@ static void test_list_root_mounts(void)
     struct m9p_dirent entries[2];
     size_t count = 0u;
 
-    memset(&ctx, 0, sizeof(ctx));
     memset(entries, 0, sizeof(entries));
-    cluster_vfs_init();
-    m9p_client_init(&client, mock_transport, &ctx);
-    expect_int("list root add", cluster_vfs_add_direct("mcu1", &client), 0);
+    setup_discovered_node(&ctx, &client, 0x11u, 0x90u, NULL);
 
     expect_int("list root", cluster_vfs_list("/", entries, 2u, &count), 0);
     expect_int("list root count", (int)count, 1);
@@ -780,7 +742,7 @@ static void test_list_remote_dir(void)
     size_t count = 0u;
 
     memset(entries, 0, sizeof(entries));
-    setup_attached_route(&ctx, &client);
+    setup_attached_node(&ctx, &client);
 
     expect_int("list remote", cluster_vfs_list("/mcu1/dev", entries, 4u, &count), 0);
     expect_str("list remote mapped path", ctx.last_walk_path, "/dev");
@@ -801,7 +763,7 @@ static void test_list_file_returns_enotdir(void)
     struct m9p_dirent entries[2];
     size_t count = 0u;
 
-    setup_attached_route(&ctx, &client);
+    setup_attached_node(&ctx, &client);
     expect_int("list file", cluster_vfs_list("/mcu1/dev/temp", entries, 2u, &count), -(int)M9P_ERR_ENOTDIR);
     expect_int("list file count", (int)count, 0);
     expect_int("list file no read", ctx.read_count, 0);
@@ -815,7 +777,7 @@ static void test_stat_success_clunks(void)
     struct m9p_client client;
     struct m9p_stat stat;
 
-    setup_attached_route(&ctx, &client);
+    setup_attached_node(&ctx, &client);
     expect_int("stat success", cluster_vfs_stat("/mcu1/dev/temp", &stat), 0);
     expect_str("stat mapped path", ctx.last_walk_path, "/dev/temp");
     expect_str("stat name", stat.name, "temp");
@@ -830,7 +792,7 @@ static void test_stat_error_clunks(void)
     struct m9p_client client;
     struct m9p_stat stat;
 
-    setup_attached_route(&ctx, &client);
+    setup_attached_node(&ctx, &client);
     ctx.stat_error_code = M9P_ERR_EIO;
     expect_int("stat error", cluster_vfs_stat("/mcu1/dev/temp", &stat), -(int)M9P_ERR_EIO);
     expect_int("stat error clunk count", ctx.clunk_count, 1);
@@ -844,27 +806,11 @@ static void test_close_returns_clunk_error(void)
     struct m9p_client client;
     uint16_t fd = 0xffffu;
 
-    setup_attached_route(&ctx, &client);
+    setup_attached_node(&ctx, &client);
     expect_int("open before clunk error", cluster_vfs_open("/mcu1/dev/temp", M9P_OWRITE, &fd), 0);
     ctx.clunk_error_code = M9P_ERR_EIO;
     expect_int("close clunk error", cluster_vfs_close(fd), -(int)M9P_ERR_EIO);
     expect_int("close freed fd", cluster_vfs_close(fd), -(int)M9P_ERR_EFID);
-}
-
-/* remove_route 必须拒绝删除仍被打开 fd 使用的路由。 */
-static void test_remove_route_busy_until_close(void)
-{
-    struct mock_ctx ctx;
-    struct m9p_client client;
-    enum cluster_vfs_route_state state = CLUSTER_VFS_ROUTE_EMPTY;
-    uint16_t fd = 0xffffu;
-
-    setup_attached_route(&ctx, &client);
-    expect_int("remove busy open", cluster_vfs_open("/mcu1/dev/temp", M9P_OREAD, &fd), 0);
-    expect_int("remove busy", cluster_vfs_remove_route("mcu1"), -(int)M9P_ERR_EBUSY);
-    expect_int("remove busy close", cluster_vfs_close(fd), 0);
-    expect_int("remove after close", cluster_vfs_remove_route("mcu1"), 0);
-    expect_int("remove state gone", cluster_vfs_get_route_state("mcu1", &state), -(int)M9P_ERR_ENOENT);
 }
 
 /* detach 也必须拒绝断开仍被打开 fd 使用的路由。 */
@@ -872,24 +818,21 @@ static void test_detach_busy_until_close(void)
 {
     struct mock_ctx ctx;
     struct m9p_client client;
-    enum cluster_vfs_route_state state = CLUSTER_VFS_ROUTE_EMPTY;
     uint16_t fd = 0xffffu;
 
-    setup_attached_route(&ctx, &client);
+    setup_attached_node(&ctx, &client);
     expect_int("detach busy open", cluster_vfs_open("/mcu1/dev/temp", M9P_OREAD, &fd), 0);
     expect_int("detach busy", cluster_vfs_detach("mcu1"), -(int)M9P_ERR_EBUSY);
     expect_int("detach busy close", cluster_vfs_close(fd), 0);
     expect_int("detach after close", cluster_vfs_detach("mcu1"), 0);
-    expect_int("detach state rc", cluster_vfs_get_route_state("mcu1", &state), 0);
-    expect_int("detach state ready", state, CLUSTER_VFS_ROUTE_READY);
+    expect_int("detach reattach", cluster_vfs_attach("mcu1"), 0);
 }
 
 int main(void)
 {
     printf("cluster_vfs test runner start\n");
 
-    run_test("test_duplicate_route", test_duplicate_route);
-    run_test("test_get_route_state", test_get_route_state);
+    run_test("test_duplicate_discovery_reuses_route", test_duplicate_discovery_reuses_route);
     run_test("test_mesh_host_init_starts_empty", test_mesh_host_init_starts_empty);
     run_test("test_discover_node_allocates_name_and_tracks_uid", test_discover_node_allocates_name_and_tracks_uid);
     run_test("test_rediscover_same_uid_reuses_name", test_rediscover_same_uid_reuses_name);
@@ -909,7 +852,6 @@ int main(void)
     run_test("test_stat_success_clunks", test_stat_success_clunks);
     run_test("test_stat_error_clunks", test_stat_error_clunks);
     run_test("test_close_returns_clunk_error", test_close_returns_clunk_error);
-    run_test("test_remove_route_busy_until_close", test_remove_route_busy_until_close);
     run_test("test_detach_busy_until_close", test_detach_busy_until_close);
 
     if (g_failures != 0)

@@ -393,16 +393,12 @@ static void test_register_broadcast_updates_vfs_without_direct_link(void)
 {
     struct mesh_host_runtime runtime;
     struct fake_mesh_io io;
-    struct cluster_vfs_node_info info;
     bool reachable = true;
 
     init_runtime(&runtime, &io);
     process_register(&runtime, 0x11u, 0x10u);
 
-    expect_int("register node info", cluster_vfs_get_node_info("mcu1", &info), 0);
-    expect_int("register node addr", info.mesh_addr, 0x11u);
-    expect_int("register node online", info.online, 1);
-    expect_int("register node state", info.route_state, CLUSTER_VFS_ROUTE_READY);
+    expect_int("register attach blocked", cluster_vfs_attach("mcu1"), -(int)M9P_ERR_EAGAIN);
     expect_int("register tx count", (int)io.tx_count, 0);
     expect_int("register reachable rc", cluster_can_reach(cluster_config_mesh_cluster(), 0x11u, &reachable), 0);
     expect_int("register reachable", reachable, 0);
@@ -420,7 +416,6 @@ static void test_link_state_to_host_enables_attach_over_mesh_client(void)
 {
     struct mesh_host_runtime runtime;
     struct fake_mesh_io io;
-    struct cluster_vfs_node_info info;
     struct mesh_frame_view mesh_view;
     struct m9p_frame_view m9p_view;
     bool reachable = false;
@@ -434,8 +429,6 @@ static void test_link_state_to_host_enables_attach_over_mesh_client(void)
 
     queue_rattach(&io, 0x11u, 1u);
     expect_int("attach over mesh", cluster_vfs_attach("mcu1"), 0);
-    expect_int("attach info", cluster_vfs_get_node_info("mcu1", &info), 0);
-    expect_int("attach route state", info.route_state, CLUSTER_VFS_ROUTE_ATTACHED);
     expect_int("attach tx count", (int)io.tx_count, 1);
     expect_int("attach next hop", io.tx_next_hops[0], 0x11u);
 
@@ -460,7 +453,6 @@ static void test_routed_read_path_uses_cluster_next_hop(void)
     static const uint8_t expected[] = {'m', 'e', 's', 'h'};
     struct mesh_host_runtime runtime;
     struct fake_mesh_io io;
-    struct cluster_vfs_node_info info;
     uint8_t buf[8] = {0};
     uint16_t len = sizeof(buf);
     bool reachable = false;
@@ -471,7 +463,6 @@ static void test_routed_read_path_uses_cluster_next_hop(void)
     process_register(&runtime, 0x22u, 0x40u);
     process_link_state(&runtime, 0x11u, 0x22u, 1u);
 
-    expect_int("route info node2", cluster_vfs_get_node_info("mcu2", &info), 0);
     expect_int("route reachable rc", cluster_can_reach(cluster_config_mesh_cluster(), 0x22u, &reachable), 0);
     expect_int("route reachable", reachable, 1);
 
@@ -502,7 +493,7 @@ static void test_request_loop_processes_register_before_response(void)
 {
     struct mesh_host_runtime runtime;
     struct fake_mesh_io io;
-    struct cluster_vfs_node_info info;
+    bool online = false;
     uint8_t uid2[MESH_UID_LEN];
     uint8_t register_frame[TEST_FRAME_CAP];
     size_t register_len = 0u;
@@ -517,9 +508,8 @@ static void test_request_loop_processes_register_before_response(void)
     queue_rattach(&io, 0x11u, 1u);
 
     expect_int("interleave attach", cluster_vfs_attach("mcu1"), 0);
-    expect_int("interleave node2 info", cluster_vfs_get_node_info("mcu2", &info), 0);
-    expect_int("interleave node2 addr", info.mesh_addr, 0x22u);
-    expect_int("interleave node2 online", info.online, 1);
+    expect_int("interleave node2 online rc", cluster_get_node_online(cluster_config_mesh_cluster(), 0x22u, &online), 0);
+    expect_int("interleave node2 online", online, 1);
 }
 
 /*
@@ -534,7 +524,7 @@ static void test_link_loss_marks_downstream_node_offline(void)
 {
     struct mesh_host_runtime runtime;
     struct fake_mesh_io io;
-    struct cluster_vfs_node_info info;
+    bool reachable = true;
 
     init_runtime(&runtime, &io);
     process_register(&runtime, 0x11u, 0x70u);
@@ -547,10 +537,9 @@ static void test_link_loss_marks_downstream_node_offline(void)
 
     process_link_state(&runtime, 0x11u, 0x22u, 0u);
 
-    expect_int("loss node2 info", cluster_vfs_get_node_info("mcu2", &info), 0);
-    expect_int("loss node2 online", info.online, 0);
-    expect_int("loss node2 route state", info.route_state, CLUSTER_VFS_ROUTE_OFFLINE);
-    expect_int("loss node2 m9p state", info.m9p_state, CLUSTER_VFS_M9P_NEW);
+    expect_int("loss node2 reachable rc", cluster_can_reach(cluster_config_mesh_cluster(), 0x22u, &reachable), 0);
+    expect_int("loss node2 reachable", reachable, 0);
+    expect_int("loss node2 attach blocked", cluster_vfs_attach("mcu2"), -(int)M9P_ERR_EAGAIN);
 }
 
 int main(void)

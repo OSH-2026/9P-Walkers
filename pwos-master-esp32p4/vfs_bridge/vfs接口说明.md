@@ -25,50 +25,40 @@
 
 ## 数据结构先览
 
-### `enum cluster_vfs_route_state` 路由状态
+### `enum cluster_vfs_m9p_state` Mini9P 会话状态
 
-保存路由表项当前所处状态：
+保存 VFS 与最终目标节点之间的 Mini9P 会话状态：
 
-- `CLUSTER_VFS_ROUTE_EMPTY`：空路由项。
-- `CLUSTER_VFS_ROUTE_READY`：已注册 `target/client`，但尚未 attach。
-- `CLUSTER_VFS_ROUTE_ATTACHED`：已完成 Mini9P attach，可以用于 open/stat。
-- `CLUSTER_VFS_ROUTE_OFFLINE`：预留状态，当前实现未主动使用。
+- `CLUSTER_VFS_M9P_EMPTY`：空节点映射项。
+- `CLUSTER_VFS_M9P_NEW`：已发现节点，但尚未 attach。
+- `CLUSTER_VFS_M9P_ATTACHED`：已完成 Mini9P attach，可以用于 open/stat。
 
-当前路径解析只匹配 `ATTACHED` 状态路由，因此访问 `/mcuN/...` 前必须先调用 `cluster_vfs_attach(target)`。
+节点是否可达由 shared mesh cluster 查询；当前路径解析要求 `m9p_state == ATTACHED` 且节点仍可达。
 
 ---
 
-### `struct cluster_vfs_route` 路由表项
+### `struct cluster_vfs_route` 节点映射项
 
-保存“目标节点如何到达”的信息：
+保存“目标名字/UID 如何绑定到 Mini9P 会话”的信息；下一跳和可达性由 `pwos-shared/mesh/cluster` 维护：
 
 ```c
 struct cluster_vfs_route {
     char target[CLUSTER_VFS_MAX_NAME];
-    char next_hop[CLUSTER_VFS_MAX_NAME];
     struct m9p_client *client;
-    enum cluster_vfs_route_state state;
+    uint8_t mesh_addr;
+    uint8_t hw_uid[CLUSTER_VFS_UID_LEN];
+    bool has_hw_uid;
+    enum cluster_vfs_m9p_state m9p_state;
 };
 ```
 
 字段说明：
 
 - `target`：最终目标节点名，例如 `"mcu1"`、`"mcu3"`，不带前导 `/`。
-- `next_hop`：下一跳节点名。直连路由中 `target == next_hop`。
-- `client`：通往下一跳的 Mini9P client，由上层提前初始化。
-- `state`：当前路由状态。
-
-直连示例：
-
-```text
-target=mcu1, next_hop=mcu1, client=client_to_mcu1
-```
-
-后续中继示例：
-
-```text
-target=mcu3, next_hop=mcu1, client=client_to_mcu1
-```
+- `client`：通往该节点的 Mini9P client，由上层提前初始化。
+- `mesh_addr`：当前绑定的 mesh 地址。
+- `hw_uid/has_hw_uid`：硬件 UID 映射，用于同一硬件重连时复用名字。
+- `m9p_state`：Mini9P 会话状态。
 
 ---
 
@@ -146,26 +136,31 @@ mcu1/dev       -> 非绝对路径，返回 EINVAL
 
 ---
 
-### `cluster_vfs_add_direct`
+### `cluster_vfs_discover_node`
 
-添加一条直连路由。
+处理 mesh 侧发现节点/旧节点重连事件。
 
 ```c
-int cluster_vfs_add_direct(const char *target,
-                           struct m9p_client *client);
+int cluster_vfs_discover_node(uint8_t mesh_addr,
+                              const uint8_t hw_uid[CLUSTER_VFS_UID_LEN],
+                              struct m9p_client *client,
+                              const char **out_target,
+                              bool *out_reused_mapping);
 ```
 
 参数：
 
-- `target`：目标节点名，例如 `"mcu1"`，不包含 `/`。
+- `mesh_addr`：当前 mesh 地址。
+- `hw_uid`：硬件唯一 ID。
 - `client`：通往该节点的 Mini9P client，必须已由 `m9p_client_init()` 初始化。
+- `out_target`：输出自动分配或复用的节点名。
+- `out_reused_mapping`：输出是否复用历史 UID 映射。
 
 行为：
 
-- 设置 `target == next_hop`。
-- 保存 `client` 指针。
-- 初始状态为 `READY`。
-- 若重复添加相同 target，返回 busy，避免出现不可达死路由。
+- 以 UID 为主键复用或分配 `mcuN` 名称。
+- 保存 `client` 指针和当前 `mesh_addr`。
+- 9P 会话状态回到 `NEW`。
 
 返回：
 
@@ -177,38 +172,9 @@ int cluster_vfs_add_direct(const char *target,
 
 ---
 
-### `cluster_vfs_remove_route`
-
-删除一条目标节点路由。
-
-```c
-int cluster_vfs_remove_route(const char *target);
-```
-
-参数：
-
-- `target`：要删除的目标节点名。
-
-行为：
-
-- 查找非空路由项。
-- 如果该 route 仍被任何打开的 fd 使用，则返回 busy。
-- 否则把 route 标记为 `EMPTY`。
-
-返回：
-
-```text
-0                  成功
--M9P_ERR_EINVAL    target 为空
--M9P_ERR_EBUSY     仍有 fd 使用该路由
--M9P_ERR_ENOENT    未找到该 target
-```
-
----
-
 ### `cluster_vfs_attach`
 
-对目标路由执行 Mini9P attach。
+对目标节点执行 Mini9P attach。
 
 ```c
 int cluster_vfs_attach(const char *target);
@@ -217,8 +183,9 @@ int cluster_vfs_attach(const char *target);
 行为：
 
 - 查找 `READY` 状态的 target。
-- 调用对应 client 的 `m9p_client_attach()`。
-- attach 成功后，把路由状态改为 `ATTACHED`。
+- 调用以该 target 为最终目标的 client 执行 `m9p_client_attach()`。
+- 若底层 mesh 需要多跳，中继节点只转发 mesh frame；最终 target 节点处理 Mini9P attach 并返回应答。
+- attach 成功后，派生路由状态变为 `ATTACHED`。
 
 返回：
 
@@ -254,30 +221,6 @@ int cluster_vfs_detach(const char *target);
 -M9P_ERR_EINVAL    target 为空
 -M9P_ERR_EBUSY     仍有 fd 使用该路由
 -M9P_ERR_ENOENT    未找到 ATTACHED 状态的目标路由
-```
-
----
-
-### `cluster_vfs_get_route_state`
-
-查询目标节点当前路由状态。
-
-```c
-int cluster_vfs_get_route_state(const char *target,
-                                enum cluster_vfs_route_state *out_state);
-```
-
-用途：
-
-- 给 Shell/Web 查询单个节点是否已注册、已 attach 或处于预留离线状态。
-- 只拷贝状态值，不暴露内部路由表指针，避免外部修改 VFS 状态。
-
-返回：
-
-```text
-0                  成功
--M9P_ERR_EINVAL    target 或 out_state 为空
--M9P_ERR_ENOENT    未找到该 target
 ```
 
 ---
@@ -555,37 +498,21 @@ int cluster_vfs_close(uint16_t fd);
 
 ## 当前预留但未实现的接口
 
-头文件中预留了：
-
-```c
-int cluster_vfs_add_route(const char *target,
-                          const char *next_hop,
-                          struct m9p_client *client);
-```
-
-该接口用于后续静态一跳中继路由：
-
-```text
-target=mcu3, next_hop=mcu1
-```
-
-当前 `cluster_vfs.c` 尚未实现该函数，主流程暂时应使用 `cluster_vfs_add_direct()`。
-
-后续也可以增加批量路由枚举接口，用于 Web 拓扑或 `nodes` 调试命令：
+后续可以增加批量节点枚举接口，用于 Web 拓扑或 `nodes` 调试命令：
 
 ```text
 cluster_vfs_list_routes
 ```
 
-当前已有 `cluster_vfs_get_route_state()` 可查询单个节点状态；批量枚举暂未实现。
+节点在线/可达性通过 shared mesh cluster 或 `cluster_config_*` 查询；VFS 当前不暴露节点信息快照。批量枚举暂未实现。
 
 ---
 
 ## 总结
 
 ```text
-路由管理:
-  init -> add_direct -> attach/detach -> remove_route
+节点管理:
+  cluster_config_init_mesh_host -> cluster_config_on_node_discovered -> attach/detach
 
 文件访问:
   open -> read/write -> close
@@ -601,8 +528,8 @@ cluster_vfs_list_routes
 
 当前最常用流程:
   m9p_client_init
-  -> cluster_vfs_init
-  -> cluster_vfs_add_direct
+  -> cluster_config_init_mesh_host
+  -> cluster_config_on_node_discovered
   -> cluster_vfs_attach
   -> cluster_vfs_open
   -> cluster_vfs_read / cluster_vfs_write
@@ -620,7 +547,7 @@ uint16_t len = sizeof(buf);
 m9p_client_init(&client, transport, ctx);
 
 cluster_vfs_init();
-cluster_vfs_add_direct("mcu1", &client);
+cluster_config_on_node_discovered(mesh_addr, hw_uid, &client, &name, &reused);
 cluster_vfs_attach("mcu1");
 
 cluster_vfs_open("/mcu1/dev/temp", M9P_OREAD, &fd);

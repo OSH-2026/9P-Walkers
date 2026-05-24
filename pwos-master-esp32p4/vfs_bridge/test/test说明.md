@@ -126,16 +126,16 @@ m9p_encode_frame(...)
 
 ## 6. 各测试用例说明
 
-### test_duplicate_route
+### test_duplicate_discovery_reuses_route
 
-验证重复添加相同 target：
+验证同一 UID/地址重复发现不会创建重复挂载点：
 
 ```text
-第一次 cluster_vfs_add_direct("mcu1") -> 0
-第二次 cluster_vfs_add_direct("mcu1") -> -M9P_ERR_EBUSY
+第一次 cluster_config_on_node_discovered(...) -> reused=false
+第二次 cluster_config_on_node_discovered(...) -> reused=true
 ```
 
-目的是避免路由表中出现多个相同 target，导致后续条目变成不可达死路由。
+目的是避免 VFS 节点表中出现多个相同硬件节点映射。
 
 ### test_root_stat
 
@@ -258,24 +258,21 @@ ctx.clunk_error_code = M9P_ERR_EIO;
 - `cluster_vfs_list("/mcu1/dev")`：读取并解析远端目录项。
 - `cluster_vfs_read_path()` 读目录返回 `-M9P_ERR_EISDIR`。
 - `cluster_vfs_list()` 列普通文件返回 `-M9P_ERR_ENOTDIR`。
-- `cluster_vfs_get_route_state()` 查询 READY/ATTACHED/READY 状态变化。
-- `cluster_vfs_remove_route()` 在 fd 未关闭时返回 `-M9P_ERR_EBUSY`。
+- 节点在线和可达性通过 shared mesh cluster / `cluster_config_*` 查询。
 - `cluster_vfs_detach()` 在 fd 未关闭时返回 `-M9P_ERR_EBUSY`。
 
 仍有一些未覆盖或尚未实现的方向：
 
-- `cluster_vfs_add_route()` 尚未在 `cluster_vfs.c` 实现，因此没有中继路由测试。
 - `cluster_vfs_list_routes()` 尚未实现，因此没有批量路由枚举测试。
 - 没有覆盖真实 UART/WiFi transport。
-- 没有覆盖并发访问、自动重连、route offline 状态。
+- 没有覆盖并发访问、自动重连。
 - 没有覆盖路径规范化，例如 `//`、`.`、`..`。
 
 ## 8. 新增测试建议
 
 后续补功能时建议增加：
 
-- `cluster_vfs_add_route("mcu3", "mcu1", client)` 的全局路径转发测试。
 - `/mcu1` 和 `/mcu1/` 映射到远端 `/` 的测试。
 - open 表满时返回 `-M9P_ERR_EBUSY` 的测试。
 - detach 后 open/stat 返回无路由或不可用错误的测试。
-- `cluster_vfs_list_routes()` 批量导出 `target/next_hop/state` 的测试。
+- `cluster_vfs_list_nodes()` 这类批量导出节点名和 mesh 地址的测试。

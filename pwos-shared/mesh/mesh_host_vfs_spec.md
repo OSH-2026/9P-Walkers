@@ -61,7 +61,6 @@ cluster_config_on_node_discovered(mesh_addr, hw_uid, client, &node_name, &reused
 发现完成后，VFS 中该节点满足：
 
 - `online = true`
-- `route_state = READY`
 - `m9p_state = NEW`
 
 这里的 `NEW` 表示：
@@ -81,7 +80,6 @@ cluster_vfs_attach(node_name);
 
 attach 成功后：
 
-- `route_state = ATTACHED`
 - `m9p_state = ATTACHED`
 
 之后 `/mcuN/...` 路径才允许被 `cluster_vfs_open()` 等接口解析并访问。
@@ -107,7 +105,6 @@ cluster_config_on_node_departed(mesh_addr, &reachable);
 离线完成后，VFS 中该节点满足：
 
 - `online = false`
-- `route_state = OFFLINE`
 - `m9p_state = NEW`
 - `mesh_addr = 0xFF`
 
@@ -171,7 +168,6 @@ VFS 节点管理接口：
 - `cluster_vfs_discover_node`
 - `cluster_vfs_mark_node_offline`
 - `cluster_vfs_refresh_node_from_cluster`
-- `cluster_vfs_get_node_info`
 - `cluster_vfs_attach`
 - `cluster_vfs_detach`
 
