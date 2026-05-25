@@ -23,7 +23,8 @@
  *
  * 关键职责：
  * 1. 以 mesh_processer 为核心，消费来自 raw transport 的 mesh 帧；
- * 2. 在 REGISTER 到来时，为 UID 分配/复用一个长期存在的 mesh-backed m9p_client；
+ * 2. 在“带正式 src 地址的确认 REGISTER”到来时，为 UID 分配/复用一个长期存在的
+ *    mesh-backed m9p_client；
  * 3. 调用 cluster_config_on_mesh_node_registered()，把 UID、名字映射和 client 绑定同步到 VFS；
  * 4. 在 LINK_STATE / ROUTE_UPDATE 变化后，调用 cluster_config_refresh_all_nodes_connectivity()，
  *    让所有已知节点按当前共享 cluster 的 reachability 统一回退或保持在线；

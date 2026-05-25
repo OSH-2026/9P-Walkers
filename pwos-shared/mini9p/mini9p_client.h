@@ -12,6 +12,7 @@
 #define M9P_DEFAULT_INFLIGHT 4u
 #define M9P_ROOT_FID 0u
 #define M9P_FIRST_DYNAMIC_FID 1u
+#define M9P_CLIENT_TIMEOUT_RETRY_ATTEMPTS 3u
 
 typedef int (*m9p_transport_fn)(
     void *transport_ctx,

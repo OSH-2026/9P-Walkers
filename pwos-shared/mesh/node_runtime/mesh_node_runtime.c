@@ -2,6 +2,10 @@
 
 #include <string.h>
 
+static int mesh_node_runtime_send_register(
+    struct mesh_node_runtime *runtime,
+    uint8_t next_hop);
+
 static uint16_t mesh_node_runtime_take_seq(struct mesh_node_runtime *runtime)
 {
     uint16_t seq;
@@ -92,12 +96,18 @@ static int mesh_node_runtime_control_handler(
 
     if (assign_hits_local) {
         runtime->processor.config.local_addr = assign_payload.node_addr;
+        rc = mesh_node_runtime_send_register(runtime, frame->src);
+        if (rc != 0) {
+            return rc;
+        }
     }
 
     return 0;
 }
 
-static int mesh_node_runtime_send_register(struct mesh_node_runtime *runtime)
+static int mesh_node_runtime_send_register(
+    struct mesh_node_runtime *runtime,
+    uint8_t next_hop)
 {
     struct mesh_register_payload payload;
     uint8_t frame[MESH_PROCESSER_FRAME_CAP];
@@ -126,7 +136,7 @@ static int mesh_node_runtime_send_register(struct mesh_node_runtime *runtime)
 
     return runtime->config.send_frame(
         runtime->config.transport_ctx,
-        runtime->config.bootstrap_next_hop,
+        next_hop,
         frame,
         frame_len);
 }
@@ -197,7 +207,7 @@ int mesh_node_runtime_init(
     runtime->initialized = true;
 
     if (runtime->config.auto_register_on_init) {
-        rc = mesh_node_runtime_send_register(runtime);
+        rc = mesh_node_runtime_send_register(runtime, runtime->config.bootstrap_next_hop);
         if (rc != 0) {
             mesh_node_runtime_deinit(runtime);
             return rc;
@@ -220,7 +230,11 @@ void mesh_node_runtime_deinit(struct mesh_node_runtime *runtime)
 
 int mesh_node_runtime_notify_link_up(struct mesh_node_runtime *runtime)
 {
-    return mesh_node_runtime_send_register(runtime);
+    if (runtime == NULL || !runtime->initialized) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    return mesh_node_runtime_send_register(runtime, runtime->config.bootstrap_next_hop);
 }
 
 int mesh_node_runtime_process_frame(

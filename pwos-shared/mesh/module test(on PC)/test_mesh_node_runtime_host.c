@@ -160,6 +160,7 @@ static void test_assign_updates_local_addr_and_allows_server_reply(void)
     struct fake_server_ctx server_ctx;
     struct mesh_assign_payload assign_payload;
     struct mesh_frame_view view;
+    struct mesh_register_payload register_payload;
     struct m9p_frame_view mini9p_view;
     uint8_t assign_frame[160];
     uint8_t request_frame[96];
@@ -196,6 +197,14 @@ static void test_assign_updates_local_addr_and_allows_server_reply(void)
     assert(mesh_node_runtime_poll_once(&runtime) == 0);
     assert(runtime.cluster.config.local_addr == 0x24u);
     assert(runtime.processor.config.local_addr == 0x24u);
+    assert(transport.tx_count == 1u);
+    assert(transport.tx_next_hop[0] == 0x01u);
+    assert(mesh_decode_frame(transport.tx_queue[0].data, transport.tx_queue[0].len, &view));
+    assert(view.type == MESH_TYPE_REGISTER);
+    assert(view.src == 0x24u);
+    assert(view.dst == MESH_ADDR_UNASSIGNED);
+    assert(mesh_parse_register(&view, &register_payload));
+    assert(memcmp(register_payload.uid, uid, sizeof(uid)) == 0);
     assert(cluster_lookup_next_hop(&runtime.cluster, 0x01u, &next_hop, &is_local) == 0);
     assert(!is_local);
     assert(next_hop == 0x01u);
@@ -217,9 +226,9 @@ static void test_assign_updates_local_addr_and_allows_server_reply(void)
     assert(mesh_node_runtime_poll_once(&runtime) == 0);
     assert(server_ctx.call_count == 1u);
     assert(server_ctx.last_tag == 0x3344u);
-    assert(transport.tx_count == 1u);
-    assert(transport.tx_next_hop[0] == 0x01u);
-    assert(mesh_decode_frame(transport.tx_queue[0].data, transport.tx_queue[0].len, &view));
+    assert(transport.tx_count == 2u);
+    assert(transport.tx_next_hop[1] == 0x01u);
+    assert(mesh_decode_frame(transport.tx_queue[1].data, transport.tx_queue[1].len, &view));
     assert(view.type == MESH_TYPE_MINI9P);
     assert(view.src == 0x24u);
     assert(view.dst == 0x01u);
