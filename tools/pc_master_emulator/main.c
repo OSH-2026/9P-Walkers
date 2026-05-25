@@ -12,7 +12,7 @@
  * 3. 轮询 mesh_host_runtime_poll_once()，接收从机的 REGISTER 帧
  * 4. 收到第一次 REGISTER（src=dst=UNASSIGNED）时回送 ASSIGN，给节点分配地址
  * 5. 节点收到 ASSIGN 后会发送第二次 REGISTER（src=分配地址），确认上线
- * 6. cluster_vfs_attach("mcu1") 挂载节点，然后 cluster_vfs_read_path 读文件
+ * 6. cluster_vfs_attach("mcuN") 挂载节点，然后 cluster_vfs_read_path 读文件
  *
  * ## 帧格式（Mesh over UART）
  *
@@ -60,11 +60,17 @@
 /** 单帧最大缓冲（含 6 字节帧头） */
 #define PC_MASTER_FRAME_CAP (MESH_FRAME_OVERHEAD + MESH_MAX_PAYLOAD_LEN)
 
-/** 目标节点名称，与从机固件中的节点名对应 */
-#define PC_MASTER_TARGET "mcu1"
+/** 默认等待注册并检查的节点数。 */
+#define PC_MASTER_DEFAULT_NODE_COUNT 2u
 
-/** 健康检查路径，先 walk 再 open read */
-#define PC_MASTER_HEALTH_PATH "/mcu1/sys/health"
+/** 按 0x11、0x22... 分配时可用的最大目标节点数，避免碰到 0xff 未分配地址。 */
+#define PC_MASTER_MAX_TARGET_NODES 14u
+
+/** 节点名格式，与 cluster_vfs 的 /mcuN/... 命名空间对应。 */
+#define PC_MASTER_NODE_NAME_FMT "mcu%zu"
+
+/** 健康检查路径格式，先 walk 再 open read。 */
+#define PC_MASTER_HEALTH_PATH_FMT "/%s/sys/health"
 
 /** 发现阶段最大轮询次数（60 × 1s = 60s 超时） */
 #define PC_MASTER_DISCOVERY_POLLS 60
@@ -75,11 +81,21 @@
 /** 本机（PC 主控）在 Mesh 网络中的虚拟地址 */
 #define PC_MASTER_LOCAL_ADDR 0x00u
 
-/** 分配给第一个从节点的 Mesh 地址 */
-#define PC_MASTER_FIRST_NODE_ADDR 0x11u
-
 /** 节点地址租约有效期（毫秒），到期前需续约 */
 #define PC_MASTER_ASSIGN_LEASE_MS 60000u
+
+/**
+ * @brief 本次运行内的节点分配槽位。
+ *
+ * 工具不持久化 UID 映射；同一进程内重复 REGISTER 会复用同一槽位。
+ */
+struct pc_master_node_slot {
+    bool used;                  /**< 是否已分配给某个 UID */
+    bool confirmed;             /**< 是否收到带正式 src 地址的确认 REGISTER */
+    uint8_t uid[MESH_UID_LEN];  /**< REGISTER 中的硬件 UID */
+    uint8_t mesh_addr;          /**< 本次运行分配的 mesh 地址 */
+    char name[MESH_MAX_NODE_NAME + 1u]; /**< 本次运行分配的节点名，如 mcu1 */
+};
 
 /**
  * @brief PC 端 Mesh 传输层实例
@@ -88,9 +104,11 @@
  * 作为 transport_ctx 传给 mesh_host_runtime。
  */
 struct pc_mesh_transport {
-    int fd;                     /**< 串口文件描述符，< 0 表示未打开 */
-    uint8_t assigned_addr;      /**< 已分配给从节点的 Mesh 地址，未分配时为 MESH_ADDR_UNASSIGNED */
-    uint16_t next_seq;          /**< 下一个待发送帧的序列号（用于 Mesh 帧头） */
+    int fd;                                  /**< 串口文件描述符，< 0 表示未打开 */
+    uint16_t next_seq;                       /**< 下一个待发送帧的序列号（用于 Mesh 帧头） */
+    size_t target_node_count;                /**< 本次 smoke test 期望的节点数量 */
+    size_t assigned_node_count;              /**< 已分配过槽位的节点数量 */
+    struct pc_master_node_slot nodes[PC_MASTER_MAX_TARGET_NODES]; /**< 节点分配表 */
 };
 
 /**
@@ -109,8 +127,11 @@ static uint16_t get_le16(const uint8_t *data)
  */
 static void print_usage(const char *prog)
 {
-    fprintf(stderr, "usage: %s <serial-dev> [baud]\n", prog);
-    fprintf(stderr, "example: %s /dev/ttyUSB0 1000000\n", prog);
+    fprintf(stderr, "usage: %s <serial-dev> [baud] [node-count]\n", prog);
+    fprintf(stderr, "example: %s /dev/ttyUSB0 1000000 2\n", prog);
+    fprintf(stderr, "node-count range: 1..%u, default: %u\n",
+            (unsigned)PC_MASTER_MAX_TARGET_NODES,
+            (unsigned)PC_MASTER_DEFAULT_NODE_COUNT);
 }
 
 /**
@@ -483,14 +504,84 @@ static uint16_t pc_mesh_next_seq(struct pc_mesh_transport *transport)
     return seq;
 }
 
+static uint8_t pc_master_node_addr_for_index(size_t index)
+{
+    size_t one_based = index + 1u;
+
+    return (uint8_t)((one_based << 4u) | one_based);
+}
+
+static struct pc_master_node_slot *pc_master_find_node_by_uid(
+    struct pc_mesh_transport *transport,
+    const uint8_t uid[MESH_UID_LEN])
+{
+    size_t i;
+
+    for (i = 0u; i < transport->assigned_node_count; ++i) {
+        if (transport->nodes[i].used && memcmp(transport->nodes[i].uid, uid, MESH_UID_LEN) == 0) {
+            return &transport->nodes[i];
+        }
+    }
+
+    return NULL;
+}
+
+static struct pc_master_node_slot *pc_master_find_node_by_addr(
+    struct pc_mesh_transport *transport,
+    uint8_t mesh_addr)
+{
+    size_t i;
+
+    for (i = 0u; i < transport->assigned_node_count; ++i) {
+        if (transport->nodes[i].used && transport->nodes[i].mesh_addr == mesh_addr) {
+            return &transport->nodes[i];
+        }
+    }
+
+    return NULL;
+}
+
+static struct pc_master_node_slot *pc_master_allocate_node(
+    struct pc_mesh_transport *transport,
+    const uint8_t uid[MESH_UID_LEN])
+{
+    struct pc_master_node_slot *slot;
+    size_t index;
+
+    if (transport->assigned_node_count >= transport->target_node_count ||
+        transport->assigned_node_count >= PC_MASTER_MAX_TARGET_NODES) {
+        return NULL;
+    }
+
+    index = transport->assigned_node_count;
+    slot = &transport->nodes[index];
+    memset(slot, 0, sizeof(*slot));
+    slot->used = true;
+    slot->confirmed = false;
+    memcpy(slot->uid, uid, MESH_UID_LEN);
+    slot->mesh_addr = pc_master_node_addr_for_index(index);
+    (void)snprintf(slot->name, sizeof(slot->name), PC_MASTER_NODE_NAME_FMT, index + 1u);
+
+    ++transport->assigned_node_count;
+    return slot;
+}
+
+static void pc_master_print_uid(const uint8_t uid[MESH_UID_LEN])
+{
+    size_t i;
+
+    for (i = 0u; i < MESH_UID_LEN; ++i) {
+        printf("%02x", uid[i]);
+    }
+}
+
 /**
  * @brief 处理第一次 REGISTER（节点尚未分配地址）
  *
  * 当从机刚启动发出 REGISTER（src=dst=UNASSIGNED）时，PC 主控：
  * 1. 从帧中解析节点的 UID
- * 2. 分配一个固定的 Mesh 地址（PC_MASTER_FIRST_NODE_ADDR = 0x11）
+ * 2. 按本次运行内的注册顺序分配或复用 Mesh 地址与节点名
  * 3. 构造并发送 ASSIGN 帧
- * 4. 将节点标记为 ONLINE 并建立双向 link
  *
  * @param[in] transport     指向 pc_mesh_transport 的指针
  * @param[in] register_frame 已解码的 REGISTER 帧视图
@@ -505,6 +596,7 @@ static int pc_mesh_assign_bootstrap_node(
 {
     struct mesh_register_payload register_payload;
     struct mesh_assign_payload assign_payload;
+    struct pc_master_node_slot *slot;
     uint8_t assign_frame[PC_MASTER_FRAME_CAP];
     size_t assign_len = 0u;
 
@@ -512,16 +604,21 @@ static int pc_mesh_assign_bootstrap_node(
         return -(int)MESH_ERR_BAD_FRAME;
     }
 
-    if (transport->assigned_addr == MESH_ADDR_UNASSIGNED) {
-        transport->assigned_addr = PC_MASTER_FIRST_NODE_ADDR;
+    slot = pc_master_find_node_by_uid(transport, register_payload.uid);
+    if (slot == NULL) {
+        slot = pc_master_allocate_node(transport, register_payload.uid);
+    }
+    if (slot == NULL) {
+        fprintf(stderr, "too many nodes registered; target node count is %zu\n", transport->target_node_count);
+        return -(int)MESH_ERR_BUSY;
     }
 
     memset(&assign_payload, 0, sizeof(assign_payload));
     memcpy(assign_payload.uid, register_payload.uid, sizeof(assign_payload.uid));
-    assign_payload.node_addr = transport->assigned_addr;
+    assign_payload.node_addr = slot->mesh_addr;
     assign_payload.lease_ms = PC_MASTER_ASSIGN_LEASE_MS;
     assign_payload.epoch = 1u;
-    (void)snprintf(assign_payload.node_name, sizeof(assign_payload.node_name), "%s", PC_MASTER_TARGET);
+    (void)snprintf(assign_payload.node_name, sizeof(assign_payload.node_name), "%s", slot->name);
 
     if (!mesh_build_assign(
             PC_MASTER_LOCAL_ADDR,
@@ -535,7 +632,9 @@ static int pc_mesh_assign_bootstrap_node(
         return -(int)MESH_ERR_BAD_FRAME;
     }
 
-    printf("[PC→mesh] ASSIGN %s addr=0x%02x (%zu bytes)\n", PC_MASTER_TARGET, assign_payload.node_addr, assign_len);
+    printf("[PC→mesh] ASSIGN %s addr=0x%02x uid=", slot->name, assign_payload.node_addr);
+    pc_master_print_uid(slot->uid);
+    printf(" (%zu bytes)\n", assign_len);
     return write_all(transport->fd, assign_frame, assign_len);
 }
 
@@ -553,6 +652,7 @@ static int pc_mesh_assign_bootstrap_node(
 static int pc_mesh_confirm_assigned_node(struct pc_mesh_transport *transport, uint8_t mesh_addr)
 {
     struct cluster *mesh_cluster = cluster_config_mesh_cluster();
+    struct pc_master_node_slot *slot;
     int rc;
 
     if (transport == NULL || mesh_addr == MESH_ADDR_UNASSIGNED) {
@@ -560,6 +660,11 @@ static int pc_mesh_confirm_assigned_node(struct pc_mesh_transport *transport, ui
     }
     if (mesh_cluster == NULL) {
         return -(int)MESH_ERR_INVALID_STATE;
+    }
+    slot = pc_master_find_node_by_addr(transport, mesh_addr);
+    if (slot == NULL) {
+        fprintf(stderr, "confirmed REGISTER from unknown addr=0x%02x\n", mesh_addr);
+        return -(int)MESH_ERR_BAD_FRAME;
     }
 
     rc = cluster_set_node_online(mesh_cluster, mesh_addr, true);
@@ -571,7 +676,8 @@ static int pc_mesh_confirm_assigned_node(struct pc_mesh_transport *transport, ui
         return rc;
     }
 
-    transport->assigned_addr = mesh_addr;
+    slot->confirmed = true;
+    printf("[mesh→PC] confirmed %s addr=0x%02x\n", slot->name, slot->mesh_addr);
     return 0;
 }
 
@@ -727,40 +833,70 @@ static int wait_for_target(struct mesh_host_runtime *runtime, const char *target
     return -(int)M9P_ERR_EAGAIN;
 }
 
-/**
- * @brief 执行 smoke test：attach + walk + open + read + clunk
- *
- * 依次：
- * 1. wait_for_target 等待节点被发现并挂载
- * 2. cluster_vfs_read_path("/mcu1/sys/health") 读取健康检查文件
- * 3. 验证响应内容为 "ok\n"，否则返回 EIO
- *
- * 成功时打印 "pc_master_emulator: ok" 并返回 0。
- *
- * @param[in] runtime 已初始化的 mesh_host_runtime
- * @return 0 = 测试通过；负数错误码
- */
-static int run_dynamic_sequence(struct mesh_host_runtime *runtime)
+static int read_health_path(const char *target)
 {
+    char health_path[64];
     uint8_t health[PC_MASTER_HEALTH_CAP];
     uint16_t len = sizeof(health);
     int rc;
 
-    rc = wait_for_target(runtime, PC_MASTER_TARGET);
+    rc = snprintf(health_path, sizeof(health_path), PC_MASTER_HEALTH_PATH_FMT, target);
+    if (rc < 0 || (size_t)rc >= sizeof(health_path)) {
+        fprintf(stderr, "health path too long for %s\n", target);
+        return -(int)M9P_ERR_EINVAL;
+    }
+
+    rc = cluster_vfs_read_path(health_path, health, &len);
     if (rc != 0) {
+        fprintf(stderr, "cluster_vfs_read_path(%s) failed: %d\n", health_path, rc);
         return rc;
     }
 
-    rc = cluster_vfs_read_path(PC_MASTER_HEALTH_PATH, health, &len);
-    if (rc != 0) {
-        fprintf(stderr, "cluster_vfs_read_path(%s) failed: %d\n", PC_MASTER_HEALTH_PATH, rc);
-        return rc;
-    }
-
-    printf("read %s: %.*s", PC_MASTER_HEALTH_PATH, (int)len, (const char *)health);
+    printf("read %s: %.*s", health_path, (int)len, (const char *)health);
     if (len != 3u || memcmp(health, "ok\n", 3u) != 0) {
-        fprintf(stderr, "unexpected %s payload\n", PC_MASTER_HEALTH_PATH);
+        fprintf(stderr, "unexpected %s payload\n", health_path);
         return -(int)M9P_ERR_EIO;
+    }
+
+    return 0;
+}
+
+/**
+ * @brief 执行 smoke test：attach + walk + open + read + clunk
+ *
+ * 依次：
+ * 1. wait_for_target 等待每个目标节点被发现并挂载
+ * 2. cluster_vfs_read_path("/mcuN/sys/health") 读取健康检查文件
+ * 3. 验证每个响应内容为 "ok\n"，否则返回 EIO
+ *
+ * 成功时打印 "pc_master_emulator: ok" 并返回 0。
+ *
+ * @param[in] runtime 已初始化的 mesh_host_runtime
+ * @param[in] target_node_count 本次要验证的目标节点数量
+ * @return 0 = 测试通过；负数错误码
+ */
+static int run_dynamic_sequence(struct mesh_host_runtime *runtime, size_t target_node_count)
+{
+    size_t i;
+
+    for (i = 0u; i < target_node_count; ++i) {
+        char target[MESH_MAX_NODE_NAME + 1u];
+        int rc = snprintf(target, sizeof(target), PC_MASTER_NODE_NAME_FMT, i + 1u);
+
+        if (rc < 0 || (size_t)rc >= sizeof(target)) {
+            fprintf(stderr, "target node name too long: index=%zu\n", i + 1u);
+            return -(int)M9P_ERR_EINVAL;
+        }
+
+        rc = wait_for_target(runtime, target);
+        if (rc != 0) {
+            return rc;
+        }
+
+        rc = read_health_path(target);
+        if (rc != 0) {
+            return rc;
+        }
     }
 
     puts("pc_master_emulator: ok");
@@ -772,9 +908,10 @@ static int run_dynamic_sequence(struct mesh_host_runtime *runtime)
  *
  * 解析命令行参数，打开串口，初始化 runtime，执行 smoke test，最后清理。
  *
- * 用法：pc_master_emulator <serial-dev> [baud]
+ * 用法：pc_master_emulator <serial-dev> [baud] [node-count]
  *   serial-dev：串口设备路径（必需）
  *   baud：波特率（可选，默认 1000000）
+ *   node-count：要等待并检查的节点数（可选，默认 2）
  *
  * @param argc 命令行参数个数
  * @param argv 参数数组
@@ -784,11 +921,12 @@ int main(int argc, char **argv)
 {
     const char *serial_path;
     unsigned long baud = PC_MASTER_DEFAULT_BAUD;
+    unsigned long node_count = PC_MASTER_DEFAULT_NODE_COUNT;
     struct mesh_host_runtime runtime;
     struct pc_mesh_transport transport;
     int rc;
 
-    if (argc < 2 || argc > 3) {
+    if (argc < 2 || argc > 4) {
         print_usage(argv[0]);
         return 2;
     }
@@ -803,18 +941,36 @@ int main(int argc, char **argv)
             return 2;
         }
     }
+    if (argc == 4) {
+        char *end = NULL;
 
+        node_count = strtoul(argv[3], &end, 10);
+        if (end == argv[3] || *end != '\0' ||
+            node_count == 0ul ||
+            node_count > (unsigned long)PC_MASTER_MAX_TARGET_NODES) {
+            fprintf(stderr,
+                    "invalid node-count: %s (range: 1..%u)\n",
+                    argv[3],
+                    (unsigned)PC_MASTER_MAX_TARGET_NODES);
+            return 2;
+        }
+    }
+
+    memset(&transport, 0, sizeof(transport));
     transport.fd = open_serial(serial_path, baud);
-    transport.assigned_addr = MESH_ADDR_UNASSIGNED;
     transport.next_seq = 1u;
+    transport.target_node_count = (size_t)node_count;
     if (transport.fd < 0) {
         return 1;
     }
 
-    printf("pc_master_emulator: %s @ %lu baud\n", serial_path, baud);
+    printf("pc_master_emulator: %s @ %lu baud, waiting for %lu node(s)\n",
+           serial_path,
+           baud,
+           node_count);
     rc = init_runtime(&runtime, &transport);
     if (rc == 0) {
-        rc = run_dynamic_sequence(&runtime);
+        rc = run_dynamic_sequence(&runtime, transport.target_node_count);
         mesh_host_runtime_deinit(&runtime);
     }
 
