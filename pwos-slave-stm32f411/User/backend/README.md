@@ -1,72 +1,69 @@
 # Backend
 
-`User/backend` 放置 Mini9P 从机侧的本地后端实现。当前 F411 运行时默认使用 `lfs_vfs`，把 littlefs 文件树直接通过 `m9p_server_ops` 暴露给 Mini9P；`local_vfs` 仍保留在仓库中，作为早期只读虚拟树和本地单测样例。
+`User/backend` 放置 Mini9P 从机侧的本地后端实现。架构分为两层：
 
-## 当前实现
+- **叶后端**：`lfs_vfs`、`dev_vfs`、`sys_vfs` 各自实现一棵虚拟文件树。
+- **路由层**：`node_vfs` 是统一入口，按路径前缀将请求分发到对应叶后端。
 
-`lfs_vfs` 是当前主用 backend。它通过 `m9p_server_ops` 接入 `mini9p_server`，在 `stat/open/read/write/clunk` 五个回调里把 Mini9P path-based 请求直接映射到 littlefs。F411 工程当前默认用 RAM-backed `lfs_port` 先打通链路；后续补上真实块设备后，可以切回持久化 backend。
-
-上电后默认会由 `fs_selftest` 预置一组便于联调的 littlefs 内容：
-
-```text
-/
-└── verify
-    ├── fs_selftest.txt
-    ├── debug
-    │   ├── backend.txt
-    │   ├── report.txt
-    │   └── run_count.txt
-    └── tree
-        ├── nested
-        │   └── config.txt
-        └── readme.txt
+```
+/ (node_vfs 根目录，列出 sys、dev、fs)
+├── /sys/*  -> sys_vfs  (sys、health、info)
+├── /dev/*  -> dev_vfs  (dev、led)
+└── /fs/*  -> lfs_vfs   (littlefs 根，/fs 前缀被剥离)
 ```
 
-## 文件说明
+`local_vfs` 是旧的只读虚拟树实现，当前不参与运行时构建，仅保留作参考。
 
-- `lfs_vfs.h`：littlefs backend 对外接口。
-- `lfs_vfs.c`：littlefs 到 Mini9P 的路径映射、目录流读取和读写回调实现。
-- `local_vfs.h/.c`：旧的只读虚拟树 backend，当前不参与 F411 运行时构建。
-- `test/`：legacy `local_vfs` 的 PC 侧最小单元测试。
+## 各模块说明
 
-## 使用方式
+| 文件 | 职责 | 虚拟节点 |
+|------|------|----------|
+| `lfs_vfs.h/.c` | littlefs 文件系统后端 | `/` 下的littlefs文件树 |
+| `dev_vfs.h/.c` | 设备虚拟文件系统 | `/dev`、`/dev/led` |
+| `sys_vfs.h/.c` | 系统信息虚拟文件系统 | `/sys`、`/sys/health`、`/sys/info` |
+| `node_vfs.h/.c` | 多后端路由分发器 | 根目录列出 sys/dev/fs |
+| `local_vfs.h/.c` | 旧只读虚拟树，不参与构建 | - |
 
-典型接入方式：
+## 典型接入方式
 
 ```c
-struct lfs_vfs vfs;
-struct lfs_vfs_config vfs_config;
-struct m9p_server_config server_config;
+struct lfs_vfs lfs;
+struct dev_vfs dev;
+struct sys_vfs sys;
+struct node_vfs node;
+struct node_vfs_config node_cfg = {
+    .sys_ops  = sys_vfs_ops(),
+    .sys_ctx  = &sys,
+    .dev_ops  = dev_vfs_ops(),
+    .dev_ctx  = &dev,
+    .lfs_ops  = lfs_vfs_ops(),
+    .lfs_ctx  = &lfs,
+};
+node_vfs_init(&node, &node_cfg);
 
-lfs_vfs_get_default_config(&vfs_config);
-lfs_vfs_init(&vfs, &vfs_config);
-
-m9p_server_get_default_config(&server_config);
-server_config.ops = lfs_vfs_ops();
-server_config.ops_ctx = &vfs;
-m9p_server_init(&server, &server_config);
+// 将 node_ops() 接入 mini9p_server
 ```
 
-## 测试
+三个后端统一使用 ops/ctx 模式，配置结构一致。
 
-```bash
-cmake -S pwos-slave/User/backend/test -B pwos-slave/User/backend/test/build
-cmake --build pwos-slave/User/backend/test/build
-pwos-slave/User/backend/test/build/local_vfs_test
+## dev_vfs 设备操作接口
+
+`dev_vfs` 通过 `struct dev_vfs_device_ops` 回调接入真实硬件：
+
+```c
+struct dev_vfs_device_ops {
+    int (*read_led)(void *ctx, char *out, uint16_t out_cap, uint16_t *out_len);
+    int (*write_led)(void *ctx, const uint8_t *data, uint16_t len, uint16_t *out_written);
+};
 ```
 
-legacy `local_vfs` 测试覆盖：
+## sys_vfs info_text
 
-- `stat("/")`
-- `stat("/sys")`
-- `stat("/sys/health")`
-- `open/read /sys/health`
-- 根目录和 `/sys` 的目录项读取
-- 不存在路径返回 `ENOENT`
-- 写入返回 `ENOTSUP`
+`sys_vfs` 的 `info_text` 字段可传入自定义文本，作为 `/sys/info` 的内容。
 
 ## 当前边界
 
-- Mini9P 仍保持 path-based `m9p_server_ops`，没有 create/remove 等更丰富的文件系统语义。
-- 当前 F411 默认 backend 是 RAM-backed littlefs，用于 bring-up 和链路验证，不提供掉电持久化。
-- 如需切到真实持久化介质，需要先补齐块设备驱动，再把 CMake 选项 `PWOS_LFS_BACKEND_RAM` 设为 `OFF`。
+- Mini9P 保持 path-based `m9p_server_ops`，无 create/remove 等语义。
+- 当前默认依赖 SDIO + littlefs，串口 Mini9P 模式需先初始化 SDIO。
+- `/sys/health` 只读，`/sys/info` 由 `info_text` 配置。
+- `/dev/led` 支持读写，回调由 `device_ops` 提供。
