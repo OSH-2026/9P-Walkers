@@ -79,11 +79,14 @@ static void FS_ReportBootStatus(void) {
   pass = (g_fs_report.init_status == 0) && (g_fs_report.mkdir_status == 0) &&
          (g_fs_report.write_status == 0) && (g_fs_report.stat_status == 0) &&
          (g_fs_report.read_status == 0) && (g_fs_report.dir_status == 0) &&
-         (g_fs_report.compare_status == 0);
+         (g_fs_report.compare_status == 0) &&
+         (g_fs_report.fixture_status == 0) &&
+         (g_fs_report.report_status == 0);
 
   if (snprintf(message, sizeof(message),
-               "boot status=%s init=%ld file_size=%lu read=%lu write=%lu",
+               "boot status=%s init=%ld fixture=%ld file_size=%lu read=%lu write=%lu",
                pass ? "PASS" : "FAIL", (long)g_fs_report.init_status,
+               (long)g_fs_report.fixture_status,
                (unsigned long)g_fs_report.file_size,
                (unsigned long)g_fs_report.bytes_read,
                (unsigned long)g_fs_report.bytes_written) > 0) {
@@ -124,9 +127,7 @@ int main(void) {
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART2_UART_Init();
-#ifndef PWOS_ENABLE_MINI9P_SERIAL
   MX_SDIO_SD_Init();
-#endif
   /* USER CODE BEGIN 2 */
 #ifdef PWOS_BOARD_ZGT6
   MX_GPIO_PF9_LED_Init();

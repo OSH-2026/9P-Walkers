@@ -14,6 +14,8 @@
 
 #include <stdint.h>
 
+#include "lfs.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -27,11 +29,16 @@ typedef struct {
     int32_t read_status;
     int32_t dir_status;
     int32_t compare_status;
+    int32_t fixture_status;
+    int32_t report_status;
     uint32_t file_size;
     uint32_t bytes_written;
     uint32_t bytes_read;
 } FS_SelfTestReport;
 
+int fs_selftest_run_on_fs(lfs_t *lfs,
+                          const char *backend_name,
+                          FS_SelfTestReport *report);
 int fs_selftest_run(FS_SelfTestReport *report);
 
 #ifdef __cplusplus

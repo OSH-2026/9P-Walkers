@@ -20,6 +20,7 @@ extern "C" {
 
 int lfs_port_init(void);
 lfs_t *lfs_port_fs(void);
+const char *lfs_port_backend_name(void);
 
 #ifdef __cplusplus
 }

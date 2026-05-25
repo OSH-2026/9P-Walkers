@@ -9,7 +9,7 @@
 mini9p_protocol  帧编解码、T* 解析、R* 构造
 mini9p_client    请求/响应式客户端，transport 由外层注入
 mini9p_server    会话状态、fid 生命周期、请求分发、Rerror
-mini9p_service   节点侧组装层，串起 local_vfs + server + mesh_node_runtime + mesh_uart_transport
+mini9p_service   节点侧组装层，串起 lfs_vfs + server + mesh_node_runtime + mesh_uart_transport
 ```
 
 `mini9p_server` 不直接访问 littlefs 或设备资源。它只通过 `m9p_server_ops` 调用 backend。
@@ -54,8 +54,8 @@ struct m9p_server server;
 struct m9p_server_config config;
 
 m9p_server_get_default_config(&config);
-config.ops = local_vfs_ops();
-config.ops_ctx = &local_vfs;
+config.ops = lfs_vfs_ops();
+config.ops_ctx = &lfs_vfs;
 m9p_server_init(&server, &config);
 ```
 
@@ -68,10 +68,12 @@ m9p_server_init(&server, &config);
 
 service 是 STM32 节点侧的薄组装层，内部持有静态实例：
 
-- `local_vfs`
+- `lfs_vfs`
 - `m9p_server`
 - `mesh_uart_transport`
 - `mesh_node_runtime`
+
+默认还会在 littlefs 中写入一组调试文件，便于通过 Mini9P 远程检查 `/verify` 树，而不往 mesh UART 混入文本日志。
 
 对外暴露三个入口：
 
@@ -84,8 +86,9 @@ int mini9p_service_poll_once(void);
 初始化顺序：
 
 ```text
-local_vfs_init
-  -> m9p_server_init(local_vfs_ops)
+lfs_vfs_init
+  -> fs_selftest_run_on_fs
+  -> m9p_server_init(lfs_vfs_ops)
   -> mesh_uart_transport_init
   -> mesh_node_runtime_init(send_frame/receive_frame + m9p_server_handle_frame)
   -> auto REGISTER
@@ -98,7 +101,7 @@ mini9p_service_poll_once
   -> mesh_node_runtime_poll_once
   -> mesh_uart_transport_receive_frame
   -> mesh_processer_process_frame
-  -> local T* -> m9p_server_handle_frame -> local_vfs
+  -> local T* -> m9p_server_handle_frame -> lfs_vfs
   -> local R* -> 封回 mesh MINI9P frame 发出
 ```
 
@@ -121,7 +124,7 @@ pwos-slave/User/mini9p/test/build/mini9p_server_test
 tools/pc_master_emulator/
 ```
 
-当前 smoke test 目标是读取 `/sys/health` 并得到 `ok\n`。
+当前 smoke test 目标是读取 `/verify/fs_selftest.txt`、`/verify/debug/report.txt` 和 `/verify/tree/nested/config.txt`，确认整条 UART -> mesh -> Mini9P -> lfs_vfs -> littlefs 链已经打通。
 
 ## 当前职责边界
 
