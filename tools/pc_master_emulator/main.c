@@ -30,9 +30,14 @@
 #define PC_MASTER_HEALTH_PATH "/mcu1/sys/health"
 #define PC_MASTER_DISCOVERY_POLLS 60
 #define PC_MASTER_HEALTH_CAP 64u
+#define PC_MASTER_LOCAL_ADDR 0x00u
+#define PC_MASTER_FIRST_NODE_ADDR 0x11u
+#define PC_MASTER_ASSIGN_LEASE_MS 60000u
 
 struct pc_mesh_transport {
     int fd;
+    uint8_t assigned_addr;
+    uint16_t next_seq;
 };
 
 static uint16_t get_le16(const uint8_t *data)
@@ -300,6 +305,92 @@ static int pc_mesh_send_frame(void *transport_ctx, uint8_t next_hop, const uint8
     return write_all(transport->fd, tx_data, tx_len);
 }
 
+static uint16_t pc_mesh_next_seq(struct pc_mesh_transport *transport)
+{
+    uint16_t seq = transport->next_seq;
+
+    ++transport->next_seq;
+    if (transport->next_seq == 0u) {
+        transport->next_seq = 1u;
+    }
+    return seq;
+}
+
+static int pc_mesh_assign_bootstrap_node(
+    struct pc_mesh_transport *transport,
+    const struct mesh_frame_view *register_frame,
+    uint8_t *rx_data,
+    size_t rx_cap,
+    size_t *rx_len)
+{
+    struct mesh_register_payload register_payload;
+    struct mesh_assign_payload assign_payload;
+    struct cluster *mesh_cluster;
+    uint8_t assign_frame[PC_MASTER_FRAME_CAP];
+    size_t assign_len = 0u;
+    int rc;
+
+    if (!mesh_parse_register(register_frame, &register_payload)) {
+        return -(int)MESH_ERR_BAD_FRAME;
+    }
+
+    if (transport->assigned_addr == MESH_ADDR_UNASSIGNED) {
+        transport->assigned_addr = PC_MASTER_FIRST_NODE_ADDR;
+    }
+
+    memset(&assign_payload, 0, sizeof(assign_payload));
+    memcpy(assign_payload.uid, register_payload.uid, sizeof(assign_payload.uid));
+    assign_payload.node_addr = transport->assigned_addr;
+    assign_payload.lease_ms = PC_MASTER_ASSIGN_LEASE_MS;
+    assign_payload.epoch = 1u;
+    (void)snprintf(assign_payload.node_name, sizeof(assign_payload.node_name), "%s", PC_MASTER_TARGET);
+
+    if (!mesh_build_assign(
+            PC_MASTER_LOCAL_ADDR,
+            MESH_ADDR_UNASSIGNED,
+            pc_mesh_next_seq(transport),
+            MESH_PROCESSER_DEFAULT_HOP,
+            &assign_payload,
+            assign_frame,
+            sizeof(assign_frame),
+            &assign_len)) {
+        return -(int)MESH_ERR_BAD_FRAME;
+    }
+
+    printf("[PC→mesh] ASSIGN %s addr=0x%02x (%zu bytes)\n", PC_MASTER_TARGET, assign_payload.node_addr, assign_len);
+    rc = write_all(transport->fd, assign_frame, assign_len);
+    if (rc != 0) {
+        return rc;
+    }
+
+    mesh_cluster = cluster_config_mesh_cluster();
+    if (mesh_cluster == NULL) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+    rc = cluster_set_node_online(mesh_cluster, transport->assigned_addr, true);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = cluster_add_link(mesh_cluster, PC_MASTER_LOCAL_ADDR, transport->assigned_addr, 1u, false);
+    if (rc != 0) {
+        return rc;
+    }
+
+    if (!mesh_build_register(
+            transport->assigned_addr,
+            register_frame->seq,
+            register_frame->hop,
+            &register_payload,
+            rx_data,
+            rx_cap,
+            rx_len)) {
+        return -(int)MESH_ERR_BAD_FRAME;
+    }
+
+    printf("mesh runtime: bootstrap REGISTER assigned src=0x%02x\n", transport->assigned_addr);
+    return 0;
+}
+
 static int pc_mesh_receive_frame(void *transport_ctx, uint8_t *rx_data, size_t rx_cap, size_t *rx_len)
 {
     struct pc_mesh_transport *transport = (struct pc_mesh_transport *)transport_ctx;
@@ -315,15 +406,25 @@ static int pc_mesh_receive_frame(void *transport_ctx, uint8_t *rx_data, size_t r
         return rc;
     }
 
-    if (mesh_decode_frame(rx_data, *rx_len, &view)) {
-        printf("[mesh→PC] %s src=0x%02x dst=0x%02x seq=%u payload=%u\n",
-               mesh_type_name(view.type),
-               view.src,
-               view.dst,
-               view.seq,
-               view.payload_len);
-    } else {
+    if (!mesh_decode_frame(rx_data, *rx_len, &view)) {
         fprintf(stderr, "[mesh→PC] failed to decode received mesh frame\n");
+        return 0;
+    }
+
+    printf("[mesh→PC] %s src=0x%02x dst=0x%02x seq=%u payload=%u\n",
+           mesh_type_name(view.type),
+           view.src,
+           view.dst,
+           view.seq,
+           view.payload_len);
+
+    if (view.type == MESH_TYPE_REGISTER &&
+        view.src == MESH_ADDR_UNASSIGNED &&
+        view.dst == MESH_ADDR_UNASSIGNED) {
+        rc = pc_mesh_assign_bootstrap_node(transport, &view, rx_data, rx_cap, rx_len);
+        if (rc != 0) {
+            return rc;
+        }
     }
 
     return 0;
@@ -433,6 +534,8 @@ int main(int argc, char **argv)
     }
 
     transport.fd = open_serial(serial_path, baud);
+    transport.assigned_addr = MESH_ADDR_UNASSIGNED;
+    transport.next_seq = 1u;
     if (transport.fd < 0) {
         return 1;
     }
