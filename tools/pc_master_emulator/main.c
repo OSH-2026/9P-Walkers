@@ -1,9 +1,36 @@
 /**
  * @file main.c
- * @brief PC 端动态 Mesh 主控模拟器
+ * @brief PC 端动态 Mesh 主控模拟器 — 硬件 smoke test 工具
  *
- * 通过串口接收 raw mesh 帧，驱动主机侧 mesh runtime 自动发现节点，
+ * 通过串口接收 Raw Mesh 帧，驱动主机侧 Mesh Runtime 完成节点发现，
  * 再通过 cluster_vfs 的 /mcuN/... 路径访问远端 Mini9P 文件。
+ *
+ * ## 典型工作流程
+ *
+ * 1. 打开串口，配置 8N1、无流控
+ * 2. 初始化 mesh_host_runtime（将串口 fd 作为 transport_ctx 传入）
+ * 3. 轮询 mesh_host_runtime_poll_once()，接收从机的 REGISTER 帧
+ * 4. 收到第一次 REGISTER（src=dst=UNASSIGNED）时回送 ASSIGN，给节点分配地址
+ * 5. 节点收到 ASSIGN 后会发送第二次 REGISTER（src=分配地址），确认上线
+ * 6. cluster_vfs_attach("mcu1") 挂载节点，然后 cluster_vfs_read_path 读文件
+ *
+ * ## 帧格式（Mesh over UART）
+ *
+ * | 字段    | 长度   | 说明                    |
+ * |---------|--------|------------------------|
+ * | magic   | 2 字节 | 'M' 'H' (0x4D 0x48)    |
+ * | length  | 2 字节 | little-endian，payload长度 |
+ * | payload | n 字节 | 具体帧类型              |
+ *
+ * 所有多字节整数均为 little-endian。
+ *
+ * ## 依赖模块
+ *
+ * - pwos-shared/mini9p/          Mini9P 协议编解码
+ * - pwos-shared/mesh/cluster/    集群节点管理与路由
+ * - pwos-shared/mesh/envelope/   Mesh 帧封装/解封装
+ * - pwos-shared/mesh/processer/ 帧处理器
+ * - pwos-master-esp32p4/vfs_bridge/ cluster_vfs 集群虚拟文件系统
  */
 
 #include "cluster_config.h"
@@ -23,34 +50,76 @@
 #include <termios.h>
 #include <unistd.h>
 
+/** 默认波特率：1 Mbps（STM32F411 USART1 默认值） */
 #define PC_MASTER_DEFAULT_BAUD 1000000u
+
+/** poll/recv 超时时间（毫秒） */
 #define PC_MASTER_TIMEOUT_MS 1000
+
+/** 单帧最大缓冲（含 6 字节帧头） */
 #define PC_MASTER_FRAME_CAP (MESH_FRAME_OVERHEAD + MESH_MAX_PAYLOAD_LEN)
+
+/** 目标节点名称，与从机固件中的节点名对应 */
 #define PC_MASTER_TARGET "mcu1"
+
+/** 健康检查路径，先 walk 再 open read */
 #define PC_MASTER_HEALTH_PATH "/mcu1/sys/health"
+
+/** 发现阶段最大轮询次数（60 × 1s = 60s 超时） */
 #define PC_MASTER_DISCOVERY_POLLS 60
+
+/** 健康检查响应最大字节数 */
 #define PC_MASTER_HEALTH_CAP 64u
+
+/** 本机（PC 主控）在 Mesh 网络中的虚拟地址 */
 #define PC_MASTER_LOCAL_ADDR 0x00u
+
+/** 分配给第一个从节点的 Mesh 地址 */
 #define PC_MASTER_FIRST_NODE_ADDR 0x11u
+
+/** 节点地址租约有效期（毫秒），到期前需续约 */
 #define PC_MASTER_ASSIGN_LEASE_MS 60000u
 
+/**
+ * @brief PC 端 Mesh 传输层实例
+ *
+ * 封装串口文件描述符、分配的节点地址以及帧序号计数器。
+ * 作为 transport_ctx 传给 mesh_host_runtime。
+ */
 struct pc_mesh_transport {
-    int fd;
-    uint8_t assigned_addr;
-    uint16_t next_seq;
+    int fd;                     /**< 串口文件描述符，< 0 表示未打开 */
+    uint8_t assigned_addr;      /**< 已分配给从节点的 Mesh 地址，未分配时为 MESH_ADDR_UNASSIGNED */
+    uint16_t next_seq;          /**< 下一个待发送帧的序列号（用于 Mesh 帧头） */
 };
 
+/**
+ * @brief 从字节数组读取 little-endian 16 位无符号整数
+ * @param[in] data 至少包含 2 字节的输入缓冲区
+ * @return 解析出的 16 位整数
+ */
 static uint16_t get_le16(const uint8_t *data)
 {
     return (uint16_t)data[0] | (uint16_t)((uint16_t)data[1] << 8);
 }
 
+/**
+ * @brief 打印命令行用法到 stderr
+ * @param[in] prog 程序名称（argv[0]）
+ */
 static void print_usage(const char *prog)
 {
     fprintf(stderr, "usage: %s <serial-dev> [baud]\n", prog);
     fprintf(stderr, "example: %s /dev/ttyUSB0 1000000\n", prog);
 }
 
+/**
+ * @brief 将数字波特率转换为 POSIX termios speed_t 常量
+ * @param[in] baud  目标波特率（如 115200、1000000）
+ * @param[out] out_speed 转换结果输出指针
+ * @return 转换成功返回 true；不支持的波特率返回 false，*out_speed 不修改
+ *
+ * @note 只支持常见的标准波特率，非标准值（如 500000）会返回 false。
+ */
 static bool baud_to_speed(unsigned long baud, speed_t *out_speed)
 {
     if (out_speed == NULL) {
@@ -89,6 +158,21 @@ static bool baud_to_speed(unsigned long baud, speed_t *out_speed)
     }
 }
 
+/**
+ * @brief 打开并配置串口为 8N1、无流控
+ *
+ * 配置细节：
+ * - 输入标志：禁用 IGNBRK、BRKINT、PARMRK、ISTRIP、INLCR、IGNCR、ICRNL、IXON
+ * - 输出标志：禁用 OPOST（原始输出）
+ * - 本地标志：禁用 ECHO、ECHONL、ICANON、ISIG、IEXTEN（原始模式）
+ * - 控制标志：CS8 | CLOCAL | CREAD，无奇偶校验，1 位停止位
+ * - 控制字符：VMIN=0, VTIME=0（立即返回，非阻塞）
+ * - 打开后执行 tcflush 丢弃已接收但未读取的数据
+ *
+ * @param[in] path  串口设备路径，如 "/dev/ttyUSB0"
+ * @param[in] baud  波特率（如 115200、1000000）
+ * @return 成功返回文件描述符（≥ 0）；失败返回 -1，错误码见 errno
+ */
 static int open_serial(const char *path, unsigned long baud)
 {
     struct termios tty;
@@ -138,6 +222,16 @@ static int open_serial(const char *path, unsigned long baud)
     return fd;
 }
 
+/**
+ * @brief 等待串口可读（POLLIN）或超时
+ *
+ * 内部使用 poll(2)，对 EINTR 自动重试。超时返回 -MESH_ERR_BUSY；
+ * poll 出错返回 -MESH_ERR_INVALID_STATE；检测到错误条件（断开、违规）
+ * 返回 -MESH_ERR_INVALID_STATE 并打印详细诊断信息。
+ *
+ * @param[in] fd 已打开的串口文件描述符
+ * @return 0 = 可读；-MESH_ERR_BUSY = 超时；-MESH_ERR_INVALID_STATE = 错误
+ */
 static int wait_readable(int fd)
 {
     struct pollfd pfd;
@@ -166,6 +260,17 @@ static int wait_readable(int fd)
     return 0;
 }
 
+/**
+ * @brief 从串口精确读取指定字节数
+ *
+ * 循环调用 read(2) 直到恰好读取 len 字节。遇到超时、EIO 或 EOF 提前返回。
+ * 对 EINTR 和 EAGAIN 自动重试。
+ *
+ * @param[in] fd    已打开的串口文件描述符
+ * @param[out] data 输出缓冲区（至少 len 字节）
+ * @param[in] len   要读取的字节数
+ * @return 0 = 成功；负数错误码（如 -MESH_ERR_BUSY、-MESH_ERR_INVALID_STATE）
+ */
 static int read_exact(int fd, uint8_t *data, size_t len)
 {
     size_t total = 0u;
@@ -196,6 +301,17 @@ static int read_exact(int fd, uint8_t *data, size_t len)
     return 0;
 }
 
+/**
+ * @brief 将数据完整写入串口并等待发送完成
+ *
+ * 循环调用 write(2) 直到所有数据写出，最后调用 tcdrain(2) 确保串口
+ * TX 寄存器清空（即数据已送出而非仅进入缓冲区）。
+ *
+ * @param[in] fd    已打开的串口文件描述符
+ * @param[in] data  要发送的数据缓冲区
+ * @param[in] len   数据长度（字节）
+ * @return 0 = 成功；负数错误码
+ */
 static int write_all(int fd, const uint8_t *data, size_t len)
 {
     size_t total = 0u;
@@ -224,6 +340,21 @@ static int write_all(int fd, const uint8_t *data, size_t len)
     return 0;
 }
 
+/**
+ * @brief 从串口读取一个完整的 Mesh 帧
+ *
+ * Mesh 帧格式：'M' 'H' + 2字节长度(little-endian) + payload。
+ * 先读 4 字节帧头（magic + length），再根据 length 读剩余部分。
+ * 长度字段描述 payload 长度，整个帧实际长度 = length + 6（帧头）。
+ *
+ * @param[in]  fd       已打开的串口文件描述符
+ * @param[out] frame    接收缓冲区（调用方保证足够大）
+ * @param[in]  cap      接收缓冲区总容量
+ * @param[out] out_len  成功时写入实际接收的帧总字节数
+ * @return 0 = 成功；负数错误码（-MESH_ERR_BAD_FRAME 表示帧格式错误）
+ *
+ * @note 如果帧长度字段 < 8（小于最小合法帧），判定为坏帧。
+ */
 static int pc_receive_mesh_frame(int fd, uint8_t *frame, size_t cap, size_t *out_len)
 {
     uint8_t header[4];
@@ -267,6 +398,11 @@ static int pc_receive_mesh_frame(int fd, uint8_t *frame, size_t cap, size_t *out
     return 0;
 }
 
+/**
+ * @brief 将 Mesh 帧类型数值转换为可读字符串
+ * @param[in] type MESH_TYPE_xxx 常量
+ * @return 静态字符串指针，永不为 NULL
+ */
 static const char *mesh_type_name(uint8_t type)
 {
     switch (type) {
@@ -293,6 +429,18 @@ static const char *mesh_type_name(uint8_t type)
     }
 }
 
+/**
+ * @brief 发送 Mesh 帧回调（transport send_frame 实现）
+ *
+ * 内部调用 write_all 将帧完整写出，然后 tcdrain 等待 TX 完成。
+ * 调用者保证 tx_data 是完整的 Mesh 帧（含帧头），tx_len 包含全部长度。
+ *
+ * @param[in] transport_ctx 指向 struct pc_mesh_transport 的指针
+ * @param[in] next_hop      下一跳 Mesh 地址（当前实现未使用，帧已完整编码）
+ * @param[in] tx_data       待发送的帧数据
+ * @param[in] tx_len        帧长度（字节）
+ * @return 0 = 成功；负数错误码
+ */
 static int pc_mesh_send_frame(void *transport_ctx, uint8_t next_hop, const uint8_t *tx_data, size_t tx_len)
 {
     struct pc_mesh_transport *transport = (struct pc_mesh_transport *)transport_ctx;
@@ -305,6 +453,15 @@ static int pc_mesh_send_frame(void *transport_ctx, uint8_t next_hop, const uint8
     return write_all(transport->fd, tx_data, tx_len);
 }
 
+/**
+ * @brief 生成并返回下一个 Mesh 帧序列号
+ *
+ * 序列号从 1 开始，每次调用后递增；绕回时强制从 1 重新开始以避免 0 值。
+ * 帧序号用于 mesh_host_runtime 的响应匹配。
+ *
+ * @param[in] transport 指向 pc_mesh_transport 的指针
+ * @return 下一个有效的帧序列号（永不返回 0）
+ */
 static uint16_t pc_mesh_next_seq(struct pc_mesh_transport *transport)
 {
     uint16_t seq = transport->next_seq;
@@ -316,19 +473,30 @@ static uint16_t pc_mesh_next_seq(struct pc_mesh_transport *transport)
     return seq;
 }
 
+/**
+ * @brief 处理第一次 REGISTER（节点尚未分配地址）
+ *
+ * 当从机刚启动发出 REGISTER（src=dst=UNASSIGNED）时，PC 主控：
+ * 1. 从帧中解析节点的 UID
+ * 2. 分配一个固定的 Mesh 地址（PC_MASTER_FIRST_NODE_ADDR = 0x11）
+ * 3. 构造并发送 ASSIGN 帧
+ * 4. 将节点标记为 ONLINE 并建立双向 link
+ *
+ * @param[in] transport     指向 pc_mesh_transport 的指针
+ * @param[in] register_frame 已解码的 REGISTER 帧视图
+ * @return 0 = 成功；负数错误码（-MESH_ERR_BAD_FRAME 表示帧解析失败）
+ *
+ * @note ASSIGN 发送后节点地址尚未最终确认，实际在线状态要等节点
+ *       收到 ASSIGN 后发送第二次 REGISTER（带分配到的地址）才算正式完成。
+ */
 static int pc_mesh_assign_bootstrap_node(
     struct pc_mesh_transport *transport,
-    const struct mesh_frame_view *register_frame,
-    uint8_t *rx_data,
-    size_t rx_cap,
-    size_t *rx_len)
+    const struct mesh_frame_view *register_frame)
 {
     struct mesh_register_payload register_payload;
     struct mesh_assign_payload assign_payload;
-    struct cluster *mesh_cluster;
     uint8_t assign_frame[PC_MASTER_FRAME_CAP];
     size_t assign_len = 0u;
-    int rc;
 
     if (!mesh_parse_register(register_frame, &register_payload)) {
         return -(int)MESH_ERR_BAD_FRAME;
@@ -358,39 +526,61 @@ static int pc_mesh_assign_bootstrap_node(
     }
 
     printf("[PC→mesh] ASSIGN %s addr=0x%02x (%zu bytes)\n", PC_MASTER_TARGET, assign_payload.node_addr, assign_len);
-    rc = write_all(transport->fd, assign_frame, assign_len);
-    if (rc != 0) {
-        return rc;
-    }
+    return write_all(transport->fd, assign_frame, assign_len);
+}
 
-    mesh_cluster = cluster_config_mesh_cluster();
+/**
+ * @brief 确认已分配地址的从节点正式上线
+ *
+ * 当收到第二次 REGISTER（src=已分配地址，dst=UNASSIGNED）时调用。
+ * 将节点标记为 ONLINE 并在本地节点与该从节点之间建立一条双向 link，
+ * 表示集群拓扑中存在直接相连的邻居。
+ *
+ * @param[in] transport  指向 pc_mesh_transport 的指针
+ * @param[in] mesh_addr  从节点被分配的 Mesh 地址（MESH_ADDR_UNASSIGNED 为非法）
+ * @return 0 = 成功；负数错误码
+ */
+static int pc_mesh_confirm_assigned_node(struct pc_mesh_transport *transport, uint8_t mesh_addr)
+{
+    struct cluster *mesh_cluster = cluster_config_mesh_cluster();
+    int rc;
+
+    if (transport == NULL || mesh_addr == MESH_ADDR_UNASSIGNED) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
     if (mesh_cluster == NULL) {
         return -(int)MESH_ERR_INVALID_STATE;
     }
-    rc = cluster_set_node_online(mesh_cluster, transport->assigned_addr, true);
+
+    rc = cluster_set_node_online(mesh_cluster, mesh_addr, true);
     if (rc != 0) {
         return rc;
     }
-    rc = cluster_add_link(mesh_cluster, PC_MASTER_LOCAL_ADDR, transport->assigned_addr, 1u, false);
+    rc = cluster_add_link(mesh_cluster, PC_MASTER_LOCAL_ADDR, mesh_addr, 1u, false);
     if (rc != 0) {
         return rc;
     }
 
-    if (!mesh_build_register(
-            transport->assigned_addr,
-            register_frame->seq,
-            register_frame->hop,
-            &register_payload,
-            rx_data,
-            rx_cap,
-            rx_len)) {
-        return -(int)MESH_ERR_BAD_FRAME;
-    }
-
-    printf("mesh runtime: bootstrap REGISTER assigned src=0x%02x\n", transport->assigned_addr);
+    transport->assigned_addr = mesh_addr;
     return 0;
 }
 
+/**
+ * @brief 接收并处理一个 Mesh 帧（transport receive_frame 实现）
+ *
+ * 从串口读取一个完整的 Mesh 帧，解码帧头并打印诊断信息。
+ * 对两次 REGISTER 有不同处理：
+ * - 第一次（src=dst=UNASSIGNED）：分配地址并回送 ASSIGN，返回 -MESH_ERR_BUSY
+ *   告知调用方本帧已被消费无需进一步处理。
+ * - 第二次（src≠UNASSIGNED, dst=UNASSIGNED）：确认节点上线，正常返回。
+ *
+ * @param[in]  transport_ctx 指向 pc_mesh_transport 的指针
+ * @param[out] rx_data      接收缓冲区
+ * @param[in]  rx_cap       接收缓冲区容量
+ * @param[out] rx_len       成功时写入实际接收帧字节数；消费帧时清零
+ * @return 0 = 成功，帧已放入 rx_data；-MESH_ERR_BUSY = 帧已消费（第一次 REGISTER）；
+ *         负数 = 错误
+ */
 static int pc_mesh_receive_frame(void *transport_ctx, uint8_t *rx_data, size_t rx_cap, size_t *rx_len)
 {
     struct pc_mesh_transport *transport = (struct pc_mesh_transport *)transport_ctx;
@@ -421,7 +611,17 @@ static int pc_mesh_receive_frame(void *transport_ctx, uint8_t *rx_data, size_t r
     if (view.type == MESH_TYPE_REGISTER &&
         view.src == MESH_ADDR_UNASSIGNED &&
         view.dst == MESH_ADDR_UNASSIGNED) {
-        rc = pc_mesh_assign_bootstrap_node(transport, &view, rx_data, rx_cap, rx_len);
+        rc = pc_mesh_assign_bootstrap_node(transport, &view);
+        if (rc != 0) {
+            return rc;
+        }
+        *rx_len = 0u;
+        return -(int)MESH_ERR_BUSY;
+    }
+    if (view.type == MESH_TYPE_REGISTER &&
+        view.src != MESH_ADDR_UNASSIGNED &&
+        view.dst == MESH_ADDR_UNASSIGNED) {
+        rc = pc_mesh_confirm_assigned_node(transport, view.src);
         if (rc != 0) {
             return rc;
         }
@@ -430,6 +630,20 @@ static int pc_mesh_receive_frame(void *transport_ctx, uint8_t *rx_data, size_t r
     return 0;
 }
 
+/**
+ * @brief 初始化 mesh_host_runtime
+ *
+ * 依次调用 cluster_config_init_mesh_host() 和 mesh_host_runtime_init()。
+ * 配置项：
+ * - mesh_cluster：从 cluster_config 获取
+ * - transport_ctx：本模块的 pc_mesh_transport 指针
+ * - send_frame：pc_mesh_send_frame
+ * - receive_frame：pc_mesh_receive_frame
+ *
+ * @param[out] runtime  待初始化的 mesh_host_runtime 结构
+ * @param[in] transport 已打开串口的 pc_mesh_transport
+ * @return 0 = 成功；负数错误码
+ */
 static int init_runtime(struct mesh_host_runtime *runtime, struct pc_mesh_transport *transport)
 {
     struct mesh_host_runtime_config config;
@@ -454,6 +668,24 @@ static int init_runtime(struct mesh_host_runtime *runtime, struct pc_mesh_transp
     return rc;
 }
 
+/**
+ * @brief 等待目标节点完成 Mesh 发现并被 cluster_vfs 挂载
+ *
+ * 轮询 mesh_host_runtime_poll_once() 接收 Mesh 帧，同时尝试
+ * cluster_vfs_attach(target)。
+ *
+ * 容忍的错误码：
+ * - ENOENT：节点尚未被发现，continue
+ * - EAGAIN： attach 未完成，continue
+ * - EBUSY： mesh 忙，continue
+ * - EIO： 传输错误（可能节点已上线但通信暂时异常），continue
+ *
+ * 其他错误码立即返回。
+ *
+ * @param[in] runtime mesh_host_runtime 指针
+ * @param[in] target 节点名称字符串（如 "mcu1"）
+ * @return 0 = 挂载成功；负数错误码（ENOTTY/EAGAIN 等）
+ */
 static int wait_for_target(struct mesh_host_runtime *runtime, const char *target)
 {
     int i;
@@ -466,7 +698,10 @@ static int wait_for_target(struct mesh_host_runtime *runtime, const char *target
             printf("mesh runtime: %s attached\n", target);
             return 0;
         }
-        if (rc != -(int)M9P_ERR_ENOENT && rc != -(int)M9P_ERR_EAGAIN && rc != -(int)M9P_ERR_EIO) {
+        if (rc != -(int)M9P_ERR_ENOENT &&
+            rc != -(int)M9P_ERR_EAGAIN &&
+            rc != -(int)M9P_ERR_EBUSY &&
+            rc != -(int)M9P_ERR_EIO) {
             fprintf(stderr, "cluster_vfs_attach(%s) failed: %d\n", target, rc);
             return rc;
         }
@@ -482,6 +717,19 @@ static int wait_for_target(struct mesh_host_runtime *runtime, const char *target
     return -(int)M9P_ERR_EAGAIN;
 }
 
+/**
+ * @brief 执行 smoke test：attach + walk + open + read + clunk
+ *
+ * 依次：
+ * 1. wait_for_target 等待节点被发现并挂载
+ * 2. cluster_vfs_read_path("/mcu1/sys/health") 读取健康检查文件
+ * 3. 验证响应内容为 "ok\n"，否则返回 EIO
+ *
+ * 成功时打印 "pc_master_emulator: ok" 并返回 0。
+ *
+ * @param[in] runtime 已初始化的 mesh_host_runtime
+ * @return 0 = 测试通过；负数错误码
+ */
 static int run_dynamic_sequence(struct mesh_host_runtime *runtime)
 {
     uint8_t health[PC_MASTER_HEALTH_CAP];
@@ -509,6 +757,19 @@ static int run_dynamic_sequence(struct mesh_host_runtime *runtime)
     return 0;
 }
 
+/**
+ * @brief 程序入口
+ *
+ * 解析命令行参数，打开串口，初始化 runtime，执行 smoke test，最后清理。
+ *
+ * 用法：pc_master_emulator <serial-dev> [baud]
+ *   serial-dev：串口设备路径（必需）
+ *   baud：波特率（可选，默认 1000000）
+ *
+ * @param argc 命令行参数个数
+ * @param argv 参数数组
+ * @return 0 = 成功；1 = 运行失败；2 = 参数错误
+ */
 int main(int argc, char **argv)
 {
     const char *serial_path;
