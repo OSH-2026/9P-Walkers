@@ -11,12 +11,10 @@
 #include "fs_selftest.h"
 #include "lfs_port.hpp"
 #include "lfs_vfs.h"
-#include "main.h"
 #include "mini9p_service.h"
 #include "node_vfs.h"
 #include "sys_vfs.h"
-
-extern UART_HandleTypeDef huart1;
+#include "usart.h"
 
 static struct lfs_vfs g_lfs_vfs;
 static struct sys_vfs g_sys_vfs;
@@ -81,7 +79,7 @@ int mini9p_board_service_init(void)
     backend.ops = node_vfs_ops();
     backend.ops_ctx = &g_node_vfs;
     backend.default_iounit = g_node_vfs.iounit;
-    backend.uart = &huart1;
+    backend.uart = &huart2;
     return mini9p_service_init_with_backend(&backend);
 }
 

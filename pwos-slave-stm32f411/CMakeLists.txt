@@ -30,6 +30,7 @@ message("Build type: " ${CMAKE_BUILD_TYPE})
 
 option(PWOS_LFS_BACKEND_RAM "Use RAM-backed littlefs for STM32F411 bring-up" ON)
 option(PWOS_ENABLE_LFS_SELFTEST "Populate littlefs debug fixtures on boot" ON)
+option(PWOS_SKIP_LFS_MOUNT "Skip lfs_vfs mount during Mini9P board bring-up" OFF)
 
 # Enable CMake support for ASM, C and C++ languages
 enable_language(C CXX ASM)
@@ -108,6 +109,9 @@ endif()
 
 if(PWOS_ENABLE_LFS_SELFTEST)
     target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE PWOS_ENABLE_LFS_SELFTEST)
+endif()
+if(PWOS_SKIP_LFS_MOUNT)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE PWOS_SKIP_LFS_MOUNT)
 endif()
 
 # Remove wrong libob.a library dependency when using cpp files
