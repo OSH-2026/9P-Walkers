@@ -47,6 +47,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -177,6 +178,7 @@ static int open_serial(const char *path, unsigned long baud)
 {
     struct termios tty;
     speed_t speed;
+    int modem_bits;
     int fd;
 
     if (!baud_to_speed(baud, &speed)) {
@@ -187,6 +189,13 @@ static int open_serial(const char *path, unsigned long baud)
     fd = open(path, O_RDWR | O_NOCTTY | O_SYNC);
     if (fd < 0) {
         perror("open serial");
+        return -1;
+    }
+
+    modem_bits = TIOCM_DTR | TIOCM_RTS;
+    if (ioctl(fd, TIOCMBIC, &modem_bits) != 0) {
+        perror("ioctl TIOCMBIC DTR/RTS");
+        close(fd);
         return -1;
     }
 
@@ -203,6 +212,7 @@ static int open_serial(const char *path, unsigned long baud)
 #ifdef CRTSCTS
     tty.c_cflag &= (tcflag_t) ~CRTSCTS;
 #endif
+    tty.c_cflag &= (tcflag_t) ~HUPCL;
     tty.c_cflag |= (tcflag_t)(CS8 | CLOCAL | CREAD);
     tty.c_cc[VMIN] = 0;
     tty.c_cc[VTIME] = 0;
