@@ -59,9 +59,6 @@ FS_SelfTestReport g_fs_report;
 #if defined(PWOS_ENABLE_MINI9P_SERIAL) && defined(PWOS_BOARD_ZGT6)
 static uint32_t g_led_last_toggle_ms;
 #endif
-#ifdef PWOS_ENABLE_MINI9P_SERIAL
-static uint32_t g_register_last_notify_ms;
-#endif
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -172,13 +169,6 @@ int main(void)
       }
     }
 #endif
-    {
-      uint32_t now = HAL_GetTick();
-      if ((uint32_t)(now - g_register_last_notify_ms) >= 1000U) {
-        (void)mini9p_service_notify_link_up();
-        g_register_last_notify_ms = now;
-      }
-    }
     (void)mini9p_service_poll_once();
 #else
     (void)vofa_firewater_send_fs_report(&g_fs_report, HAL_GetTick());
