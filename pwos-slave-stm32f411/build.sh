@@ -47,7 +47,7 @@ case "$ACTION" in
     flash-test)
         build_firmware
         flash_firmware
-        printf 'Set BOOT0=0, reset the board, then press Enter to run pc_master_emulator...'
+        printf 'Set BOOT0=0, then press Enter to start pc_master_emulator. Reset the board after it starts waiting...'
         read -r _
         run_pc_master_emulator
         ;;

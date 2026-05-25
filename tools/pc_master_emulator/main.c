@@ -458,7 +458,7 @@ static int wait_for_target(struct mesh_host_runtime *runtime, const char *target
 {
     int i;
 
-    printf("mesh runtime: waiting for %s\n", target);
+    printf("mesh runtime: waiting for %s; reset the slave now if it already booted\n", target);
     for (i = 0; i < PC_MASTER_DISCOVERY_POLLS; ++i) {
         int rc = cluster_vfs_attach(target);
 
