@@ -11,7 +11,6 @@
 #include "mini9p_server.h"
 #include "mesh_node_runtime.h"
 #include "mesh_uart_transport.h"
-#include "usart.h"
 
 /** 串口联调阶段的 RX/TX 帧缓冲区大小。 */
 #define MINI9P_SERVICE_FRAME_CAP M9P_SERVER_DEFAULT_MSIZE
@@ -76,7 +75,7 @@ int mini9p_service_init_with_backend(const struct mini9p_service_backend *backen
     struct mesh_node_runtime_config runtime_config;
     int rc;
 
-    if (backend == NULL || backend->ops == NULL) {
+    if (backend == NULL || backend->ops == NULL || backend->uart == NULL) {
         return -(int)MESH_ERR_INVALID_STATE;
     }
 
@@ -91,7 +90,7 @@ int mini9p_service_init_with_backend(const struct mini9p_service_backend *backen
     }
 
     mesh_uart_transport_get_default_config(&uart_config);
-    uart_config.uart = &huart2;
+    uart_config.uart = backend->uart;
     uart_config.io_timeout_ms = MESH_UART_TRANSPORT_DEFAULT_TIMEOUT_MS;
     uart_config.flush_before_receive = false;
     rc = mesh_uart_transport_init(&g_mesh_uart_transport, &uart_config);

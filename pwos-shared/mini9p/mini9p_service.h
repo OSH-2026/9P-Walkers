@@ -12,6 +12,7 @@
 #include <stdint.h>
 
 #include "mini9p_server.h"
+#include "mesh_uart_transport.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -27,6 +28,7 @@ struct mini9p_service_backend {
     const struct m9p_server_ops *ops; /**< Mini9P server 调用的 backend 回调表。 */
     void *ops_ctx;                    /**< 传给每个 backend 回调的上下文指针。 */
     uint16_t default_iounit;          /**< backend 默认单次 I/O 大小；0 表示使用 server 默认值。 */
+    UART_HandleTypeDef *uart;         /**< 当前 service 绑定的 STM32 UART 句柄。 */
 };
 
 /**

@@ -38,7 +38,8 @@ static int request_with_frame(
             client->rx_buffer,
             sizeof(client->rx_buffer),
             &rx_len);
-        if (rc == -(int)M9P_ERR_EAGAIN && (attempt + 1u) < M9P_CLIENT_TIMEOUT_RETRY_ATTEMPTS) {
+        if ((rc == -(int)M9P_ERR_EAGAIN || rc == -(int)M9P_ERR_EBUSY) &&
+            (attempt + 1u) < M9P_CLIENT_TIMEOUT_RETRY_ATTEMPTS) {
             continue;
         }
         if (rc != 0) {
