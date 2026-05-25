@@ -7,10 +7,21 @@
 
 #include <stdbool.h>
 
+#ifndef USE_HAL_DRIVER
+#define USE_HAL_DRIVER
+#endif
+
+#ifndef STM32F411xE
+#define STM32F411xE
+#endif
+
+#include "fs_selftest.h"
+#include "lfs_port.hpp"
+#include "lfs_vfs.h"
+#include "../../Core/Inc/main.h"
 #include "mesh_node_runtime.h"
 #include "mesh_uart_transport.h"
 
-#include "local_vfs.h"
 #include "mini9p_server.h"
 
 /** 串口联调阶段的 RX/TX 帧缓冲区大小。 */
@@ -18,10 +29,11 @@
 #define MINI9P_SERVICE_REGISTER_CAPABILITY_BITS 0x0001u
 #define MINI9P_SERVICE_REGISTER_PORT_BITMAP 0x01u
 
-static struct local_vfs g_local_vfs;
+static struct lfs_vfs g_lfs_vfs;
 static struct m9p_server g_mini9p_server;
 static struct mesh_uart_transport g_mesh_uart_transport;
 static struct mesh_node_runtime g_mesh_node_runtime;
+static FS_SelfTestReport g_fs_selftest_report;
 static bool g_mini9p_service_initialized;
 
 extern UART_HandleTypeDef huart1;
@@ -74,23 +86,30 @@ static int mini9p_service_receive_frame(
 
 int mini9p_service_init(void)
 {
-    struct local_vfs_config vfs_config;
+    struct lfs_vfs_config vfs_config;
     struct m9p_server_config server_config;
     struct mesh_uart_transport_config uart_config;
     struct mesh_node_runtime_config runtime_config;
     int rc;
 
-    local_vfs_get_default_config(&vfs_config);
-    rc = local_vfs_init(&g_local_vfs, &vfs_config);
+    lfs_vfs_get_default_config(&vfs_config);
+    rc = lfs_vfs_init(&g_lfs_vfs, &vfs_config);
     if (rc < 0) {
         return rc;
     }
 
+#ifdef PWOS_ENABLE_LFS_SELFTEST
+    rc = fs_selftest_run_on_fs(lfs_vfs_fs(&g_lfs_vfs), lfs_port_backend_name(), &g_fs_selftest_report);
+    if (rc < 0) {
+        return rc;
+    }
+#endif
+
     m9p_server_get_default_config(&server_config);
-    server_config.ops = local_vfs_ops();
-    server_config.ops_ctx = &g_local_vfs;
+    server_config.ops = lfs_vfs_ops();
+    server_config.ops_ctx = &g_lfs_vfs;
     server_config.max_msize = MINI9P_SERVICE_FRAME_CAP;
-    server_config.default_iounit = g_local_vfs.iounit;
+    server_config.default_iounit = g_lfs_vfs.iounit;
     rc = m9p_server_init(&g_mini9p_server, &server_config);
     if (rc < 0) {
         return rc;
