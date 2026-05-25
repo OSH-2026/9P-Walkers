@@ -3,6 +3,33 @@
 #include <stdio.h>
 #include <string.h>
 
+#define CLUSTER_VFS_MAX_NAME 16
+#define CLUSTER_VFS_UNASSIGNED_ADDR MESH_ADDR_UNASSIGNED
+
+enum cluster_vfs_m9p_state {
+    CLUSTER_VFS_M9P_EMPTY = 0,
+    CLUSTER_VFS_M9P_NEW,
+    CLUSTER_VFS_M9P_ATTACHED,
+};
+
+struct cluster_vfs_route {
+    char target[CLUSTER_VFS_MAX_NAME];
+    struct m9p_client *client;
+    uint8_t mesh_addr;
+    uint8_t hw_uid[CLUSTER_VFS_UID_LEN];
+    bool has_hw_uid;
+    enum cluster_vfs_m9p_state m9p_state;
+};
+
+struct cluster_vfs_file {
+    bool used;
+    struct cluster_vfs_route *route;
+    uint16_t remote_fid;
+    struct m9p_qid qid;
+    uint8_t mode;
+    uint32_t offset;
+};
+
 static struct cluster_vfs_route g_routes[CLUSTER_VFS_MAX_ROUTES];
 static struct cluster_vfs_file g_open_files[CLUSTER_VFS_MAX_OPEN];
 static struct cluster *g_mesh_cluster;
@@ -383,7 +410,7 @@ int cluster_vfs_discover_node(
     return 0;
 }
 
-int cluster_vfs_mark_node_offline(uint8_t mesh_addr)
+static int cluster_vfs_mark_node_offline(uint8_t mesh_addr)
 {
     struct cluster_vfs_route *route;
 
@@ -584,12 +611,11 @@ int cluster_vfs_open(const char *path, uint8_t mode, uint16_t *out_fd)
         return ret;
     }
     file->used = true;
-    file->local_fd = (uint16_t)(file - g_open_files); // 计算 local_fd，即 open_files 数组中的索引
     file->route = route;
     file->qid = result.qid;
     file->mode = mode;
     file->offset = 0;
-    *out_fd = file->local_fd; // 返回文件描述符，即 open_files 数组中的索引
+    *out_fd = (uint16_t)(file - g_open_files);
     return 0;
 }
 

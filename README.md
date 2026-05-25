@@ -42,8 +42,10 @@ echo 100 > /mcu2/motor/speed
 Shell / Lua / WebShell
   -> cluster_vfs
   -> mini9p_client
-  -> transport 或 mesh peer_link
-  -> Mini9P frame link
+  -> mesh_host_runtime
+  -> mesh MINI9P envelope
+  -> mesh_uart_transport
+  -> mesh_node_runtime / mesh_processer
   -> mini9p_server
   -> local_vfs backend / 文件树 / 外设回调
 ```
@@ -55,7 +57,7 @@ Shell / Lua / WebShell
 | `pwos-master-esp32p4/` | ESP32-P4 主控工程，包含 Shell、Lua、Web Shell、VFS bridge、transport 组装 |
 | `pwos-slave/` | STM32F407 风格从机工程，包含 HAL、littleFS、local VFS、Mini9P service 集成 |
 | `pwos-slave-stm32f411/` | STM32F411 从机变体，包含 Mini9P 串口联调 preset |
-| `pwos-shared/mini9p/` | 主从共享 Mini9P 协议、client、server、peer_link、service 代码 |
+| `pwos-shared/mini9p/` | 主从共享 Mini9P 协议、client、server、service 代码 |
 | `pwos-shared/mesh/` | 共享 mesh envelope、cluster、processer、node_runtime、transport 代码 |
 | `tools/pc_master_emulator/` | PC 端 Mini9P 主控模拟器，用于硬件串口 smoke test |
 | `docs/` | 展示、报告和图片资料 |
@@ -69,8 +71,7 @@ Mini9P 是本项目使用的轻量级 9P 变体。帧格式包括 magic `0x39 0x
 - `mini9p_protocol`：帧编解码、请求解析、响应构造和 CRC 校验。
 - `mini9p_client`：主控侧 attach/walk/open/read/write/stat/clunk 封装。
 - `mini9p_server`：从机侧 session、fid 表、权限检查和 backend 分发。
-- `mini9p_peer_link`：在双向链路上区分本端等待的 `R*` 响应和对端主动发来的 `T*` 请求。
-- `mini9p_service`：从机上板联调组装层，连接 `local_vfs`、server、peer_link 和 UART buffer。
+- `mini9p_service`：从机上板联调组装层，连接 `local_vfs`、server、`mesh_node_runtime` 和 `mesh_uart_transport`。
 
 协议细节见：
 

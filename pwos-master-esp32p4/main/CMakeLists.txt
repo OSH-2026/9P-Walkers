@@ -22,7 +22,6 @@ idf_component_register(
         "lua_vfs_bindings.c"
         "lua_port.c"
         "${PWOS_SHARED_MINI9P_DIR}/mini9p_client.c"
-        "${PWOS_SHARED_MINI9P_DIR}/mini9p_peer_link.c"
         "${PWOS_SHARED_MINI9P_DIR}/mini9p_protocol.c"
         "${PWOS_SHARED_MESH_ENVELOPE_DIR}/mesh_protocal.c"
         "${PWOS_SHARED_MESH_PROCESSER_DIR}/mesh_processer.c"

@@ -15,40 +15,10 @@ cluster_vfs 是轻量级集群 VFS 桥接层，不是完整文件系统；
 
 /* 当前节点最多维护的静态路由数量。 */
 #define CLUSTER_VFS_MAX_ROUTES 8
-/* 目标节点名和下一跳节点名的最大长度，包含字符串结尾的 NUL。 */
-#define CLUSTER_VFS_MAX_NAME   16
 /* cluster_vfs 同时打开的文件/目录数量上限。 */
 #define CLUSTER_VFS_MAX_OPEN 16
 /* VFS 侧记录的唯一硬件序列号长度，直接复用 mesh REGISTER 的 UID 长度。 */
 #define CLUSTER_VFS_UID_LEN MESH_UID_LEN
-/* VFS 中“当前无 mesh 地址绑定”的占位值。 */
-#define CLUSTER_VFS_UNASSIGNED_ADDR MESH_ADDR_UNASSIGNED
-
-/* VFS 内部只保存 Mini9P 会话状态；节点可达性从 mesh cluster 派生。 */
-enum cluster_vfs_m9p_state {
-    CLUSTER_VFS_M9P_EMPTY = 0,
-    CLUSTER_VFS_M9P_NEW,
-    CLUSTER_VFS_M9P_ATTACHED,
-};
-
-struct cluster_vfs_route {
-    char target[CLUSTER_VFS_MAX_NAME];     /* 最终目标节点，如 "mcu3" */
-    struct m9p_client *client;             /* 以该节点为最终目标的 Mini9P client。 */
-    uint8_t mesh_addr;                     /* 当前绑定的 mesh 地址；未绑定时为 0xFF。 */
-    uint8_t hw_uid[CLUSTER_VFS_UID_LEN];   /* 来自 mesh REGISTER 的唯一硬件序列号。 */
-    bool has_hw_uid;                       /* 是否已经收到并保存硬件序列号。 */
-    enum cluster_vfs_m9p_state m9p_state;
-};
-
-struct cluster_vfs_file {
-    bool used;
-    uint16_t local_fd;
-    struct cluster_vfs_route *route;
-    uint16_t remote_fid;
-    struct m9p_qid qid;
-    uint8_t mode;
-    uint32_t offset;
-};
 
 /**
  * @brief 初始化 cluster_vfs 的全局静态状态。
@@ -93,20 +63,6 @@ int cluster_vfs_discover_node(
     struct m9p_client *client,
     const char **out_target,
     bool *out_reused_mapping);
-
-/**
- * @brief 按 mesh 地址把节点标记为离线，并把 9P 状态回退到 NEW。
- *
- * 该接口用于“节点离线/退出”场景：
- * - 保留名字 <-> UID 的历史映射；
- * - 清空当前 mesh 地址绑定；
- * - 把 9P 会话状态回退到未 attach；
- * - 使后续同 UID 重连时可以复用旧名字。
- *
- * @param mesh_addr 当前离线节点的 mesh 地址。
- * @return 0 表示成功；负错误码表示未找到该地址对应的已知节点。
- */
-int cluster_vfs_mark_node_offline(uint8_t mesh_addr);
 
 /**
  * @brief 结合绑定的 mesh cluster 重新检查某个节点是否仍可达。

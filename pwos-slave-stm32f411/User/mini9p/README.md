@@ -1,14 +1,14 @@
 # Mini9P Server 与 Service
 
-`User/mini9p` 放置 STM32 从机侧 Mini9P 协议、server 状态机和 UART 组装层。
+`User/mini9p` 放置 STM32F411 节点侧 Mini9P 协议、server 状态机和 mesh 组装层。
 
 ## 模块边界
 
 ```text
 mini9p_protocol  帧编解码、T* 解析、R* 构造
 mini9p_server    会话状态、fid 生命周期、请求分发、Rerror
-uart_transport   基于 USART 收发完整 Mini9P frame
-mini9p_service   上板组装层，串起 local_vfs + server + UART
+mesh_uart_transport  基于 USART 收发完整 mesh frame
+mini9p_service       上板组装层，串起 local_vfs + server + mesh_node_runtime + UART
 ```
 
 `mini9p_server` 不直接访问 littlefs 或设备资源。它只通过 `m9p_server_ops` 调用 backend。
@@ -63,13 +63,14 @@ service 是 STM32 上板联调用的薄组装层，内部持有静态实例：
 
 - `local_vfs`
 - `m9p_server`
-- RX/TX frame buffer
-- 默认 UART transport
+- `mesh_uart_transport`
+- `mesh_node_runtime`
 
 对外只暴露两个入口：
 
 ```c
 int mini9p_service_init(void);
+int mini9p_service_notify_link_up(void);
 int mini9p_service_poll_once(void);
 ```
 
@@ -78,16 +79,18 @@ int mini9p_service_poll_once(void);
 ```text
 local_vfs_init
   -> m9p_server_init(local_vfs_ops)
-  -> m9p_uart_transport_init_default
+  -> mesh_uart_transport_init
+  -> mesh_node_runtime_init(send_frame/receive_frame + m9p_server_handle_frame)
+  -> auto REGISTER
 ```
 
 轮询流程：
 
 ```text
 mini9p_service_poll_once
-  -> m9p_uart_transport_serve_once
-  -> m9p_server_handle_frame
-  -> local_vfs
+  -> mesh_node_runtime_poll_once
+  -> mesh_processer_process_frame
+  -> local T* -> m9p_server_handle_frame -> local_vfs
 ```
 
 在 `PWOS_ENABLE_MINI9P_SERIAL` 开启时，`Core/Src/main.c` 使用该 service 作为主循环入口。此模式下 USART2 应由 Mini9P 二进制帧独占，不混入 VOFA 或其他文本日志。

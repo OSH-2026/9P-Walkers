@@ -452,7 +452,7 @@
       </div>
       <div class="title-block">
         <h2>mesh : 它是 9P client 的 transport 适配层。</h2>
-        <p class="lead">这条边界解释了为什么当前 <code>m9p_client_init(..., m9p_peer_link_request, ...)</code> 可以替换为未来的新链路层 transport。新模块命名待定，候选包括 <code>cluster_link_transport</code> 或 <code>cluster_mesh_transport</code>。</p>
+        <p class="lead">当前主机侧已经通过 <code>mesh_host_runtime</code> 给 <code>m9p_client</code> 注入 mesh transport。协议层仍只依赖 transport 回调，因此未来如需替换链路实现，不需要改 Mini9P 语义本身。</p>
       </div>
       <div class="architecture">
         <div class="layer">
@@ -467,8 +467,8 @@
           <div class="layer-title mini9p">mini9P</div>
           <div class="layer-body">
             <div class="box"><strong>m9p_client</strong>构造 <code>Twalk/Topen/Tread</code></div>
-            <div class="box"><strong>当前 transport</strong><code>m9p_peer_link_request</code>，用于直连 mini9P 单跳分发</div>
-            <div class="box"><strong>未来 transport</strong>暂定为 <code>cluster_link_transport</code> / <code>cluster_mesh_transport</code></div>
+            <div class="box"><strong>当前 transport</strong><code>mesh_host_runtime_client_request</code>，用于把 mini9P 请求封装进 mesh 数据面</div>
+            <div class="box"><strong>transport 抽象</strong>后续仍可替换为其他链路实现，但接口保持为 <code>m9p_transport_fn</code></div>
           </div>
         </div>
         <div class="layer">
@@ -548,7 +548,7 @@
             <div class="node master"><h3>路径转换</h3><p><code>/mcu2/dev/temp</code> → <code>/dev/temp</code></p></div>
             <div class="node mini9p"><h3>m9p_client</h3><p>生成 <code>Twalk/Topen/Tread</code></p></div>
             <div class="node mesh"><h3>transport ctx</h3><p>目标地址 <code>dst=0x07</code></p></div>
-            <div class="node mesh"><h3>新链路 transport</h3><p>暂定命名，进入网络投递层</p></div>
+            <div class="node mesh"><h3>mesh runtime transport</h3><p>封装 envelope 并进入网络投递层</p></div>
           </div>
         </div>
         <div class="flow-row">
@@ -671,19 +671,19 @@
       </div>
 
       <div class="title-block">
-        <h2>现在的直连 client，未来只是换 transport 函数和 ctx。</h2>
-        <p class="lead">端口信息不在函数名里，而在 <code>transport_ctx</code> 里；新链路层 transport 的 ctx 包含 <code>cluster manager</code> 和目标节点地址。命名待定，但不要复用 <code>mini9p_peer_link</code>。</p>
+        <h2>现在已经切到 mesh transport，client 仍只依赖 transport 函数和 ctx。</h2>
+        <p class="lead">端口信息不在函数名里，而在 <code>transport_ctx</code> 里；当前 ctx 由 <code>mesh_host_runtime</code> 维护，包含目标槽位、运行时状态和 cluster 派生出的下一跳信息。</p>
       </div>
 
       <div class="card-grid four">
         <div class="card mini9p">
-          <h3>现在：直连单跳</h3>
-          <p><code>m9p_client_init(&client, m9p_peer_link_request, &peer_link)</code></p>
+          <h3>当前：mesh transport</h3>
+          <p><code>client->transport = mesh_host_runtime_client_request</code></p>
         </div>
         <div class="card mesh">
-          <h3>未来：mesh 传输</h3>
-          <p><code>m9p_client_init(&client, cluster_link_transport, &link_ctx)</code></p>
-          <p style="color:var(--muted); font-size:13px;">函数名暂定，也可能叫 <code>cluster_mesh_transport</code>。</p>
+          <h3>可替换的 transport</h3>
+          <p><code>m9p_client_init(&client, custom_transport, &transport_ctx)</code></p>
+          <p style="color:var(--muted); font-size:13px;">只要满足 <code>m9p_transport_fn</code> 签名，就可以替换底层链路实现。</p>
         </div>
         <div class="card cluster">
           <h3>cluster manager</h3>
@@ -706,7 +706,7 @@
             <li>节点 UID、节点名、节点地址三者分离，用户路径只暴露节点名。</li>
             <li><code>cluster_vfs</code> 迁移为 VFS 挂载表，只维护文件访问会话状态。</li>
             <li>主机侧管理沿用原架构 <code>cluster/</code> 命名。</li>
-            <li><code>mini9p_peer_link</code> 保留为直连 mini9P 单跳 T/R 分发器，不作为新 mesh/cluster 链路层命名。</li>
+            <li>旧的 <code>mini9p_peer_link</code> 已移除；当前活跃链路层实现是主机侧 <code>mesh_host_runtime</code> 与节点侧 <code>mesh_node_runtime</code>。</li>
           </ul>
         </div>
         <div>

@@ -135,5 +135,5 @@ gcc -std=c11 -Wall -Wextra -DESP_PLATFORM \
 ## 当前边界
 - 物理 UART 与 raw frame API 现在按全双工资源模型工作。
 - `request` / `serve_once` 仍是单事务 helper，不支持 multi-tag 并发。
-- 如果要做到“本端发起请求的同时，还能可靠承接对端主动请求并按 tag 分发”，应在本模块之上接 `pwos-shared/mini9p/mini9p_peer_link.{c,h}`，而不是继续堆叠 raw `request` / `serve_once`。
-- 当前 master 运行时的默认节点客户端已经在 `vfs_bridge/cluster_config.c` 中切到 `m9p_peer_link_request`；但因为 master 侧暂未挂本地 request_handler，对端主动发来的 T* 目前会收到 `Rerror(ENOTSUP)`，不会被误判为本端响应。
+- 如果要做到“本端发起请求的同时，还能继续承接对端主动上报/请求”，当前工程不再使用独立 peer_link，而是把本模块放在 `mesh_uart_transport` 之下，由主机侧 `mesh_host_runtime` 或节点侧 `mesh_node_runtime` 负责继续收帧与分流。
+- 当前 master 运行时的默认节点客户端已切到 `mesh_host_runtime_client_request()`：它会先把 Mini9P 帧封成 mesh 数据面，再在等待响应时继续处理 REGISTER、LINK_STATE、ROUTE_UPDATE 等途中帧。
