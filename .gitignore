@@ -11,3 +11,4 @@ pwos-slave/.vscode/
 venv/
 # Logs and temporary files
 tmp*.md
+ref/

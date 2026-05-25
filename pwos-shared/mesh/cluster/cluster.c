@@ -489,6 +489,9 @@ int cluster_set_node_online(struct cluster *cluster, uint8_t addr, bool online)
     if (cluster == NULL || !cluster->initialized) {
         return -(int)MESH_ERR_INVALID_STATE;
     }
+    if (addr == CLUSTER_INVALID_ADDR) {
+        return 0;
+    }
 
     node = ensure_node(cluster, addr);
     if (node == NULL) {

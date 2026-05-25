@@ -407,6 +407,10 @@ static int mesh_host_runtime_sync_registered_node(
     struct m9p_client *client = NULL;
     int rc;
 
+    if (mesh_addr == MESH_ADDR_UNASSIGNED) {
+        return 0;
+    }
+
     rc = mesh_host_runtime_prepare_registered_client(runtime, mesh_addr, uid, &client);
     if (rc != 0) {
         return rc;

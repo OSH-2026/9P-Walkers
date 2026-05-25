@@ -19,49 +19,55 @@ static int request_with_frame(
     uint8_t expected_type,
     struct m9p_frame_view *out_frame)
 {
-    size_t rx_len = 0u;
     struct m9p_frame_view frame;
     struct m9p_error error;
-    int rc;
+    uint8_t attempt;
 
     if (client == NULL || client->transport == NULL || out_frame == NULL) {
         return -(int)M9P_ERR_ENOTSUP;
     }
 
-    // 调用客户端实例的传输函数发送请求并接收响应
-    rc = client->transport(
-        client->transport_ctx,
-        client->tx_buffer,
-        tx_len,
-        client->rx_buffer,
-        sizeof(client->rx_buffer),
-        &rx_len);
-        
-    // 返回各种情况的错误码
-    if (rc != 0) {
-        return rc;
-    }
-    if (!m9p_decode_frame(client->rx_buffer, rx_len, &frame)) {
-        return -(int)M9P_ERR_EIO;
-    }
-    if (frame.version != M9P_VERSION) {
-        return -(int)M9P_ERR_EINVAL;
-    }
-    if (frame.tag != expected_tag) {
-        return -(int)M9P_ERR_ETAG;
-    }
-    if (frame.type == M9P_RERROR) {
-        if (m9p_parse_rerror(&frame, &error)) {
-            return -(int)error.code;
+    for (attempt = 0u; attempt < M9P_CLIENT_TIMEOUT_RETRY_ATTEMPTS; ++attempt) {
+        size_t rx_len = 0u;
+        int rc;
+
+        rc = client->transport(
+            client->transport_ctx,
+            client->tx_buffer,
+            tx_len,
+            client->rx_buffer,
+            sizeof(client->rx_buffer),
+            &rx_len);
+        if (rc == -(int)M9P_ERR_EAGAIN && (attempt + 1u) < M9P_CLIENT_TIMEOUT_RETRY_ATTEMPTS) {
+            continue;
         }
-        return -(int)M9P_ERR_EIO;
-    }
-    if (frame.type != expected_type) {
-        return -(int)M9P_ERR_EIO;
+        if (rc != 0) {
+            return rc;
+        }
+        if (!m9p_decode_frame(client->rx_buffer, rx_len, &frame)) {
+            return -(int)M9P_ERR_EIO;
+        }
+        if (frame.version != M9P_VERSION) {
+            return -(int)M9P_ERR_EINVAL;
+        }
+        if (frame.tag != expected_tag) {
+            return -(int)M9P_ERR_ETAG;
+        }
+        if (frame.type == M9P_RERROR) {
+            if (m9p_parse_rerror(&frame, &error)) {
+                return -(int)error.code;
+            }
+            return -(int)M9P_ERR_EIO;
+        }
+        if (frame.type != expected_type) {
+            return -(int)M9P_ERR_EIO;
+        }
+
+        *out_frame = frame;
+        return 0;
     }
 
-    *out_frame = frame;
-    return 0;
+    return -(int)M9P_ERR_EAGAIN;
 }
 
 /**

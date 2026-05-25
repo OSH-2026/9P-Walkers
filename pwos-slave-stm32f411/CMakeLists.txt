@@ -28,8 +28,11 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 project(${CMAKE_PROJECT_NAME})
 message("Build type: " ${CMAKE_BUILD_TYPE})
 
-# Enable CMake support for ASM and C languages
-enable_language(C ASM)
+option(PWOS_LFS_BACKEND_RAM "Use RAM-backed littlefs for STM32F411 bring-up" ON)
+option(PWOS_ENABLE_LFS_SELFTEST "Populate littlefs debug fixtures on boot" ON)
+
+# Enable CMake support for ASM, C and C++ languages
+enable_language(C CXX ASM)
 
 # Create an executable object type
 add_executable(${CMAKE_PROJECT_NAME})
@@ -52,7 +55,11 @@ set(PWOS_SHARED_MESH_TRANSPORT_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/trans
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
-    User/backend/local_vfs.c
+    User/backend/lfs_vfs.c
+    User/fs/lfs.c
+    User/fs/lfs_util.c
+    User/drivers/storage/lfs_port.cpp
+    User/app/fs_selftest.c
     User/mini9p/mini9p_service.c
     ${PWOS_SHARED_MINI9P_DIR}/mini9p_protocol.c
     ${PWOS_SHARED_MINI9P_DIR}/mini9p_server.c
@@ -63,10 +70,17 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${PWOS_SHARED_MESH_TRANSPORT_DIR}/mesh_uart_transport.c
 )
 
+if(NOT PWOS_LFS_BACKEND_RAM)
+    target_sources(${CMAKE_PROJECT_NAME} PRIVATE User/drivers/storage/sd_blockdev.cpp)
+endif()
+
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined include paths
     User/backend
+    User/fs
+    User/drivers/storage
+    User/app
     User/mini9p
     ${PWOS_SHARED_MINI9P_DIR}
     ${PWOS_SHARED_MESH_CLUSTER_DIR}
@@ -81,6 +95,16 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
     MESH_UART_TRANSPORT_USE_STM32_HAL
 )
+
+if(PWOS_LFS_BACKEND_RAM)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE PWOS_LFS_PORT_USE_RAM)
+else()
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE PWOS_LFS_PORT_USE_SD)
+endif()
+
+if(PWOS_ENABLE_LFS_SELFTEST)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE PWOS_ENABLE_LFS_SELFTEST)
+endif()
 
 # Remove wrong libob.a library dependency when using cpp files
 list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)

@@ -15,15 +15,73 @@
 #include "lfs.h"
 
 #include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
 
 #define FS_SELFTEST_DIR  "/verify"
 #define FS_SELFTEST_FILE "/verify/fs_selftest.txt"
+#define FS_DEBUG_DIR "/verify/debug"
+#define FS_TREE_DIR "/verify/tree"
+#define FS_TREE_NESTED_DIR "/verify/tree/nested"
+#define FS_BACKEND_FILE "/verify/debug/backend.txt"
+#define FS_RUNCOUNT_FILE "/verify/debug/run_count.txt"
+#define FS_REPORT_FILE "/verify/debug/report.txt"
+#define FS_TREE_FILE "/verify/tree/readme.txt"
+#define FS_TREE_NESTED_FILE "/verify/tree/nested/config.txt"
 
 static const char g_fs_selftest_payload[] =
-    "9P-Walkers LittleFS self-test over SDIO";
+    "9P-Walkers LittleFS self-test over mesh";
+
+static const char g_fs_tree_payload[] =
+    "LittleFS is mounted and exposed through Mini9P over mesh.\n";
+
+static const char g_fs_nested_payload[] =
+    "mode=debug\ntransport=uart-mesh-mini9p-lfs\n";
 
 static uint32_t g_run_count = 0;
+
+static int fs_selftest_mkdir_if_needed(lfs_t *lfs, const char *path) {
+    int err = lfs_mkdir(lfs, path);
+
+    if (err == LFS_ERR_EXIST) {
+        return 0;
+    }
+
+    return err;
+}
+
+static int fs_selftest_write_text_file(lfs_t *lfs,
+                                       const char *path,
+                                       const char *text) {
+    lfs_file_t file;
+    int err;
+    lfs_ssize_t written;
+    size_t len = strlen(text);
+
+    err = lfs_file_open(lfs, &file, path,
+                        LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
+    if (err < 0) {
+        return err;
+    }
+
+    written = lfs_file_write(lfs, &file, text, len);
+    if (written < 0) {
+        (void)lfs_file_close(lfs, &file);
+        return (int)written;
+    }
+    if ((size_t)written != len) {
+        (void)lfs_file_close(lfs, &file);
+        return LFS_ERR_IO;
+    }
+
+    err = lfs_file_sync(lfs, &file);
+    if (err < 0) {
+        (void)lfs_file_close(lfs, &file);
+        return err;
+    }
+
+    return lfs_file_close(lfs, &file);
+}
 
 static int fs_selftest_write_file(lfs_t *lfs, FS_SelfTestReport *report) {
     lfs_file_t file;
@@ -139,28 +197,87 @@ static int fs_selftest_scan_dir(lfs_t *lfs) {
     return found_file ? 0 : LFS_ERR_NOENT;
 }
 
-int fs_selftest_run(FS_SelfTestReport *report) {
-    lfs_t *lfs;
+static int fs_selftest_seed_debug_tree(lfs_t *lfs, const char *backend_name) {
+    char text[32];
+    int err;
+
+    err = fs_selftest_mkdir_if_needed(lfs, FS_SELFTEST_DIR);
+    if (err < 0) {
+        return err;
+    }
+    err = fs_selftest_mkdir_if_needed(lfs, FS_DEBUG_DIR);
+    if (err < 0) {
+        return err;
+    }
+    err = fs_selftest_mkdir_if_needed(lfs, FS_TREE_DIR);
+    if (err < 0) {
+        return err;
+    }
+    err = fs_selftest_mkdir_if_needed(lfs, FS_TREE_NESTED_DIR);
+    if (err < 0) {
+        return err;
+    }
+
+    err = fs_selftest_write_text_file(lfs,
+                                      FS_BACKEND_FILE,
+                                      backend_name != NULL ? backend_name : "unknown");
+    if (err < 0) {
+        return err;
+    }
+
+    (void)snprintf(text, sizeof(text), "%lu\n", (unsigned long)g_run_count);
+    err = fs_selftest_write_text_file(lfs, FS_RUNCOUNT_FILE, text);
+    if (err < 0) {
+        return err;
+    }
+
+    err = fs_selftest_write_text_file(lfs, FS_TREE_FILE, g_fs_tree_payload);
+    if (err < 0) {
+        return err;
+    }
+
+    return fs_selftest_write_text_file(lfs, FS_TREE_NESTED_FILE, g_fs_nested_payload);
+}
+
+static int fs_selftest_write_report_file(lfs_t *lfs,
+                                         const char *backend_name,
+                                         const FS_SelfTestReport *report) {
+    char text[256];
+
+    (void)snprintf(
+        text,
+        sizeof(text),
+        "backend=%s\nrun=%lu\ninit=%ld\nmkdir=%ld\nwrite=%ld\nstat=%ld\nread=%ld\ndir=%ld\ncompare=%ld\nfixture=%ld\nsize=%lu\nwritten=%lu\nreadback=%lu\n",
+        backend_name != NULL ? backend_name : "unknown",
+        (unsigned long)report->run_count,
+        (long)report->init_status,
+        (long)report->mkdir_status,
+        (long)report->write_status,
+        (long)report->stat_status,
+        (long)report->read_status,
+        (long)report->dir_status,
+        (long)report->compare_status,
+        (long)report->fixture_status,
+        (unsigned long)report->file_size,
+        (unsigned long)report->bytes_written,
+        (unsigned long)report->bytes_read);
+    return fs_selftest_write_text_file(lfs, FS_REPORT_FILE, text);
+}
+
+int fs_selftest_run_on_fs(lfs_t *lfs,
+                          const char *backend_name,
+                          FS_SelfTestReport *report) {
     char readback_buffer[sizeof(g_fs_selftest_payload)];
 
-    if (report == NULL) {
+    if (report == NULL || lfs == NULL) {
         return LFS_ERR_INVAL;
     }
 
     memset(report, 0, sizeof(*report));
     report->run_count = ++g_run_count;
+    report->init_status = 0;
 
-    report->init_status = lfs_port_init();
-    if (report->init_status != 0) {
-        return report->init_status;
-    }
-
-    lfs = lfs_port_fs();
-
-    report->mkdir_status = lfs_mkdir(lfs, FS_SELFTEST_DIR);
-    if (report->mkdir_status == LFS_ERR_EXIST) {
-        report->mkdir_status = 0;
-    }
+    report->mkdir_status = fs_selftest_mkdir_if_needed(lfs, FS_SELFTEST_DIR);
 
     report->write_status = fs_selftest_write_file(lfs, report);
     report->stat_status = fs_selftest_stat_file(lfs, report);
@@ -181,6 +298,13 @@ int fs_selftest_run(FS_SelfTestReport *report) {
         report->stat_status = LFS_ERR_CORRUPT;
     }
 
+    report->fixture_status = fs_selftest_seed_debug_tree(lfs, backend_name);
+    if (report->fixture_status == 0) {
+        report->report_status = fs_selftest_write_report_file(lfs, backend_name, report);
+    } else {
+        report->report_status = report->fixture_status;
+    }
+
     if (report->init_status != 0) {
         return report->init_status;
     }
@@ -199,6 +323,27 @@ int fs_selftest_run(FS_SelfTestReport *report) {
     if (report->dir_status != 0) {
         return report->dir_status;
     }
+    if (report->fixture_status != 0) {
+        return report->fixture_status;
+    }
 
-    return report->compare_status;
+    return report->compare_status != 0 ? report->compare_status : report->report_status;
+}
+
+int fs_selftest_run(FS_SelfTestReport *report) {
+    int rc;
+
+    if (report == NULL) {
+        return LFS_ERR_INVAL;
+    }
+
+    rc = lfs_port_init();
+    if (rc != 0) {
+        memset(report, 0, sizeof(*report));
+        report->run_count = ++g_run_count;
+        report->init_status = rc;
+        return rc;
+    }
+
+    return fs_selftest_run_on_fs(lfs_port_fs(), lfs_port_backend_name(), report);
 }

@@ -12,6 +12,8 @@
 #include "sd_blockdev.hpp"
 #include <string.h>
 
+#define LFS_PORT_BACKEND_NAME "sd"
+
 #define SD_SECTOR_SIZE      512U
 #define LFS_READ_SIZE       512U
 #define LFS_PROG_SIZE       512U
@@ -22,6 +24,7 @@
 // Global LittleFS 实例
 static lfs_t g_lfs;
 static struct lfs_config g_cfg;
+static bool g_lfs_initialized;
 
 // 全局 SD 卡相关静态缓冲区
 static uint8_t g_read_buffer[LFS_CACHE_SIZE];
@@ -144,6 +147,10 @@ int lfs_port_init(void)
     PW_SD_BlockDevInfoTypeDef info;
     int err_code;
 
+    if (g_lfs_initialized) {
+        return 0;
+    }
+
     if (sd_blockdev_init() != 0) {
         return -10;
     }
@@ -191,6 +198,7 @@ int lfs_port_init(void)
         }
     }
 
+    g_lfs_initialized = true;
     return 0;
 }
 
@@ -202,4 +210,9 @@ int lfs_port_init(void)
 lfs_t *lfs_port_fs(void)
 {
     return &g_lfs;
+}
+
+const char *lfs_port_backend_name(void)
+{
+    return LFS_PORT_BACKEND_NAME;
 }

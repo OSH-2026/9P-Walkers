@@ -350,6 +350,28 @@ static void process_register(struct mesh_host_runtime *runtime, uint8_t src, uin
     expect_int("process register", mesh_host_runtime_process_frame(runtime, frame, frame_len), 0);
 }
 
+/*
+ * bootstrap REGISTER 的 src 仍是 0xFF，host 此时只应继续控制面流程，
+ * 不能把节点提前暴露给上层 VFS。
+ */
+static void test_unassigned_register_waits_for_confirmed_register(void)
+{
+    struct mesh_host_runtime runtime;
+    struct fake_mesh_io io;
+    bool online = true;
+
+    init_runtime(&runtime, &io);
+    process_register(&runtime, MESH_ADDR_UNASSIGNED, 0x05u);
+
+    expect_int("bootstrap register hidden", cluster_vfs_attach("mcu1"), -(int)M9P_ERR_ENOENT);
+    expect_int("bootstrap unassigned online rc",
+               cluster_get_node_online(cluster_config_mesh_cluster(), MESH_ADDR_UNASSIGNED, &online),
+               -(int)MESH_ERR_NO_ROUTE);
+
+    process_register(&runtime, 0x11u, 0x05u);
+    expect_int("confirmed register visible", cluster_vfs_attach("mcu1"), -(int)M9P_ERR_EAGAIN);
+}
+
 static void process_link_state(
     struct mesh_host_runtime *runtime,
     uint8_t src,
@@ -546,6 +568,8 @@ int main(void)
 {
     printf("mesh_host_runtime test runner start\n");
 
+    run_test("test_unassigned_register_waits_for_confirmed_register",
+             test_unassigned_register_waits_for_confirmed_register);
     run_test("test_register_broadcast_updates_vfs_without_direct_link",
              test_register_broadcast_updates_vfs_without_direct_link);
     run_test("test_link_state_to_host_enables_attach_over_mesh_client",
