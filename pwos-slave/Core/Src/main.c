@@ -59,6 +59,9 @@ FS_SelfTestReport g_fs_report;
 #if defined(PWOS_ENABLE_MINI9P_SERIAL) && defined(PWOS_BOARD_ZGT6)
 static uint32_t g_led_last_toggle_ms;
 #endif
+#ifdef PWOS_ENABLE_MINI9P_SERIAL
+static uint32_t g_register_last_notify_ms;
+#endif
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -130,6 +133,9 @@ int main(void)
   /* USER CODE BEGIN 2 */
 #ifdef PWOS_BOARD_ZGT6
   MX_GPIO_PF9_LED_Init();
+#ifdef PWOS_ENABLE_MINI9P_SERIAL
+  HAL_GPIO_WritePin(GPIOF, GPIO_PIN_9, GPIO_PIN_SET);
+#endif
 #endif
 #ifdef PWOS_ENABLE_MINI9P_SERIAL
   if (mini9p_service_init() != 0) {
@@ -154,7 +160,6 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 #ifdef PWOS_ENABLE_MINI9P_SERIAL
-    (void)mini9p_service_poll_once();
 #ifdef PWOS_BOARD_ZGT6
     {
       uint32_t now = HAL_GetTick();
@@ -164,6 +169,14 @@ int main(void)
       }
     }
 #endif
+    {
+      uint32_t now = HAL_GetTick();
+      if ((uint32_t)(now - g_register_last_notify_ms) >= 1000U) {
+        (void)mini9p_service_notify_link_up();
+        g_register_last_notify_ms = now;
+      }
+    }
+    (void)mini9p_service_poll_once();
 #else
     (void)vofa_firewater_send_fs_report(&g_fs_report, HAL_GetTick());
     HAL_Delay(1000);
@@ -228,6 +241,12 @@ void SystemClock_Config(void)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
+#if defined(PWOS_ENABLE_MINI9P_SERIAL) && defined(PWOS_BOARD_ZGT6)
+  while (1) {
+    HAL_GPIO_TogglePin(GPIOF, GPIO_PIN_9);
+    HAL_Delay(50);
+  }
+#endif
 #ifndef PWOS_ENABLE_MINI9P_SERIAL
   /* User can add his own implementation to report the HAL error return state */
   {
