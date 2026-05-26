@@ -31,6 +31,7 @@ message("Build type: " ${CMAKE_BUILD_TYPE})
 option(PWOS_ENABLE_MINI9P_SERIAL "Use USART2 for Mini9P slave serial bring-up" OFF)
 option(PWOS_BOARD_ZGT6 "Board has PF9 green LED (ZGT6)" OFF)
 option(PWOS_ENABLE_LFS_SELFTEST "Populate littlefs debug fixtures on boot" ON)
+option(PWOS_SKIP_LFS_MOUNT "Skip lfs_vfs mount during Mini9P board bring-up" OFF)
 
 # Enable CMake support for ASM and C languages
 enable_language(C CXX ASM)
@@ -61,7 +62,11 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/User/drivers/storage/lfs_port.cpp
     ${CMAKE_SOURCE_DIR}/User/app/fs_selftest.c
     ${CMAKE_SOURCE_DIR}/User/app/vofa_firewater.c
+    ${CMAKE_SOURCE_DIR}/User/backend/dev_vfs.c
     ${CMAKE_SOURCE_DIR}/User/backend/lfs_vfs.c
+    ${CMAKE_SOURCE_DIR}/User/backend/node_vfs.c
+    ${CMAKE_SOURCE_DIR}/User/backend/sys_vfs.c
+    ${CMAKE_SOURCE_DIR}/User/mini9p/mini9p_board_service.c
     ${PWOS_SHARED_MINI9P_DIR}/mini9p_protocol.c
     ${PWOS_SHARED_MINI9P_DIR}/mini9p_server.c
     ${PWOS_SHARED_MINI9P_DIR}/mini9p_service.c
@@ -78,6 +83,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/User/drivers/storage
     ${CMAKE_SOURCE_DIR}/User/app
     ${CMAKE_SOURCE_DIR}/User/backend
+    ${CMAKE_SOURCE_DIR}/User/mini9p
     ${PWOS_SHARED_MINI9P_DIR}
     ${PWOS_SHARED_MESH_CLUSTER_DIR}
     ${PWOS_SHARED_MESH_ENVELOPE_DIR}
@@ -100,6 +106,9 @@ if(PWOS_BOARD_ZGT6)
 endif()
 if(PWOS_ENABLE_LFS_SELFTEST)
     target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE PWOS_ENABLE_LFS_SELFTEST)
+endif()
+if(PWOS_SKIP_LFS_MOUNT)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE PWOS_SKIP_LFS_MOUNT)
 endif()
 
 # Remove wrong libob.a library dependency when using cpp files

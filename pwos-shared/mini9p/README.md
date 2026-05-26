@@ -9,10 +9,11 @@
 mini9p_protocol  帧编解码、T* 解析、R* 构造
 mini9p_client    请求/响应式客户端，transport 由外层注入
 mini9p_server    会话状态、fid 生命周期、请求分发、Rerror
-mini9p_service   节点侧组装层，串起 lfs_vfs + server + mesh_node_runtime + mesh_uart_transport
+mini9p_service   节点侧组装层，串起已注入 backend + server + mesh_node_runtime + mesh_uart_transport
 ```
 
 `mini9p_server` 不直接访问 littlefs 或设备资源。它只通过 `m9p_server_ops` 调用 backend。
+`mini9p_service` 同样不构造具体 backend；板级代码负责初始化 lfs/node_vfs 等本地资源后注入。
 
 `mini9p_client` 也不直接理解 UART 或 mesh。它只要求外层提供一个 `m9p_transport_fn`：
 
@@ -68,17 +69,22 @@ m9p_server_init(&server, &config);
 
 service 是 STM32 节点侧的薄组装层，内部持有静态实例：
 
-- `lfs_vfs`
 - `m9p_server`
 - `mesh_uart_transport`
 - `mesh_node_runtime`
 
-默认还会在 littlefs 中写入一组调试文件，便于通过 Mini9P 远程检查 `/verify` 树，而不往 mesh UART 混入文本日志。
+具体 backend（例如 `lfs_vfs` 或从机本地 `node_vfs`）由板级代码持有和初始化。
 
 对外暴露三个入口：
 
 ```c
-int mini9p_service_init(void);
+struct mini9p_service_backend {
+    const struct m9p_server_ops *ops;
+    void *ops_ctx;
+    uint16_t default_iounit;
+};
+
+int mini9p_service_init_with_backend(const struct mini9p_service_backend *backend);
 int mini9p_service_notify_link_up(void);
 int mini9p_service_poll_once(void);
 ```
@@ -86,9 +92,9 @@ int mini9p_service_poll_once(void);
 初始化顺序：
 
 ```text
-lfs_vfs_init
-  -> fs_selftest_run_on_fs
-  -> m9p_server_init(lfs_vfs_ops)
+board code initializes backend
+  -> mini9p_service_init_with_backend(backend)
+  -> m9p_server_init(backend.ops)
   -> mesh_uart_transport_init
   -> mesh_node_runtime_init(send_frame/receive_frame + m9p_server_handle_frame)
   -> auto REGISTER
@@ -101,11 +107,11 @@ mini9p_service_poll_once
   -> mesh_node_runtime_poll_once
   -> mesh_uart_transport_receive_frame
   -> mesh_processer_process_frame
-  -> local T* -> m9p_server_handle_frame -> lfs_vfs
+  -> local T* -> m9p_server_handle_frame -> injected backend
   -> local R* -> 封回 mesh MINI9P frame 发出
 ```
 
-在节点侧，`mini9p_service_init()` 会给 `mesh_node_runtime` 配好 `local_uid`、`boot_nonce` 和 REGISTER 能力位；
+在节点侧，`mini9p_service_init_with_backend()` 会给 `mesh_node_runtime` 配好 `local_uid`、`boot_nonce` 和 REGISTER 能力位；
 `mini9p_service_notify_link_up()` 可在未来链路明确恢复后再次主动发 REGISTER。
 
 ## PC 测试
@@ -124,7 +130,7 @@ pwos-slave/User/mini9p/test/build/mini9p_server_test
 tools/pc_master_emulator/
 ```
 
-当前 smoke test 目标是读取 `/verify/fs_selftest.txt`、`/verify/debug/report.txt` 和 `/verify/tree/nested/config.txt`，确认整条 UART -> mesh -> Mini9P -> lfs_vfs -> littlefs 链已经打通。
+当前 smoke test 目标是读取 `/sys/health`，确认 UART -> mesh -> Mini9P -> injected backend 链路已打通。
 
 ## 当前职责边界
 

@@ -32,6 +32,9 @@ void MX_SDIO_SD_Init(void)
 {
 
   /* USER CODE BEGIN SDIO_Init 0 */
+#ifdef PWOS_ENABLE_MINI9P_SERIAL
+  return;
+#endif
 
   /* USER CODE END SDIO_Init 0 */
 

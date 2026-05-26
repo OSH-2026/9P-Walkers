@@ -30,6 +30,7 @@ message("Build type: " ${CMAKE_BUILD_TYPE})
 
 option(PWOS_LFS_BACKEND_RAM "Use RAM-backed littlefs for STM32F411 bring-up" ON)
 option(PWOS_ENABLE_LFS_SELFTEST "Populate littlefs debug fixtures on boot" ON)
+option(PWOS_SKIP_LFS_MOUNT "Skip lfs_vfs mount during Mini9P board bring-up" OFF)
 
 # Enable CMake support for ASM, C and C++ languages
 enable_language(C CXX ASM)
@@ -55,14 +56,18 @@ set(PWOS_SHARED_MESH_TRANSPORT_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/trans
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
+    User/backend/dev_vfs.c
     User/backend/lfs_vfs.c
+    User/backend/node_vfs.c
+    User/backend/sys_vfs.c
     User/fs/lfs.c
     User/fs/lfs_util.c
     User/drivers/storage/lfs_port.cpp
     User/app/fs_selftest.c
-    User/mini9p/mini9p_service.c
+    User/mini9p/mini9p_board_service.c
     ${PWOS_SHARED_MINI9P_DIR}/mini9p_protocol.c
     ${PWOS_SHARED_MINI9P_DIR}/mini9p_server.c
+    ${PWOS_SHARED_MINI9P_DIR}/mini9p_service.c
     ${PWOS_SHARED_MESH_CLUSTER_DIR}/cluster.c
     ${PWOS_SHARED_MESH_ENVELOPE_DIR}/mesh_protocal.c
     ${PWOS_SHARED_MESH_PROCESSER_DIR}/mesh_processer.c
@@ -104,6 +109,9 @@ endif()
 
 if(PWOS_ENABLE_LFS_SELFTEST)
     target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE PWOS_ENABLE_LFS_SELFTEST)
+endif()
+if(PWOS_SKIP_LFS_MOUNT)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE PWOS_SKIP_LFS_MOUNT)
 endif()
 
 # Remove wrong libob.a library dependency when using cpp files

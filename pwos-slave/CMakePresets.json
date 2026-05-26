@@ -22,7 +22,8 @@
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug",
                 "PWOS_BOARD_ZGT6": "ON",
-                "PWOS_ENABLE_MINI9P_SERIAL": "ON"
+                "PWOS_ENABLE_MINI9P_SERIAL": "ON",
+                "PWOS_SKIP_LFS_MOUNT": "ON"
             }
         },
         {
