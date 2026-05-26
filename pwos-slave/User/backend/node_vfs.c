@@ -170,7 +170,11 @@ static int append_root_dirent(const struct node_vfs_root_entry *entry,
     return *out_count == out_cap ? 1 : 0;
 }
 
-static int read_root_dir(uint32_t offset, uint8_t *out_data, uint16_t out_cap, uint16_t *out_count)
+static int read_root_dir(struct node_vfs *vfs,
+                         uint32_t offset,
+                         uint8_t *out_data,
+                         uint16_t out_cap,
+                         uint16_t *out_count)
 {
     uint32_t stream_offset = 0u;
     size_t i;
@@ -181,9 +185,15 @@ static int read_root_dir(uint32_t offset, uint8_t *out_data, uint16_t out_cap, u
 
     *out_count = 0u;
     for (i = 0u; i < sizeof(k_root_entries) / sizeof(k_root_entries[0]); ++i) {
-        int rc = append_root_dirent(&k_root_entries[i], &stream_offset, offset, out_data, out_cap, out_count);
-        if (rc != 0) {
-            return rc > 0 ? 0 : rc;
+        /* Skip /fs entry when LFS backend is not available. */
+        if (strcmp(k_root_entries[i].name, "fs") == 0 && vfs->lfs_ops == NULL) {
+            continue;
+        }
+        {
+            int rc = append_root_dirent(&k_root_entries[i], &stream_offset, offset, out_data, out_cap, out_count);
+            if (rc != 0) {
+                return rc > 0 ? 0 : rc;
+            }
         }
     }
     return 0;
@@ -259,7 +269,7 @@ static int node_read_cb(void *ctx,
         return rc;
     }
     if (route.kind == NODE_VFS_ROUTE_ROOT) {
-        return read_root_dir(offset, out_data, out_cap, out_count);
+        return read_root_dir(vfs, offset, out_data, out_cap, out_count);
     }
     return route.ops->read(route.ctx, route.path, offset, mode, out_data, out_cap, out_count);
 }
