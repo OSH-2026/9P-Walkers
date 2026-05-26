@@ -932,7 +932,7 @@ int main(int argc, char **argv)
     }
 
     serial_path = argv[1];
-    if (argc == 3) {
+    if (argc >= 3) {
         char *end = NULL;
 
         baud = strtoul(argv[2], &end, 10);
