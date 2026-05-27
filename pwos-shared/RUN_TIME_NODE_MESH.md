@@ -54,13 +54,13 @@ mesh_host_runtime_start_default_task();
 
 当远端节点接入后，它会发 REGISTER。
 
-在当前从机接线里，这个 REGISTER 不是靠上层业务手写触发，而是由每条 UART
-各自持有的 `mesh_node_runtime` 自动完成：
+在当前从机接线里，这个 REGISTER 不是靠上层业务手写触发，而是由单个
+`mesh_node_runtime` 统一管理本节点全部 UART 后自动完成：
 
 1. `mini9p_service_init()` 先初始化本地 `mini9p_server` 和 raw mesh UART transport。
-2. 然后初始化对应的 `mesh_node_runtime`。
-3. `mesh_node_runtime` 在 init 成功后，立即向这条 UART 发送一帧 REGISTER。
-4. REGISTER 里会携带当前板子的稳定硬件 UID，以及这条链路对应的能力/端口位图。
+2. 然后把所有本地串口绑定到同一个 `mesh_node_runtime`。
+3. `mesh_node_runtime` 在 init 成功后，会向每个已绑定 UART 各发送一帧 REGISTER；若板级启用了 Wi-Fi，也会额外通过保留的 Wi-Fi 特殊端口发送一帧 REGISTER。
+4. REGISTER 里会携带当前板子的稳定硬件 UID、该 runtime 汇总后的端口位图，以及 `wifi_supported` 标记；Wi-Fi 启用时，端口位图最高位保留给 Wi-Fi。
 
 当前 STM32 实现里，8 字节 UID 由 96-bit 硬件唯一编号压缩得到：
 
@@ -68,8 +68,14 @@ mesh_host_runtime_start_default_task();
 - 后 4 字节取 `HAL_GetUIDw1() ^ HAL_GetUIDw2()`。
 
 如果未来板级代码能够显式检测某条 UART 的 link-up 事件，还可以继续调用
-`mini9p_service_notify_link_up()` 或更底层的 `mesh_node_runtime_notify_link_up()`，
-在该事件上再次向对应串口重发 REGISTER。
+`mini9p_service_notify_link_up()`、`mesh_node_runtime_notify_link_up()`，或者更细粒度的
+`mesh_node_runtime_notify_link_up_on_port()`，在该事件上再次向对应串口重发 REGISTER。
+
+多串口 runtime 额外承担两件事：
+
+1. 子机侧 direct-table 路由表保存的是“dst -> 本地出口端口号”，而不是“dst -> 下一跳地址”。
+2. 当某个邻居第一次从某个入端口出现时，runtime 会把这条 `src -> ingress_port` 关系写入 cluster，
+   并向主机上报带 `local_port` 的 LINK_STATE，供主机全图推导子机路由表。
 
 runtime 收到后，会自动完成：
 
@@ -77,7 +83,8 @@ runtime 收到后，会自动完成：
 2. 读取该节点硬件 UID。
 3. 为该节点分配或复用稳定节点名。
 4. 为该节点绑定一个真正可用的 mesh-backed mini9P client。
-5. 把节点同步到 VFS。
+5. 若 REGISTER 声明该节点启用了 Wi-Fi，则主机把 Wi-Fi 能力写入节点信息，并补上一条 host<->node 的直连 Wi-Fi 拓扑边。
+6. 把节点同步到 VFS。
 
 最终效果是：
 

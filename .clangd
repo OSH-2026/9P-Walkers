@@ -55,9 +55,20 @@ CompileFlags:
     - -fno-threadsafe-statics
 ---
 If:
-  PathMatch: ^pwos-master-esp32p4/(vfs_bridge|transport)/.*
+  PathMatch: ^pwos-master-esp32p4/(vfs_bridge|transport|mesh|cluster)/.*
 CompileFlags:
   CompilationDatabase: pwos-master-esp32p4/vfs_bridge/test/build
+  Add:
+    - -std=gnu11
+    - -Ipwos-master-esp32p4/transport
+    - -Ipwos-master-esp32p4/mesh
+    - -Ipwos-master-esp32p4/cluster
+    - -Ipwos-master-esp32p4/vfs_bridge
+    - -Ipwos-shared/mini9p
+    - -Ipwos-shared/mesh/cluster
+    - -Ipwos-shared/mesh/envelope
+    - -Ipwos-shared/mesh/processer
+    - -Ipwos-shared/mesh/transport
 ---
 If:
   PathMatch: ^tools/pc_master_emulator/.*
@@ -75,11 +86,10 @@ CompileFlags:
   CompilationDatabase: pwos-slave/User/uart_transport/test/build
 ---
 If:
-  PathMatch: ^pwos-master-esp32p4/(transport|vfs_bridge)/test/.*
+  PathMatch: ^pwos-master-esp32p4/(transport|vfs_bridge|mesh|cluster)/test/.*
 CompileFlags:
   Add:
     - -Ipwos-master-esp32p4/transport/test/stubs
-    - -DESP_PLATFORM
 ---
 If:
   PathMatch: ^pwos-slave/User/uart_transport/test/.*

@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #include "mini9p_client.h"
-#include "../../pwos-shared/mesh/cluster/cluster.h"
+#include "cluster.h"
 
 /**
  * @brief 初始化主机侧 mesh cluster + VFS 桥接上下文。

@@ -2,7 +2,7 @@
  * @file mesh_host_runtime.h
  * @brief 主机侧 mesh runtime：把 raw UART、shared mesh processor、cluster_config 和 cluster_vfs 串成可运行闭环。
  *
- * 这个模块解决的是“接口都已经有了，但运行时谁来把它们真正接起来”的问题。
+ * 这个模块解决的是"接口都已经有了，但运行时谁来把它们真正接起来"的问题。
  *
  * 在当前代码库里，shared mesh 层已经提供了三块能力：
  * 1. mesh envelope：负责 REGISTER / LINK_STATE / MINI9P 等帧的编解码；
@@ -12,7 +12,7 @@
  * 主机侧 VFS 也已经具备：
  * 1. 按 UID 建立稳定 node_name；
  * 2. 节点离线时保留 UID <-> 名字映射；
- * 3. 把 9P attach 状态与“当前是否在线”分离。
+ * 3. 把 9P attach 状态与"当前是否在线"分离。
  *
  * 缺失的恰恰是运行时胶水：
  * - 谁接收 REGISTER 并把 UID 送到 cluster_vfs？
@@ -23,7 +23,7 @@
  *
  * 关键职责：
  * 1. 以 mesh_processer 为核心，消费来自 raw transport 的 mesh 帧；
- * 2. 在“带正式 src 地址的确认 REGISTER”到来时，为 UID 分配/复用一个长期存在的
+ * 2. 在"带正式 src 地址的确认 REGISTER"到来时，为 UID 分配/复用一个长期存在的
  *    mesh-backed m9p_client；
  * 3. 调用 cluster_config_on_mesh_node_registered()，把 UID、名字映射和 client 绑定同步到 VFS；
  * 4. 在 LINK_STATE / ROUTE_UPDATE 变化后，调用 cluster_config_refresh_all_nodes_connectivity()，
@@ -31,7 +31,7 @@
  * 5. 对外提供默认 UART 版本的初始化/启动入口，供 app_main 直接拉起后台轮询任务。
  *
  * 设计取舍：
- * - 当前实现明确采用“全局单事务”语义：同一时刻只允许一个 mesh-backed m9p_client
+ * - 当前实现明确采用"全局单事务"语义：同一时刻只允许一个 mesh-backed m9p_client
  *   在链路上等待自己的响应。这样可以在不引入复杂队列/调度器的前提下，先把真正
  *   可运行的发现链条和 VFS 访问链条打通。
  * - 若未来需要多并发请求，可在此基础上把 dispatch_busy 扩展成真正的 pending 表。
@@ -45,7 +45,7 @@
 #include <stdint.h>
 
 #include "mini9p_client.h"
-#include "../../pwos-shared/mesh/processer/mesh_processer.h"
+#include "mesh_processer.h"
 #include "cluster_config.h"
 
 #ifdef __cplusplus
@@ -53,7 +53,7 @@ extern "C" {
 #endif
 
 /*
- * 主机侧最多保留多少个“已发现节点的 mesh-backed client 槽位”。
+ * 主机侧最多保留多少个"已发现节点的 mesh-backed client 槽位"。
  *
  * 这里直接与 shared cluster 的节点上限对齐，保证：
  * - cluster 最多认识多少个节点；
@@ -80,7 +80,7 @@ struct mesh_host_runtime;
  *
  * 因此这里保存：
  * - runtime 指针：用于访问共享 processor、raw transport、cluster；
- * - slot_index：用于知道“当前是哪个 UID / mesh_addr 在发请求”。
+ * - slot_index：用于知道"当前是哪个 UID / mesh_addr 在发请求"。
  */
 struct mesh_host_runtime_client_transport_ctx {
     struct mesh_host_runtime *runtime;
@@ -110,7 +110,7 @@ struct mesh_host_runtime_client_slot {
  * 调用约束：
  * 1. mesh_cluster 必须来自 cluster_config_mesh_cluster()，因为 runtime 需要和
  *    cluster_config/cluster_vfs 共享同一份主机 cluster 真相；
- * 2. send_frame / receive_frame 必须是“原始整帧”的 transport；
+ * 2. send_frame / receive_frame 必须是"原始整帧"的 transport；
  * 3. transport_ctx 会原样传给这两个回调，通常是 UART transport 实例。
  */
 struct mesh_host_runtime_config {
@@ -170,9 +170,7 @@ int mesh_host_runtime_init(
     struct mesh_host_runtime *runtime,
     const struct mesh_host_runtime_config *config);
 
-/**
- * @brief 清空 runtime 状态。
- */
+/** @brief 清空 runtime 状态。 */
 void mesh_host_runtime_deinit(struct mesh_host_runtime *runtime);
 
 /**
@@ -201,7 +199,7 @@ int mesh_host_runtime_poll_once(struct mesh_host_runtime *runtime);
  *
  * 默认路径会自动完成：
  * 1. cluster_config_init_mesh_host()
- * 2. m9p_uart_transport_init_default()
+ * 2. mesh_transport_manager_init_default()
  * 3. 基于默认 UART transport 装配 runtime
  */
 int mesh_host_runtime_init_default(void);

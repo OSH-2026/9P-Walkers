@@ -47,52 +47,56 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 )
 
 set(PWOS_SHARED_MINI9P_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mini9p)
+set(PWOS_SLAVE_USER_DIR ${CMAKE_SOURCE_DIR}/../pwos-slave/User)
+set(PWOS_SLAVE_USER_MINI9P_DIR ${PWOS_SLAVE_USER_DIR}/mini9p)
+set(PWOS_SLAVE_USER_MESH_DIR ${PWOS_SLAVE_USER_DIR}/mesh)
 set(PWOS_SHARED_MESH_CLUSTER_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/cluster)
 set(PWOS_SHARED_MESH_ENVELOPE_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/envelope)
 set(PWOS_SHARED_MESH_PROCESSER_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/processer)
-set(PWOS_SHARED_MESH_NODE_RUNTIME_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/node_runtime)
 set(PWOS_SHARED_MESH_TRANSPORT_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/transport)
+set(PWOS_SHARED_MESH_WIFI_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/wifi)
 
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user sources here
-    User/backend/dev_vfs.c
-    User/backend/lfs_vfs.c
-    User/backend/node_vfs.c
-    User/backend/sys_vfs.c
-    User/fs/lfs.c
-    User/fs/lfs_util.c
-    User/drivers/storage/lfs_port.cpp
-    User/app/fs_selftest.c
+    ${PWOS_SLAVE_USER_DIR}/backend/dev_vfs.c
+    ${PWOS_SLAVE_USER_DIR}/backend/lfs_vfs.c
+    ${PWOS_SLAVE_USER_DIR}/backend/node_vfs.c
+    ${PWOS_SLAVE_USER_DIR}/backend/sys_vfs.c
+    ${PWOS_SLAVE_USER_DIR}/fs/lfs.c
+    ${PWOS_SLAVE_USER_DIR}/fs/lfs_util.c
+    ${PWOS_SLAVE_USER_DIR}/drivers/storage/lfs_port.cpp
+    ${PWOS_SLAVE_USER_DIR}/app/fs_selftest.c
     User/mini9p/mini9p_board_service.c
-    ${PWOS_SHARED_MINI9P_DIR}/mini9p_protocol.c
-    ${PWOS_SHARED_MINI9P_DIR}/mini9p_server.c
-    ${PWOS_SHARED_MINI9P_DIR}/mini9p_service.c
+    ${PWOS_SLAVE_USER_MINI9P_DIR}/mini9p_service.c
     ${PWOS_SHARED_MESH_CLUSTER_DIR}/cluster.c
     ${PWOS_SHARED_MESH_ENVELOPE_DIR}/mesh_protocal.c
     ${PWOS_SHARED_MESH_PROCESSER_DIR}/mesh_processer.c
-    ${PWOS_SHARED_MESH_NODE_RUNTIME_DIR}/mesh_node_runtime.c
+    ${PWOS_SLAVE_USER_MESH_DIR}/mesh_node_runtime.c
     ${PWOS_SHARED_MESH_TRANSPORT_DIR}/mesh_uart_transport.c
+    ${PWOS_SHARED_MESH_WIFI_DIR}/mesh_wifi.c
+    ${PWOS_SHARED_MINI9P_DIR}/mini9p_protocol.c
+    ${PWOS_SHARED_MINI9P_DIR}/mini9p_server.c
 )
 
 if(NOT PWOS_LFS_BACKEND_RAM)
-    target_sources(${CMAKE_PROJECT_NAME} PRIVATE User/drivers/storage/sd_blockdev.cpp)
+    target_sources(${CMAKE_PROJECT_NAME} PRIVATE ${PWOS_SLAVE_USER_DIR}/drivers/storage/sd_blockdev.cpp)
 endif()
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user defined include paths
-    User/backend
-    User/fs
-    User/drivers/storage
-    User/app
+    ${PWOS_SLAVE_USER_DIR}/backend
+    ${PWOS_SLAVE_USER_DIR}/fs
+    ${PWOS_SLAVE_USER_DIR}/drivers/storage
+    ${PWOS_SLAVE_USER_DIR}/app
     User/mini9p
+    ${PWOS_SLAVE_USER_MINI9P_DIR}
+    ${PWOS_SLAVE_USER_MESH_DIR}
     ${PWOS_SHARED_MINI9P_DIR}
     ${PWOS_SHARED_MESH_CLUSTER_DIR}
     ${PWOS_SHARED_MESH_ENVELOPE_DIR}
     ${PWOS_SHARED_MESH_PROCESSER_DIR}
-    ${PWOS_SHARED_MESH_NODE_RUNTIME_DIR}
     ${PWOS_SHARED_MESH_TRANSPORT_DIR}
+    ${PWOS_SHARED_MESH_WIFI_DIR}
 )
 
 # Add project symbols (macros)

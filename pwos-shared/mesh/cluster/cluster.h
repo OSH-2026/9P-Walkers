@@ -33,6 +33,13 @@ extern "C" {
 #define CLUSTER_MAX_ROUTES 16u
 #define CLUSTER_MAX_LINKS 32u
 
+/* 未知或未指定的本地链路/串口编号。 */
+#define CLUSTER_PORT_INVALID 0xFFu
+
+/* 共享约定：最高位端口选择器保留给 Wi-Fi 传输。 */
+#define CLUSTER_PORT_WIFI_ID MESH_PORT_SELECTOR_WIFI_ID
+#define CLUSTER_PORT_WIFI_MASK MESH_PORT_SELECTOR_WIFI_MASK
+
 /*
  * cluster 的工作模式：
  * - DIRECT_TABLE：更适合子机或简单中继，只维护路由表。
@@ -46,26 +53,40 @@ enum cluster_mode {
 /*
  * 一个节点的最小运行时信息。
  *
- * 这里先只保存地址和在线状态；
- * 若后续控制面需要节点名、UID、能力位图，可以在不破坏接口的前提下扩展。
+ * 当前最小元数据包括：
+ * - online：控制面观测到的在线状态；
+ * - capability_bits：来自最新 REGISTER 的能力位图；
+ * - port_bitmap：来自最新 REGISTER 的本地发送选择器位图；
+ * - wifi_supported：该节点是否声明支持 Wi-Fi 直连传输。
  */
 struct cluster_node {
     uint8_t addr;
+    uint16_t capability_bits;
+    uint8_t port_bitmap;
     bool online;
+    bool wifi_supported;
     bool valid;
 };
 
 /*
- * 一条路由项：dst -> next_hop。
+ * 一条路由项：dst -> selector。
+ *
+ * 默认情况下，next_hop 表示“下一跳 mesh 地址”；
+ * 当 cluster_config.direct_routes_use_port_selectors = true 且工作在
+ * DIRECT_TABLE 模式时，next_hop 改为“本地出口串口/端口编号”。
+ *
+ * 这样一套 cluster API 就能同时覆盖：
+ * - 主机/普通路由场景：dst -> 下一跳地址；
+ * - 单 runtime 管多 UART 的子机场景：dst -> 本地 UART 端口号。
  *
  * local 字段为 true 时表示 dst 就是本机，不需要外发。
- * 这类项可看作“命中本机地址”的快路径。
  */
 struct cluster_route {
     uint8_t dst;
     uint8_t next_hop;
     uint8_t metric;
     bool local;
+    bool selector_is_port;
     bool valid;
 };
 
@@ -74,11 +95,20 @@ struct cluster_route {
  *
  * 主机模式下，cluster 可以先维护这些链路，再根据 local_addr
  * 通过最短路/最小代价路径推导出路由表。
+ *
+ * from_port / to_port 表示：
+ * - 若从 from 走向 to，应从 from 的哪个本地串口/端口发出去；
+ * - 若链路反向使用，应从 to 的哪个本地串口/端口发向 from。
+ *
+ * 主机维护全图时，需要这些端口元数据来为子机生成
+ * “目的地址 -> 出口串口编号”的 ROUTE_UPDATE。
  */
 struct cluster_link {
     uint8_t from;
     uint8_t to;
     uint8_t metric;
+    uint8_t from_port;
+    uint8_t to_port;
     bool bidirectional;
     bool valid;
 };
@@ -92,6 +122,7 @@ struct cluster_link {
 struct cluster_config {
     uint8_t local_addr;
     enum cluster_mode mode;
+    bool direct_routes_use_port_selectors;
 };
 
 /*
@@ -140,6 +171,11 @@ int cluster_get_node_online(struct cluster *cluster, uint8_t addr, bool *out_onl
  * 适用于：
  * - 子机直接维护 next_hop 表。
  * - 主机先临时塞入静态路由作为兜底。
+ *
+ * next_hop 语义：
+ * - 默认：下一跳 mesh 地址；
+ * - 当 direct_routes_use_port_selectors=true 且 cluster 工作在 DIRECT_TABLE：
+ *   本地出口串口/端口编号。
  */
 int cluster_add_route(struct cluster *cluster, uint8_t dst, uint8_t next_hop, uint8_t metric);
 
@@ -153,8 +189,23 @@ int cluster_remove_route(struct cluster *cluster, uint8_t dst);
  * - bidirectional = true 时同时视为双向链路。
  * - metric 为路径代价，数值越小优先级越高。
  * - 添加/删除链路后，路由表会被标记为脏，需要重新派生。
+ * - 未指定端口信息时，from_port / to_port 均记为 CLUSTER_PORT_INVALID。
  */
 int cluster_add_link(struct cluster *cluster, uint8_t from, uint8_t to, uint8_t metric, bool bidirectional);
+
+/*
+ * 添加带端口元数据的拓扑链路。
+ *
+ * 适用于主机维护全图时记录：某个节点从哪个本地串口出发能到达某个邻居。
+ */
+int cluster_add_link_with_ports(
+    struct cluster *cluster,
+    uint8_t from,
+    uint8_t to,
+    uint8_t metric,
+    bool bidirectional,
+    uint8_t from_port,
+    uint8_t to_port);
 
 /* 删除一条拓扑链路。 */
 int cluster_remove_link(struct cluster *cluster, uint8_t from, uint8_t to, bool bidirectional);
@@ -185,7 +236,11 @@ int cluster_rebuild_routes(struct cluster *cluster);
  *
  * 输出约定：
  * - out_is_local = true  表示该 dst 就是本机。
- * - out_is_local = false 表示该 dst 需要转发，并由 out_next_hop 给出下一跳。
+ * - out_is_local = false 表示该 dst 需要转发，并由 out_next_hop 给出发送选择器。
+ *
+ * 发送选择器语义：
+ * - 普通/主机场景：返回下一跳 mesh 地址；
+ * - 子机多串口 DIRECT_TABLE 场景：返回本地出口端口编号。
  */
 int cluster_lookup_next_hop(
     struct cluster *cluster,
@@ -200,6 +255,33 @@ int cluster_lookup_next_hop(
  * 链路断开等场景中只做“还通不通”的判断，而不关心具体 next_hop。
  */
 int cluster_can_reach(struct cluster *cluster, uint8_t dst, bool *out_reachable);
+
+/*
+ * 从“远端节点 source 的视角”查询到 dst 的出口端口。
+ *
+ * 该接口只对 TOPOLOGY 模式有意义：主机维护的是全图，它需要知道某个子机
+ * source 为了到达 dst，应当从哪个本地串口把帧发给下一跳。
+ */
+int cluster_lookup_remote_egress_port(
+    struct cluster *cluster,
+    uint8_t source,
+    uint8_t dst,
+    uint8_t *out_egress_port,
+    bool *out_is_local);
+
+/*
+ * 为“远端节点 source 的子机路由表”构造一条 ROUTE_UPDATE 负载。
+ *
+ * - action = MESH_ROUTE_SET 时，next_hop 字段写入 source 的出口端口号；
+ * - action = MESH_ROUTE_DELETE 时，直接构造删除负载，不依赖当前拓扑。
+ */
+int cluster_build_remote_route_update(
+    struct cluster *cluster,
+    uint8_t source,
+    uint8_t dst,
+    uint16_t route_version,
+    uint8_t action,
+    struct mesh_route_update_payload *out_payload);
 
 /*
  * 处理 ROUTE_UPDATE 控制消息。

@@ -8,7 +8,7 @@
  * pc_master_emulator 实际通过 main.c 中的 read_exact / write_all 直接操作
  * 串口 fd，不经过 mesh_uart_transport 层，因此此桩函数永远不会被调用。
  *
- * 此文件仅用于链接：vfs_bridge/mesh_host_runtime.c 依赖 mesh_uart_transport
+ * 此文件仅用于链接：master mesh transport manager 依赖 mesh_uart_transport
  * 的函数签名，如果缺少此编译单元会导致链接错误。真实传输逻辑见 main.c 中的
  * pc_mesh_send_frame 和 pc_mesh_receive_frame。
  *
