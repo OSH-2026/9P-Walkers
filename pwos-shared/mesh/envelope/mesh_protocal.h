@@ -33,6 +33,10 @@
 /* 单帧最大 payload 长度。 */
 #define MESH_MAX_PAYLOAD_LEN 512u
 
+/* REGISTER.port_bitmap 的最高位预留给 Wi-Fi 传输。 */
+#define MESH_PORT_SELECTOR_WIFI_ID 7u
+#define MESH_PORT_SELECTOR_WIFI_MASK ((uint8_t)(1u << MESH_PORT_SELECTOR_WIFI_ID))
+
 /* 最小整帧长度：Magic(2)+FrameLen(2)+固定头(8)+CRC(2)=14。 */
 #define MESH_FRAME_OVERHEAD 14u
 
@@ -114,6 +118,7 @@ struct mesh_register_payload {
     uint32_t boot_nonce;
     uint16_t capability_bits;
     uint8_t port_bitmap;
+    bool wifi_supported;
 };
 
 /* ASSIGN：主机下发节点地址、节点名及租约信息。 */

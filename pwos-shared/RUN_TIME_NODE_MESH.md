@@ -59,8 +59,8 @@ mesh_host_runtime_start_default_task();
 
 1. `mini9p_service_init()` 先初始化本地 `mini9p_server` 和 raw mesh UART transport。
 2. 然后把所有本地串口绑定到同一个 `mesh_node_runtime`。
-3. `mesh_node_runtime` 在 init 成功后，会向每个已绑定 UART 各发送一帧 REGISTER。
-4. REGISTER 里会携带当前板子的稳定硬件 UID，以及该 runtime 汇总后的端口位图。
+3. `mesh_node_runtime` 在 init 成功后，会向每个已绑定 UART 各发送一帧 REGISTER；若板级启用了 Wi-Fi，也会额外通过保留的 Wi-Fi 特殊端口发送一帧 REGISTER。
+4. REGISTER 里会携带当前板子的稳定硬件 UID、该 runtime 汇总后的端口位图，以及 `wifi_supported` 标记；Wi-Fi 启用时，端口位图最高位保留给 Wi-Fi。
 
 当前 STM32 实现里，8 字节 UID 由 96-bit 硬件唯一编号压缩得到：
 
@@ -83,7 +83,8 @@ runtime 收到后，会自动完成：
 2. 读取该节点硬件 UID。
 3. 为该节点分配或复用稳定节点名。
 4. 为该节点绑定一个真正可用的 mesh-backed mini9P client。
-5. 把节点同步到 VFS。
+5. 若 REGISTER 声明该节点启用了 Wi-Fi，则主机把 Wi-Fi 能力写入节点信息，并补上一条 host<->node 的直连 Wi-Fi 拓扑边。
+6. 把节点同步到 VFS。
 
 最终效果是：
 

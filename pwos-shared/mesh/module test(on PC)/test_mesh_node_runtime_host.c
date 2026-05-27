@@ -59,6 +59,11 @@ static int fake_send_frame(void *transport_ctx, uint8_t next_hop, const uint8_t 
     return 0;
 }
 
+static int fake_wifi_send_frame(void *transport_ctx, const uint8_t *tx_data, size_t tx_len)
+{
+    return fake_send_frame(transport_ctx, MESH_NODE_RUNTIME_WIFI_PORT_ID, tx_data, tx_len);
+}
+
 static int fake_receive_frame(void *transport_ctx, uint8_t *rx_data, size_t rx_cap, size_t *rx_len)
 {
     struct fake_transport *transport = (struct fake_transport *)transport_ctx;
@@ -75,6 +80,11 @@ static int fake_receive_frame(void *transport_ctx, uint8_t *rx_data, size_t rx_c
     *rx_len = transport->rx_queue[transport->rx_index].len;
     ++transport->rx_index;
     return 0;
+}
+
+static int fake_wifi_receive_frame(void *transport_ctx, uint8_t *rx_data, size_t rx_cap, size_t *rx_len)
+{
+    return fake_receive_frame(transport_ctx, rx_data, rx_cap, rx_len);
 }
 
 static int fake_mini9p_server_handler(
@@ -104,18 +114,22 @@ static void init_runtime(
     struct fake_transport *transports,
     const uint8_t *port_ids,
     size_t port_count,
+    struct fake_transport *wifi_transport,
+    bool wifi_supported,
     struct fake_server_ctx *server_ctx,
     const uint8_t uid[MESH_UID_LEN],
     bool auto_register_on_init)
 {
     struct mesh_node_runtime_config config;
     struct mesh_node_runtime_port_config port_configs[MESH_NODE_RUNTIME_MAX_PORTS];
+    struct mesh_wifi_config wifi_config;
     size_t i;
 
-    assert(port_count <= MESH_NODE_RUNTIME_MAX_PORTS);
+    assert(port_count <= MESH_NODE_RUNTIME_MAX_UART_PORTS);
 
     mesh_node_runtime_get_default_config(&config);
     memset(port_configs, 0, sizeof(port_configs));
+    mesh_wifi_get_default_config(&wifi_config);
     for (i = 0u; i < port_count; ++i) {
         port_configs[i].send_frame = fake_send_frame;
         port_configs[i].receive_frame = fake_receive_frame;
@@ -132,7 +146,15 @@ static void init_runtime(
     config.port_bitmap = 0u;
     config.auto_register_on_init = auto_register_on_init;
 
-    assert(mesh_node_runtime_init(runtime, &config, port_count) == 0);
+    if (wifi_supported) {
+        assert(wifi_transport != NULL);
+        wifi_config.send_frame = fake_wifi_send_frame;
+        wifi_config.receive_frame = fake_wifi_receive_frame;
+        wifi_config.io_ctx = wifi_transport;
+        config.wifi_config = &wifi_config;
+    }
+
+    assert(mesh_node_runtime_init(runtime, &config, port_count, wifi_supported) == 0);
 }
 
 static void test_auto_register_on_init_sends_uid_to_every_bound_port(void)
@@ -151,7 +173,7 @@ static void test_auto_register_on_init_sends_uid_to_every_bound_port(void)
         fake_transport_reset(&transports[i]);
     }
 
-    init_runtime(&runtime, transports, port_ids, 2u, &server_ctx, uid, true);
+    init_runtime(&runtime, transports, port_ids, 2u, NULL, false, &server_ctx, uid, true);
 
     assert(transports[0].tx_count == 1u);
     assert(transports[1].tx_count == 1u);
@@ -194,7 +216,7 @@ static void test_assign_updates_local_addr_and_allows_server_reply(void)
     memset(&server_ctx, 0, sizeof(server_ctx));
     fake_transport_reset(&transports[0]);
 
-    init_runtime(&runtime, transports, port_ids, 1u, &server_ctx, uid, false);
+    init_runtime(&runtime, transports, port_ids, 1u, NULL, false, &server_ctx, uid, false);
 
     memset(&assign_payload, 0, sizeof(assign_payload));
     memcpy(assign_payload.uid, uid, sizeof(uid));
@@ -279,7 +301,7 @@ static void test_assign_with_foreign_uid_is_ignored(void)
     memset(&server_ctx, 0, sizeof(server_ctx));
     fake_transport_reset(&transports[0]);
 
-    init_runtime(&runtime, transports, port_ids, 1u, &server_ctx, local_uid, false);
+    init_runtime(&runtime, transports, port_ids, 1u, NULL, false, &server_ctx, local_uid, false);
 
     memset(&assign_payload, 0, sizeof(assign_payload));
     memcpy(assign_payload.uid, foreign_uid, sizeof(foreign_uid));
@@ -332,7 +354,7 @@ static void test_multi_port_forward_uses_route_selected_egress(void)
         fake_transport_reset(&transports[i]);
     }
 
-    init_runtime(&runtime, transports, port_ids, 2u, &server_ctx, uid, false);
+    init_runtime(&runtime, transports, port_ids, 2u, NULL, false, &server_ctx, uid, false);
 
     memset(&assign_payload, 0, sizeof(assign_payload));
     memcpy(assign_payload.uid, uid, sizeof(uid));
@@ -387,12 +409,172 @@ static void test_multi_port_forward_uses_route_selected_egress(void)
     mesh_node_runtime_deinit(&runtime);
 }
 
+static void test_wifi_transport_register_and_forward_use_reserved_port(void)
+{
+    struct mesh_node_runtime runtime;
+    struct fake_transport transports[1];
+    struct fake_transport wifi_transport;
+    struct fake_server_ctx server_ctx;
+    struct mesh_assign_payload assign_payload;
+    struct mesh_register_payload register_payload;
+    struct mesh_route_update_payload route_payload;
+    struct mesh_ping_payload ping_payload;
+    struct mesh_frame_view view;
+    uint8_t frame[TEST_FRAME_CAP];
+    size_t frame_len = 0u;
+    uint8_t next_hop = 0u;
+    bool is_local = false;
+    const uint8_t uid[MESH_UID_LEN] = {0x91u, 0x92u, 0x93u, 0x94u, 0x95u, 0x96u, 0x97u, 0x98u};
+    const uint8_t port_ids[1] = {0u};
+
+    memset(&server_ctx, 0, sizeof(server_ctx));
+    fake_transport_reset(&transports[0]);
+    fake_transport_reset(&wifi_transport);
+
+    init_runtime(&runtime, transports, port_ids, 1u, &wifi_transport, true, &server_ctx, uid, true);
+
+    assert(transports[0].tx_count == 1u);
+    assert(wifi_transport.tx_count == 1u);
+    assert(wifi_transport.tx_next_hop[0] == CLUSTER_PORT_WIFI_ID);
+    assert(mesh_decode_frame(wifi_transport.tx_queue[0].data, wifi_transport.tx_queue[0].len, &view));
+    assert(view.type == MESH_TYPE_REGISTER);
+    assert(mesh_parse_register(&view, &register_payload));
+    assert(register_payload.wifi_supported);
+    assert(register_payload.port_bitmap == (uint8_t)(0x01u | CLUSTER_PORT_WIFI_MASK));
+
+    memset(&assign_payload, 0, sizeof(assign_payload));
+    memcpy(assign_payload.uid, uid, sizeof(uid));
+    assign_payload.node_addr = 0x24u;
+    assert(mesh_build_assign(0x01u, MESH_ADDR_UNASSIGNED, 0x3001u, 6u, &assign_payload, frame, sizeof(frame), &frame_len));
+    fake_transport_queue_rx(&transports[0], frame, frame_len);
+    assert(mesh_node_runtime_poll_once(&runtime) == 0);
+
+    memset(&route_payload, 0, sizeof(route_payload));
+    route_payload.dst = 0x66u;
+    route_payload.next_hop = CLUSTER_PORT_WIFI_ID;
+    route_payload.metric = 1u;
+    route_payload.route_version = 3u;
+    route_payload.action = MESH_ROUTE_SET;
+    assert(mesh_build_route_update(0x01u, 0x24u, 0x3002u, 6u, &route_payload, frame, sizeof(frame), &frame_len));
+    fake_transport_queue_rx(&transports[0], frame, frame_len);
+    assert(mesh_node_runtime_poll_once(&runtime) == 0);
+    assert(cluster_lookup_next_hop(&runtime.cluster, 0x66u, &next_hop, &is_local) == 0);
+    assert(!is_local);
+    assert(next_hop == CLUSTER_PORT_WIFI_ID);
+
+    memset(&ping_payload, 0, sizeof(ping_payload));
+    ping_payload.local_time_ms = 0x01020304u;
+    assert(mesh_build_ping(0x01u, 0x66u, 0x3003u, 6u, MESH_TYPE_PING, &ping_payload, frame, sizeof(frame), &frame_len));
+    fake_transport_queue_rx(&transports[0], frame, frame_len);
+    assert(mesh_node_runtime_poll_once(&runtime) == 0);
+    assert(wifi_transport.tx_count == 2u);
+    assert(wifi_transport.tx_next_hop[1] == CLUSTER_PORT_WIFI_ID);
+    assert(mesh_decode_frame(wifi_transport.tx_queue[1].data, wifi_transport.tx_queue[1].len, &view));
+    assert(view.type == MESH_TYPE_PING);
+    assert(view.dst == 0x66u);
+
+    mesh_node_runtime_deinit(&runtime);
+}
+
+static void test_mixed_wifi_and_uart_routes_choose_expected_egress(void)
+{
+    struct mesh_node_runtime runtime;
+    struct fake_transport transports[1];
+    struct fake_transport wifi_transport;
+    struct fake_server_ctx server_ctx;
+    struct mesh_assign_payload assign_payload;
+    struct mesh_register_payload register_payload;
+    struct mesh_route_update_payload route_payload;
+    struct mesh_ping_payload ping_payload;
+    struct mesh_frame_view view;
+    uint8_t frame[TEST_FRAME_CAP];
+    size_t frame_len = 0u;
+    uint8_t next_hop = 0u;
+    bool is_local = false;
+    const uint8_t uid[MESH_UID_LEN] = {0xA9u, 0xAAu, 0xABu, 0xACu, 0xADu, 0xAEu, 0xAFu, 0xB0u};
+    const uint8_t port_ids[1] = {1u};
+
+    memset(&server_ctx, 0, sizeof(server_ctx));
+    fake_transport_reset(&transports[0]);
+    fake_transport_reset(&wifi_transport);
+
+    init_runtime(&runtime, transports, port_ids, 1u, &wifi_transport, true, &server_ctx, uid, true);
+
+    assert(transports[0].tx_count == 1u);
+    assert(wifi_transport.tx_count == 1u);
+    assert(mesh_decode_frame(transports[0].tx_queue[0].data, transports[0].tx_queue[0].len, &view));
+    assert(view.type == MESH_TYPE_REGISTER);
+    assert(mesh_parse_register(&view, &register_payload));
+    assert(register_payload.wifi_supported);
+    assert(register_payload.port_bitmap == (uint8_t)((1u << 1u) | CLUSTER_PORT_WIFI_MASK));
+
+    memset(&assign_payload, 0, sizeof(assign_payload));
+    memcpy(assign_payload.uid, uid, sizeof(uid));
+    assign_payload.node_addr = 0x24u;
+    assert(mesh_build_assign(0x01u, MESH_ADDR_UNASSIGNED, 0x3101u, 6u, &assign_payload, frame, sizeof(frame), &frame_len));
+    fake_transport_queue_rx(&transports[0], frame, frame_len);
+    assert(mesh_node_runtime_poll_once(&runtime) == 0);
+
+    memset(&route_payload, 0, sizeof(route_payload));
+    route_payload.dst = 0x41u;
+    route_payload.next_hop = 1u;
+    route_payload.metric = 1u;
+    route_payload.route_version = 5u;
+    route_payload.action = MESH_ROUTE_SET;
+    assert(mesh_build_route_update(0x01u, 0x24u, 0x3102u, 6u, &route_payload, frame, sizeof(frame), &frame_len));
+    fake_transport_queue_rx(&transports[0], frame, frame_len);
+    assert(mesh_node_runtime_poll_once(&runtime) == 0);
+
+    memset(&route_payload, 0, sizeof(route_payload));
+    route_payload.dst = 0x66u;
+    route_payload.next_hop = CLUSTER_PORT_WIFI_ID;
+    route_payload.metric = 1u;
+    route_payload.route_version = 6u;
+    route_payload.action = MESH_ROUTE_SET;
+    assert(mesh_build_route_update(0x01u, 0x24u, 0x3103u, 6u, &route_payload, frame, sizeof(frame), &frame_len));
+    fake_transport_queue_rx(&transports[0], frame, frame_len);
+    assert(mesh_node_runtime_poll_once(&runtime) == 0);
+
+    assert(cluster_lookup_next_hop(&runtime.cluster, 0x41u, &next_hop, &is_local) == 0);
+    assert(!is_local);
+    assert(next_hop == 1u);
+    assert(cluster_lookup_next_hop(&runtime.cluster, 0x66u, &next_hop, &is_local) == 0);
+    assert(!is_local);
+    assert(next_hop == CLUSTER_PORT_WIFI_ID);
+
+    memset(&ping_payload, 0, sizeof(ping_payload));
+    ping_payload.local_time_ms = 0x11121314u;
+    assert(mesh_build_ping(0x01u, 0x41u, 0x3104u, 6u, MESH_TYPE_PING, &ping_payload, frame, sizeof(frame), &frame_len));
+    fake_transport_queue_rx(&transports[0], frame, frame_len);
+    assert(mesh_node_runtime_poll_once(&runtime) == 0);
+    assert(transports[0].tx_count == 4u);
+    assert(transports[0].tx_next_hop[3] == 1u);
+    assert(mesh_decode_frame(transports[0].tx_queue[3].data, transports[0].tx_queue[3].len, &view));
+    assert(view.type == MESH_TYPE_PING);
+    assert(view.dst == 0x41u);
+
+    memset(&ping_payload, 0, sizeof(ping_payload));
+    ping_payload.local_time_ms = 0x21222324u;
+    assert(mesh_build_ping(0x01u, 0x66u, 0x3105u, 6u, MESH_TYPE_PING, &ping_payload, frame, sizeof(frame), &frame_len));
+    fake_transport_queue_rx(&transports[0], frame, frame_len);
+    assert(mesh_node_runtime_poll_once(&runtime) == 0);
+    assert(wifi_transport.tx_count == 2u);
+    assert(wifi_transport.tx_next_hop[1] == CLUSTER_PORT_WIFI_ID);
+    assert(mesh_decode_frame(wifi_transport.tx_queue[1].data, wifi_transport.tx_queue[1].len, &view));
+    assert(view.type == MESH_TYPE_PING);
+    assert(view.dst == 0x66u);
+
+    mesh_node_runtime_deinit(&runtime);
+}
+
 int main(void)
 {
     test_auto_register_on_init_sends_uid_to_every_bound_port();
     test_assign_updates_local_addr_and_allows_server_reply();
     test_assign_with_foreign_uid_is_ignored();
     test_multi_port_forward_uses_route_selected_egress();
+    test_wifi_transport_register_and_forward_use_reserved_port();
+    test_mixed_wifi_and_uart_routes_choose_expected_egress();
 
     puts("mesh node runtime host tests passed");
     return 0;

@@ -7,6 +7,7 @@
 
 #include "../../../pwos-shared/mesh/cluster/cluster.h"
 #include "../../../pwos-shared/mesh/processer/mesh_processer.h"
+#include "../../../pwos-shared/mesh/wifi/mesh_wifi.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -32,8 +33,14 @@ extern "C" {
  *    确保后续回包不再继续使用 0xFF。
  */
 
-/* 当前单个 runtime 最多管理的本地物理端口数。 */
+/* 当前单个 runtime 最多管理的总传输端口数（UART + 可选 Wi-Fi）。 */
 #define MESH_NODE_RUNTIME_MAX_PORTS 8u
+
+/* 为 Wi-Fi 保留最高位后，当前 runtime 最多能直接管理的 UART 数量。 */
+#define MESH_NODE_RUNTIME_MAX_UART_PORTS MESH_PORT_SELECTOR_WIFI_ID
+
+/* Wi-Fi 在 runtime 内部固定映射到保留端口号。 */
+#define MESH_NODE_RUNTIME_WIFI_PORT_ID CLUSTER_PORT_WIFI_ID
 
 /* 无效或未知的本地端口编号。 */
 #define MESH_NODE_RUNTIME_INVALID_PORT CLUSTER_PORT_INVALID
@@ -76,6 +83,7 @@ struct mesh_node_runtime_config {
     mesh_processer_send_frame_fn send_frame;
     mesh_processer_receive_frame_fn receive_frame;
     void *transport_ctx;
+    const struct mesh_wifi_config *wifi_config;                 /**< 启用 Wi-Fi 时使用的 mesh_wifi 配置。 */
 
     mesh_processer_mini9p_server_handler_fn mini9p_server_handler; /**< 本地 mini9P server 处理器。 */
     void *mini9p_server_ctx;                                      /**< 传给 mini9P server 的上下文。 */
@@ -98,6 +106,8 @@ struct mesh_node_runtime {
     size_t next_rx_port_index;                         /**< 下一轮轮询从哪个端口开始。 */
     uint8_t active_rx_port;                            /**< 当前正在被 processor 处理的入端口编号。 */
     uint8_t control_plane_port;                        /**< 当前已知的上行控制面出口端口。 */
+    bool wifi_supported;                               /**< 当前 runtime 是否启用了 Wi-Fi 传输。 */
+    struct mesh_wifi wifi;                             /**< Wi-Fi transport 实例。 */
     struct mesh_node_runtime_port ports[MESH_NODE_RUNTIME_MAX_PORTS]; /**< 已绑定端口表。 */
 };
 
@@ -109,18 +119,21 @@ void mesh_node_runtime_get_default_config(struct mesh_node_runtime_config *out_c
  *
  * @param runtime 待初始化实例。
  * @param config  初始化配置。
- * @param port_count 当前 MCU 节点需要由该 runtime 管理的物理串口/端口数量。
+ * @param port_count 当前 MCU 节点需要由该 runtime 管理的物理 UART 端口数量。
+ * @param wifi_supported 当前硬件是否支持并启用 Wi-Fi mesh 传输。
  *
  * 行为：
  * - 若 config->ports != NULL，则按端口数组逐个绑定端口；
  * - 若 config->ports == NULL 且 port_count == 1，则退化为旧版单端口模式；
+ * - wifi_supported=true 时，会额外挂接一个保留的 Wi-Fi 特殊端口；
  * - runtime 会把 cluster 配成 DIRECT_TABLE + 端口选择器语义；
  * - auto_register_on_init=true 时，会向所有已绑定端口各发送一次 REGISTER。
  */
 int mesh_node_runtime_init(
     struct mesh_node_runtime *runtime,
     const struct mesh_node_runtime_config *config,
-    size_t port_count);
+     size_t port_count,
+     bool wifi_supported);
 
 /* 清理 runtime、processor、cluster 和端口绑定状态。 */
 void mesh_node_runtime_deinit(struct mesh_node_runtime *runtime);

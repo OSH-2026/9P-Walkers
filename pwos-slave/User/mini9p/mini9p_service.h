@@ -9,11 +9,13 @@
 #ifndef MINI9P_SERVICE_H
 #define MINI9P_SERVICE_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
 #include "mini9p_server.h"
 #include "mesh_uart_transport.h"
+#include "../../../pwos-shared/mesh/wifi/mesh_wifi.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -32,17 +34,21 @@ struct mini9p_service_backend {
     UART_HandleTypeDef *uart;         /**< 兼容旧版的单 UART 句柄；当 uarts 为空时使用。 */
     UART_HandleTypeDef *const *uarts; /**< 多 UART 模式下的句柄数组。 */
     size_t uart_count;                /**< uarts 数组长度；为 0 时回退到单 UART 模式。 */
+    bool wifi_supported;              /**< 当前板级硬件是否启用 Wi-Fi mesh 传输。 */
+    const struct mesh_wifi_config *wifi_config; /**< 启用 Wi-Fi 时使用的 mesh_wifi 配置。 */
 };
 
 /**
  * @brief 初始化 Mesh + Mini9P 串口服务，并注入本地 Mini9P backend。
  *
- * 初始化顺序为 mini9p_server -> raw mesh UART transport -> mesh_node_runtime，
- * 并在 init 成功后自动向所有已绑定 UART 各发送一帧 REGISTER。
+ * 初始化顺序为 mini9p_server -> raw mesh transport -> mesh_node_runtime，
+ * 并在 init 成功后自动向所有已绑定 UART/Wi-Fi 端口各发送一帧 REGISTER。
  *
  * UART 绑定模式：
  * - 推荐：通过 backend.uarts + backend.uart_count 一次传入当前节点的全部硬件串口；
  * - 兼容：若只填写 backend.uart，则退化为单 UART 模式。
+ * - 若 backend.wifi_supported=true，则还会额外挂接一个 Wi-Fi mesh 端口；
+ *   当前也允许“0 UART + Wi-Fi”模式。
  *
  * @param backend 板级代码构造好的 Mini9P backend。
  * @return 0 成功，负 mesh/transport 错误码失败。

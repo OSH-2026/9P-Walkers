@@ -95,7 +95,7 @@
 
 所有整数均为小端序。
 
-### 7.1 REGISTER（固定 15 字节）
+### 7.1 REGISTER（固定 16 字节）
 
 | 字段 | 长度 | 说明 |
 |---|---:|---|
@@ -103,12 +103,14 @@
 | boot_nonce | 4 | 本次上电实例标识 |
 | capability_bits | 2 | 能力位图 |
 | port_bitmap | 1 | 本地端口能力位图 |
+| wifi_supported | 1 | 当前节点是否启用 Wi-Fi mesh 传输 |
 
 行为建议：
 
 - 源地址可为未分配地址。
 - 目标地址使用未分配地址（按网络约定上送主机方向）。
 - 设置 CONTROL 与 NEEDS_ACK。
+- port_bitmap 的最高位保留给 Wi-Fi 传输；当 wifi_supported=true 时应同时置位该保留位。
 
 ### 7.2 ASSIGN（变长）
 
@@ -151,7 +153,7 @@
 | 字段 | 长度 | 说明 |
 |---|---:|---|
 | dst | 1 | 目标地址 |
-| next_hop | 1 | 发送选择器；普通场景下通常是下一跳地址，子机多串口 direct-table 场景下是本地出口端口号 |
+| next_hop | 1 | 发送选择器；普通场景下通常是下一跳地址，子机多串口 direct-table 场景下是本地出口端口号，最高位保留选择器表示 Wi-Fi |
 | metric | 1 | 路由代价 |
 | route_version | 2 | 路由版本 |
 | action | 1 | 1=set，2=delete |

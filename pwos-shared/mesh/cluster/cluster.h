@@ -36,6 +36,10 @@ extern "C" {
 /* 未知或未指定的本地链路/串口编号。 */
 #define CLUSTER_PORT_INVALID 0xFFu
 
+/* 共享约定：最高位端口选择器保留给 Wi-Fi 传输。 */
+#define CLUSTER_PORT_WIFI_ID MESH_PORT_SELECTOR_WIFI_ID
+#define CLUSTER_PORT_WIFI_MASK MESH_PORT_SELECTOR_WIFI_MASK
+
 /*
  * cluster 的工作模式：
  * - DIRECT_TABLE：更适合子机或简单中继，只维护路由表。
@@ -49,12 +53,18 @@ enum cluster_mode {
 /*
  * 一个节点的最小运行时信息。
  *
- * 这里先只保存地址和在线状态；
- * 若后续控制面需要节点名、UID、能力位图，可以在不破坏接口的前提下扩展。
+ * 当前最小元数据包括：
+ * - online：控制面观测到的在线状态；
+ * - capability_bits：来自最新 REGISTER 的能力位图；
+ * - port_bitmap：来自最新 REGISTER 的本地发送选择器位图；
+ * - wifi_supported：该节点是否声明支持 Wi-Fi 直连传输。
  */
 struct cluster_node {
     uint8_t addr;
+    uint16_t capability_bits;
+    uint8_t port_bitmap;
     bool online;
+    bool wifi_supported;
     bool valid;
 };
 

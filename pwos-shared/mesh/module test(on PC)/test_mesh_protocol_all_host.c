@@ -270,6 +270,7 @@ static void test_register_roundtrip(void)
     in_payload.boot_nonce = 0x01020304u;
     in_payload.capability_bits = 0x2233u;
     in_payload.port_bitmap = 0x5Au;
+    in_payload.wifi_supported = true;
 
     assert(mesh_build_register(0x10u, 0x2001u, 6u, &in_payload, frame, sizeof(frame), &frame_len));
     assert(mesh_decode_frame(frame, frame_len, &view));
@@ -279,6 +280,7 @@ static void test_register_roundtrip(void)
     assert(out_payload.boot_nonce == in_payload.boot_nonce);
     assert(out_payload.capability_bits == in_payload.capability_bits);
     assert(out_payload.port_bitmap == in_payload.port_bitmap);
+    assert(out_payload.wifi_supported == in_payload.wifi_supported);
 }
 
 static void test_assign_roundtrip_and_invalid_name_len(void)

@@ -17,9 +17,9 @@
 #define MINI9P_SERVICE_REGISTER_CAPABILITY_BITS 0x0001u
 
 static struct m9p_server g_mini9p_server;
-static struct mesh_uart_transport g_mesh_uart_transports[MESH_NODE_RUNTIME_MAX_PORTS];
+static struct mesh_uart_transport g_mesh_uart_transports[MESH_NODE_RUNTIME_MAX_UART_PORTS];
 static struct mesh_node_runtime g_mesh_node_runtime;
-static struct mesh_node_runtime_port_config g_mesh_runtime_ports[MESH_NODE_RUNTIME_MAX_PORTS];
+static struct mesh_node_runtime_port_config g_mesh_runtime_ports[MESH_NODE_RUNTIME_MAX_UART_PORTS];
 static bool g_mini9p_service_initialized;
 
 static void mini9p_service_store_le32(uint8_t *dst, uint32_t value)
@@ -91,9 +91,11 @@ int mini9p_service_init_with_backend(const struct mini9p_service_backend *backen
         uart_list = single_uart_list;
         uart_count = 1u;
     } else {
-        return -(int)MESH_ERR_INVALID_STATE;
+        uart_list = NULL;
+        uart_count = 0u;
     }
-    if (uart_count == 0u || uart_count > MESH_NODE_RUNTIME_MAX_PORTS) {
+    if ((uart_count == 0u && !backend->wifi_supported) ||
+        uart_count > MESH_NODE_RUNTIME_MAX_UART_PORTS) {
         return -(int)MESH_ERR_INVALID_STATE;
     }
 
@@ -134,12 +136,13 @@ int mini9p_service_init_with_backend(const struct mini9p_service_backend *backen
     runtime_config.ports = g_mesh_runtime_ports;
     runtime_config.mini9p_server_handler = m9p_server_handle_frame;
     runtime_config.mini9p_server_ctx = &g_mini9p_server;
+    runtime_config.wifi_config = backend->wifi_config;
     mini9p_service_fill_local_uid(runtime_config.local_uid);
     runtime_config.boot_nonce = mini9p_service_make_boot_nonce();
     runtime_config.capability_bits = MINI9P_SERVICE_REGISTER_CAPABILITY_BITS;
     runtime_config.port_bitmap = 0u;
     runtime_config.auto_register_on_init = true;
-    rc = mesh_node_runtime_init(&g_mesh_node_runtime, &runtime_config, uart_count);
+    rc = mesh_node_runtime_init(&g_mesh_node_runtime, &runtime_config, uart_count, backend->wifi_supported);
     if (rc != 0) {
         for (i = 0u; i < uart_count; ++i) {
             mesh_uart_transport_deinit(&g_mesh_uart_transports[i]);

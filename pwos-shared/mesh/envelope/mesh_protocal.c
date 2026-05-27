@@ -297,7 +297,7 @@ bool mesh_build_register(
     size_t out_cap,
     size_t *out_len)
 {
-    uint8_t raw[15];
+    uint8_t raw[16];
 
     if (payload == NULL) {
         return false;
@@ -308,6 +308,7 @@ bool mesh_build_register(
     put_le32(raw + 8, payload->boot_nonce);
     put_le16(raw + 12, payload->capability_bits);
     raw[14] = payload->port_bitmap;
+    raw[15] = payload->wifi_supported ? 1u : 0u;
 
     return encode_payload_to_frame(
         MESH_TYPE_REGISTER,
@@ -330,7 +331,7 @@ bool mesh_parse_register(const struct mesh_frame_view *frame, struct mesh_regist
     if (frame == NULL || out_payload == NULL) {
         return false;
     }
-    if (frame->type != MESH_TYPE_REGISTER || frame->payload_len != 15u) {
+    if (frame->type != MESH_TYPE_REGISTER || frame->payload_len != 16u) {
         return false;
     }
 
@@ -339,6 +340,7 @@ bool mesh_parse_register(const struct mesh_frame_view *frame, struct mesh_regist
     out_payload->boot_nonce = get_le32(payload + 8);
     out_payload->capability_bits = get_le16(payload + 12);
     out_payload->port_bitmap = payload[14];
+    out_payload->wifi_supported = payload[15] != 0u;
     return true;
 }
 

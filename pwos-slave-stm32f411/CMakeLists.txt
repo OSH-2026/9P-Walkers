@@ -54,6 +54,7 @@ set(PWOS_SHARED_MESH_CLUSTER_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/cluster
 set(PWOS_SHARED_MESH_ENVELOPE_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/envelope)
 set(PWOS_SHARED_MESH_PROCESSER_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/processer)
 set(PWOS_SHARED_MESH_TRANSPORT_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/transport)
+set(PWOS_SHARED_MESH_WIFI_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/wifi)
 
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
@@ -72,6 +73,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${PWOS_SHARED_MESH_PROCESSER_DIR}/mesh_processer.c
     ${PWOS_SLAVE_USER_MESH_DIR}/mesh_node_runtime.c
     ${PWOS_SHARED_MESH_TRANSPORT_DIR}/mesh_uart_transport.c
+    ${PWOS_SHARED_MESH_WIFI_DIR}/mesh_wifi.c
     ${PWOS_SHARED_MINI9P_DIR}/mini9p_protocol.c
     ${PWOS_SHARED_MINI9P_DIR}/mini9p_server.c
 )
@@ -94,6 +96,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${PWOS_SHARED_MESH_ENVELOPE_DIR}
     ${PWOS_SHARED_MESH_PROCESSER_DIR}
     ${PWOS_SHARED_MESH_TRANSPORT_DIR}
+    ${PWOS_SHARED_MESH_WIFI_DIR}
 )
 
 # Add project symbols (macros)

@@ -27,9 +27,21 @@ static void clear_nodes(struct cluster *cluster)
 
     for (i = 0u; i < CLUSTER_MAX_NODES; ++i) {
         cluster->nodes[i].addr = CLUSTER_INVALID_ADDR;
+        cluster->nodes[i].capability_bits = 0u;
+        cluster->nodes[i].port_bitmap = 0u;
         cluster->nodes[i].online = false;
+        cluster->nodes[i].wifi_supported = false;
         cluster->nodes[i].valid = false;
     }
+}
+
+static uint8_t cluster_normalize_port_bitmap(uint8_t port_bitmap, bool wifi_supported)
+{
+    if (wifi_supported) {
+        return (uint8_t)(port_bitmap | CLUSTER_PORT_WIFI_MASK);
+    }
+
+    return (uint8_t)(port_bitmap & (uint8_t)~CLUSTER_PORT_WIFI_MASK);
 }
 
 static void clear_routes(struct cluster *cluster)
@@ -91,7 +103,10 @@ static struct cluster_node *ensure_node(struct cluster *cluster, uint8_t addr)
         if (!cluster->nodes[i].valid) {
             cluster->nodes[i].valid = true;
             cluster->nodes[i].addr = addr;
+            cluster->nodes[i].capability_bits = 0u;
+            cluster->nodes[i].port_bitmap = 0u;
             cluster->nodes[i].online = false;
+            cluster->nodes[i].wifi_supported = false;
             return &cluster->nodes[i];
         }
     }
@@ -222,6 +237,31 @@ static int remove_link_by_key(struct cluster *cluster, uint8_t from, uint8_t to,
     memset(link, 0, sizeof(*link));
     link->from = CLUSTER_INVALID_ADDR;
     link->to = CLUSTER_INVALID_ADDR;
+    return 0;
+}
+
+static int cluster_update_register_metadata(
+    struct cluster *cluster,
+    uint8_t addr,
+    const struct mesh_register_payload *payload)
+{
+    struct cluster_node *node;
+
+    if (cluster == NULL || payload == NULL) {
+        return -(int)MESH_ERR_BAD_FRAME;
+    }
+    if (addr == CLUSTER_INVALID_ADDR) {
+        return 0;
+    }
+
+    node = ensure_node(cluster, addr);
+    if (node == NULL) {
+        return -(int)MESH_ERR_BUSY;
+    }
+
+    node->capability_bits = payload->capability_bits;
+    node->port_bitmap = cluster_normalize_port_bitmap(payload->port_bitmap, payload->wifi_supported);
+    node->wifi_supported = payload->wifi_supported;
     return 0;
 }
 
@@ -938,9 +978,14 @@ int cluster_processor_control_handler(
     switch (frame->type) {
         case MESH_TYPE_REGISTER: {
             struct mesh_register_payload payload;
+            int rc;
 
             if (!mesh_parse_register(frame, &payload)) {
                 return -(int)MESH_ERR_BAD_FRAME;
+            }
+            rc = cluster_update_register_metadata(cluster, frame->src, &payload);
+            if (rc != 0) {
+                return rc;
             }
             return cluster_set_node_online(cluster, frame->src, true);
         }

@@ -13,6 +13,25 @@ static int mesh_node_runtime_send_link_state(
     uint8_t report_port,
     bool link_up);
 
+static int mesh_node_runtime_send_wifi_frame(
+    void *transport_ctx,
+    uint8_t next_hop,
+    const uint8_t *tx_data,
+    size_t tx_len)
+{
+    (void)next_hop;
+    return mesh_wifi_send_frame((struct mesh_wifi *)transport_ctx, tx_data, tx_len);
+}
+
+static int mesh_node_runtime_receive_wifi_frame(
+    void *transport_ctx,
+    uint8_t *rx_data,
+    size_t rx_cap,
+    size_t *rx_len)
+{
+    return mesh_wifi_receive_frame((struct mesh_wifi *)transport_ctx, rx_data, rx_cap, rx_len);
+}
+
 static uint16_t mesh_node_runtime_take_seq(struct mesh_node_runtime *runtime)
 {
     uint16_t seq;
@@ -186,6 +205,9 @@ static int mesh_node_runtime_register_port(
     runtime->ports[index].send_frame = port_config->send_frame;
     runtime->ports[index].receive_frame = port_config->receive_frame;
     runtime->ports[index].transport_ctx = port_config->transport_ctx;
+    if (runtime->port_count <= index) {
+        runtime->port_count = index + 1u;
+    }
     return 0;
 }
 
@@ -252,6 +274,7 @@ static int mesh_node_runtime_send_register_on_port(
     payload.boot_nonce = runtime->config.boot_nonce;
     payload.capability_bits = runtime->config.capability_bits;
     payload.port_bitmap = runtime->config.port_bitmap;
+    payload.wifi_supported = runtime->wifi_supported;
 
     if (!mesh_build_register(
             runtime->processor.config.local_addr,
@@ -385,18 +408,20 @@ void mesh_node_runtime_get_default_config(struct mesh_node_runtime_config *out_c
 int mesh_node_runtime_init(
     struct mesh_node_runtime *runtime,
     const struct mesh_node_runtime_config *config,
-    size_t port_count)
+    size_t port_count,
+    bool wifi_supported)
 {
     struct mesh_node_runtime_config merged_config;
     struct cluster_config cluster_config;
     struct mesh_processer_config processor_config;
+    struct mesh_node_runtime_port_config wifi_port;
     size_t i;
     int rc;
 
     if (runtime == NULL) {
         return -(int)MESH_ERR_BAD_FRAME;
     }
-    if (port_count == 0u || port_count > MESH_NODE_RUNTIME_MAX_PORTS) {
+    if ((port_count == 0u && !wifi_supported) || port_count > MESH_NODE_RUNTIME_MAX_UART_PORTS) {
         return -(int)MESH_ERR_INVALID_STATE;
     }
 
@@ -407,11 +432,12 @@ int mesh_node_runtime_init(
 
     memset(runtime, 0, sizeof(*runtime));
     runtime->config = merged_config;
-    runtime->port_count = port_count;
+    runtime->port_count = 0u;
     runtime->active_rx_port = MESH_NODE_RUNTIME_INVALID_PORT;
     runtime->control_plane_port = MESH_NODE_RUNTIME_INVALID_PORT;
+    runtime->wifi_supported = wifi_supported;
 
-    if (runtime->config.ports != NULL) {
+    if (port_count > 0u && runtime->config.ports != NULL) {
         for (i = 0u; i < port_count; ++i) {
             rc = mesh_node_runtime_register_port(runtime, i, &runtime->config.ports[i]);
             if (rc != 0) {
@@ -419,7 +445,7 @@ int mesh_node_runtime_init(
                 return rc;
             }
         }
-    } else {
+    } else if (port_count > 0u) {
         struct mesh_node_runtime_port_config single_port;
 
         if (port_count != 1u ||
@@ -441,12 +467,40 @@ int mesh_node_runtime_init(
         }
     }
 
+    if (wifi_supported) {
+        if (runtime->config.wifi_config == NULL) {
+            mesh_node_runtime_deinit(runtime);
+            return -(int)MESH_ERR_INVALID_STATE;
+        }
+
+        rc = mesh_wifi_init(&runtime->wifi, runtime->config.wifi_config);
+        if (rc != 0) {
+            mesh_node_runtime_deinit(runtime);
+            return rc;
+        }
+
+        memset(&wifi_port, 0, sizeof(wifi_port));
+        wifi_port.send_frame = mesh_node_runtime_send_wifi_frame;
+        wifi_port.receive_frame = mesh_node_runtime_receive_wifi_frame;
+        wifi_port.transport_ctx = &runtime->wifi;
+        wifi_port.port_id = MESH_NODE_RUNTIME_WIFI_PORT_ID;
+        rc = mesh_node_runtime_register_port(runtime, runtime->port_count, &wifi_port);
+        if (rc != 0) {
+            mesh_node_runtime_deinit(runtime);
+            return rc;
+        }
+    }
+
     if (runtime->config.port_bitmap == 0u) {
         runtime->config.port_bitmap = mesh_node_runtime_build_port_bitmap(runtime, &rc);
         if (rc != 0) {
             mesh_node_runtime_deinit(runtime);
             return rc;
         }
+    } else if (wifi_supported) {
+        runtime->config.port_bitmap = (uint8_t)(runtime->config.port_bitmap | CLUSTER_PORT_WIFI_MASK);
+    } else {
+        runtime->config.port_bitmap = (uint8_t)(runtime->config.port_bitmap & (uint8_t)~CLUSTER_PORT_WIFI_MASK);
     }
 
     cluster_get_default_config(&cluster_config);
@@ -498,6 +552,7 @@ void mesh_node_runtime_deinit(struct mesh_node_runtime *runtime)
     }
 
     mesh_processer_deinit(&runtime->processor);
+    mesh_wifi_deinit(&runtime->wifi);
     cluster_deinit(&runtime->cluster);
     memset(runtime, 0, sizeof(*runtime));
 }
