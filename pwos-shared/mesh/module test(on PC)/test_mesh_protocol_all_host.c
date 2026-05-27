@@ -482,6 +482,7 @@ static void test_link_state_roundtrip(void)
     in_payload.neighbor = 0x55u;
     in_payload.link_up = 1u;
     in_payload.quality = 80u;
+    in_payload.local_port = 2u;
 
     assert(mesh_build_link_state(0x11u, 0x22u, 0x0909u, 3u, &in_payload, frame, sizeof(frame), &frame_len));
     assert(mesh_decode_frame(frame, frame_len, &view));
@@ -489,6 +490,7 @@ static void test_link_state_roundtrip(void)
     assert(out_payload.neighbor == in_payload.neighbor);
     assert(out_payload.link_up == in_payload.link_up);
     assert(out_payload.quality == in_payload.quality);
+    assert(out_payload.local_port == in_payload.local_port);
 }
 
 static void test_error_roundtrip(void)

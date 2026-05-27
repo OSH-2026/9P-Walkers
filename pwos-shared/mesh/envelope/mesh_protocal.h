@@ -138,7 +138,13 @@ struct mesh_time_sync_payload {
     uint32_t t3_master_recv;
 };
 
-/* ROUTE_UPDATE：单条路由项更新。 */
+/*
+ * ROUTE_UPDATE：单条路由项更新。
+ *
+ * next_hop 字段在 v1 中更准确的语义是“发送选择器”：
+ * - 对普通 mesh 转发表，它通常仍是下一跳节点地址；
+ * - 对子机多串口 direct-table，它表示本地出口串口/端口编号。
+ */
 struct mesh_route_update_payload {
     uint8_t dst;
     uint8_t next_hop;
@@ -147,11 +153,17 @@ struct mesh_route_update_payload {
     uint8_t action;
 };
 
-/* LINK_STATE：邻居链路状态上报。 */
+/*
+ * LINK_STATE：邻居链路状态上报。
+ *
+ * local_port 表示：当前 src 节点若要发往 neighbor，应当从哪个本地串口发出。
+ * 主机维护全图时，需要这个字段来为子机推导“dst -> 出口串口号”的路由表。
+ */
 struct mesh_link_state_payload {
     uint8_t neighbor;
     uint8_t link_up;
     uint8_t quality;
+    uint8_t local_port;
 };
 
 /* ERROR：错误码 + 关联请求序号。 */

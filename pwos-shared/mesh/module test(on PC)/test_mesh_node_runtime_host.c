@@ -5,7 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../node_runtime/mesh_node_runtime.h"
+#include "../../../pwos-slave/User/mesh/mesh_node_runtime.h"
 #include "../../mini9p/mini9p_protocol.h"
 
 #define TEST_FRAME_CAP (MESH_FRAME_OVERHEAD + MESH_MAX_PAYLOAD_LEN)
@@ -101,46 +101,63 @@ static int fake_mini9p_server_handler(
 
 static void init_runtime(
     struct mesh_node_runtime *runtime,
-    struct fake_transport *transport,
+    struct fake_transport *transports,
+    const uint8_t *port_ids,
+    size_t port_count,
     struct fake_server_ctx *server_ctx,
     const uint8_t uid[MESH_UID_LEN],
     bool auto_register_on_init)
 {
     struct mesh_node_runtime_config config;
+    struct mesh_node_runtime_port_config port_configs[MESH_NODE_RUNTIME_MAX_PORTS];
+    size_t i;
+
+    assert(port_count <= MESH_NODE_RUNTIME_MAX_PORTS);
 
     mesh_node_runtime_get_default_config(&config);
-    config.send_frame = fake_send_frame;
-    config.receive_frame = fake_receive_frame;
-    config.transport_ctx = transport;
+    memset(port_configs, 0, sizeof(port_configs));
+    for (i = 0u; i < port_count; ++i) {
+        port_configs[i].send_frame = fake_send_frame;
+        port_configs[i].receive_frame = fake_receive_frame;
+        port_configs[i].transport_ctx = &transports[i];
+        port_configs[i].port_id = port_ids[i];
+    }
+
+    config.ports = port_configs;
     config.mini9p_server_handler = fake_mini9p_server_handler;
     config.mini9p_server_ctx = server_ctx;
     memcpy(config.local_uid, uid, MESH_UID_LEN);
     config.boot_nonce = 0x12345678u;
     config.capability_bits = 0x0001u;
-    config.port_bitmap = 0x02u;
-    config.bootstrap_next_hop = 0x31u;
+    config.port_bitmap = 0u;
     config.auto_register_on_init = auto_register_on_init;
 
-    assert(mesh_node_runtime_init(runtime, &config) == 0);
+    assert(mesh_node_runtime_init(runtime, &config, port_count) == 0);
 }
 
-static void test_auto_register_on_init_sends_uid_to_current_link(void)
+static void test_auto_register_on_init_sends_uid_to_every_bound_port(void)
 {
     struct mesh_node_runtime runtime;
-    struct fake_transport transport;
+    struct fake_transport transports[2];
     struct fake_server_ctx server_ctx;
     struct mesh_frame_view view;
     struct mesh_register_payload payload;
     const uint8_t uid[MESH_UID_LEN] = {0x11u, 0x22u, 0x33u, 0x44u, 0x55u, 0x66u, 0x77u, 0x88u};
+    const uint8_t port_ids[2] = {0u, 1u};
+    size_t i;
 
     memset(&server_ctx, 0, sizeof(server_ctx));
-    fake_transport_reset(&transport);
+    for (i = 0u; i < 2u; ++i) {
+        fake_transport_reset(&transports[i]);
+    }
 
-    init_runtime(&runtime, &transport, &server_ctx, uid, true);
+    init_runtime(&runtime, transports, port_ids, 2u, &server_ctx, uid, true);
 
-    assert(transport.tx_count == 1u);
-    assert(transport.tx_next_hop[0] == 0x31u);
-    assert(mesh_decode_frame(transport.tx_queue[0].data, transport.tx_queue[0].len, &view));
+    assert(transports[0].tx_count == 1u);
+    assert(transports[1].tx_count == 1u);
+    assert(transports[0].tx_next_hop[0] == 0u);
+    assert(transports[1].tx_next_hop[0] == 1u);
+    assert(mesh_decode_frame(transports[1].tx_queue[0].data, transports[1].tx_queue[0].len, &view));
     assert(view.type == MESH_TYPE_REGISTER);
     assert(view.src == MESH_ADDR_UNASSIGNED);
     assert(view.dst == MESH_ADDR_UNASSIGNED);
@@ -148,7 +165,7 @@ static void test_auto_register_on_init_sends_uid_to_current_link(void)
     assert(memcmp(payload.uid, uid, sizeof(uid)) == 0);
     assert(payload.boot_nonce == 0x12345678u);
     assert(payload.capability_bits == 0x0001u);
-    assert(payload.port_bitmap == 0x02u);
+    assert(payload.port_bitmap == 0x03u);
 
     mesh_node_runtime_deinit(&runtime);
 }
@@ -156,9 +173,10 @@ static void test_auto_register_on_init_sends_uid_to_current_link(void)
 static void test_assign_updates_local_addr_and_allows_server_reply(void)
 {
     struct mesh_node_runtime runtime;
-    struct fake_transport transport;
+    struct fake_transport transports[1];
     struct fake_server_ctx server_ctx;
     struct mesh_assign_payload assign_payload;
+    struct mesh_link_state_payload link_payload;
     struct mesh_frame_view view;
     struct mesh_register_payload register_payload;
     struct m9p_frame_view mini9p_view;
@@ -171,11 +189,12 @@ static void test_assign_updates_local_addr_and_allows_server_reply(void)
     uint8_t next_hop = 0u;
     bool is_local = false;
     const uint8_t uid[MESH_UID_LEN] = {0xA1u, 0xA2u, 0xA3u, 0xA4u, 0xA5u, 0xA6u, 0xA7u, 0xA8u};
+    const uint8_t port_ids[1] = {1u};
 
     memset(&server_ctx, 0, sizeof(server_ctx));
-    fake_transport_reset(&transport);
+    fake_transport_reset(&transports[0]);
 
-    init_runtime(&runtime, &transport, &server_ctx, uid, false);
+    init_runtime(&runtime, transports, port_ids, 1u, &server_ctx, uid, false);
 
     memset(&assign_payload, 0, sizeof(assign_payload));
     memcpy(assign_payload.uid, uid, sizeof(uid));
@@ -193,21 +212,27 @@ static void test_assign_updates_local_addr_and_allows_server_reply(void)
         assign_frame,
         sizeof(assign_frame),
         &assign_len));
-    fake_transport_queue_rx(&transport, assign_frame, assign_len);
+    fake_transport_queue_rx(&transports[0], assign_frame, assign_len);
     assert(mesh_node_runtime_poll_once(&runtime) == 0);
     assert(runtime.cluster.config.local_addr == 0x24u);
     assert(runtime.processor.config.local_addr == 0x24u);
-    assert(transport.tx_count == 1u);
-    assert(transport.tx_next_hop[0] == 0x01u);
-    assert(mesh_decode_frame(transport.tx_queue[0].data, transport.tx_queue[0].len, &view));
+    assert(transports[0].tx_count == 2u);
+    assert(transports[0].tx_next_hop[0] == 1u);
+    assert(mesh_decode_frame(transports[0].tx_queue[0].data, transports[0].tx_queue[0].len, &view));
     assert(view.type == MESH_TYPE_REGISTER);
     assert(view.src == 0x24u);
     assert(view.dst == MESH_ADDR_UNASSIGNED);
     assert(mesh_parse_register(&view, &register_payload));
     assert(memcmp(register_payload.uid, uid, sizeof(uid)) == 0);
+    assert(mesh_decode_frame(transports[0].tx_queue[1].data, transports[0].tx_queue[1].len, &view));
+    assert(view.type == MESH_TYPE_LINK_STATE);
+    assert(view.dst == 0x00u);
+    assert(mesh_parse_link_state(&view, &link_payload));
+    assert(link_payload.neighbor == 0x01u);
+    assert(link_payload.local_port == 1u);
     assert(cluster_lookup_next_hop(&runtime.cluster, 0x01u, &next_hop, &is_local) == 0);
     assert(!is_local);
-    assert(next_hop == 0x01u);
+    assert(next_hop == 1u);
 
     assert(m9p_build_tclunk(0x3344u, 9u, request_frame, sizeof(request_frame), &request_len));
     assert(mesh_build_mini9p_frame(
@@ -221,14 +246,14 @@ static void test_assign_updates_local_addr_and_allows_server_reply(void)
         mesh_frame,
         sizeof(mesh_frame),
         &mesh_len));
-    fake_transport_queue_rx(&transport, mesh_frame, mesh_len);
+    fake_transport_queue_rx(&transports[0], mesh_frame, mesh_len);
 
     assert(mesh_node_runtime_poll_once(&runtime) == 0);
     assert(server_ctx.call_count == 1u);
     assert(server_ctx.last_tag == 0x3344u);
-    assert(transport.tx_count == 2u);
-    assert(transport.tx_next_hop[1] == 0x01u);
-    assert(mesh_decode_frame(transport.tx_queue[1].data, transport.tx_queue[1].len, &view));
+    assert(transports[0].tx_count == 3u);
+    assert(transports[0].tx_next_hop[2] == 1u);
+    assert(mesh_decode_frame(transports[0].tx_queue[2].data, transports[0].tx_queue[2].len, &view));
     assert(view.type == MESH_TYPE_MINI9P);
     assert(view.src == 0x24u);
     assert(view.dst == 0x01u);
@@ -242,18 +267,19 @@ static void test_assign_updates_local_addr_and_allows_server_reply(void)
 static void test_assign_with_foreign_uid_is_ignored(void)
 {
     struct mesh_node_runtime runtime;
-    struct fake_transport transport;
+    struct fake_transport transports[1];
     struct fake_server_ctx server_ctx;
     struct mesh_assign_payload assign_payload;
     uint8_t assign_frame[160];
     size_t assign_len = 0u;
     const uint8_t local_uid[MESH_UID_LEN] = {0xB1u, 0xB2u, 0xB3u, 0xB4u, 0xB5u, 0xB6u, 0xB7u, 0xB8u};
     const uint8_t foreign_uid[MESH_UID_LEN] = {0xC1u, 0xC2u, 0xC3u, 0xC4u, 0xC5u, 0xC6u, 0xC7u, 0xC8u};
+    const uint8_t port_ids[1] = {0u};
 
     memset(&server_ctx, 0, sizeof(server_ctx));
-    fake_transport_reset(&transport);
+    fake_transport_reset(&transports[0]);
 
-    init_runtime(&runtime, &transport, &server_ctx, local_uid, false);
+    init_runtime(&runtime, transports, port_ids, 1u, &server_ctx, local_uid, false);
 
     memset(&assign_payload, 0, sizeof(assign_payload));
     memcpy(assign_payload.uid, foreign_uid, sizeof(foreign_uid));
@@ -271,20 +297,102 @@ static void test_assign_with_foreign_uid_is_ignored(void)
         assign_frame,
         sizeof(assign_frame),
         &assign_len));
-    fake_transport_queue_rx(&transport, assign_frame, assign_len);
+    fake_transport_queue_rx(&transports[0], assign_frame, assign_len);
 
     assert(mesh_node_runtime_poll_once(&runtime) == 0);
     assert(runtime.cluster.config.local_addr == MESH_ADDR_UNASSIGNED);
     assert(runtime.processor.config.local_addr == MESH_ADDR_UNASSIGNED);
+    assert(transports[0].tx_count == 0u);
+
+    mesh_node_runtime_deinit(&runtime);
+}
+
+static void test_multi_port_forward_uses_route_selected_egress(void)
+{
+    struct mesh_node_runtime runtime;
+    struct fake_transport transports[2];
+    struct fake_server_ctx server_ctx;
+    struct mesh_assign_payload assign_payload;
+    struct mesh_register_payload register_payload;
+    struct mesh_route_update_payload route_payload;
+    struct mesh_ping_payload ping_payload;
+    struct mesh_frame_view view;
+    uint8_t frame[TEST_FRAME_CAP];
+    size_t frame_len = 0u;
+    uint8_t next_hop = 0u;
+    bool is_local = false;
+    const uint8_t uid[MESH_UID_LEN] = {0xD1u, 0xD2u, 0xD3u, 0xD4u, 0xD5u, 0xD6u, 0xD7u, 0xD8u};
+    const uint8_t child_uid[MESH_UID_LEN] = {0xE1u, 0xE2u, 0xE3u, 0xE4u, 0xE5u, 0xE6u, 0xE7u, 0xE8u};
+    const uint8_t port_ids[2] = {0u, 1u};
+    struct mesh_link_state_payload link_payload;
+    size_t i;
+
+    memset(&server_ctx, 0, sizeof(server_ctx));
+    for (i = 0u; i < 2u; ++i) {
+        fake_transport_reset(&transports[i]);
+    }
+
+    init_runtime(&runtime, transports, port_ids, 2u, &server_ctx, uid, false);
+
+    memset(&assign_payload, 0, sizeof(assign_payload));
+    memcpy(assign_payload.uid, uid, sizeof(uid));
+    assign_payload.node_addr = 0x24u;
+    assert(mesh_build_assign(0x01u, MESH_ADDR_UNASSIGNED, 0x2001u, 6u, &assign_payload, frame, sizeof(frame), &frame_len));
+    fake_transport_queue_rx(&transports[0], frame, frame_len);
+    assert(mesh_node_runtime_poll_once(&runtime) == 0);
+
+    memset(&register_payload, 0, sizeof(register_payload));
+    memcpy(register_payload.uid, child_uid, sizeof(child_uid));
+    register_payload.boot_nonce = 0xABCDEF01u;
+    register_payload.capability_bits = 0x0001u;
+    register_payload.port_bitmap = 0x01u;
+    assert(mesh_build_register(0x31u, 0x2002u, 6u, &register_payload, frame, sizeof(frame), &frame_len));
+    fake_transport_queue_rx(&transports[1], frame, frame_len);
+    assert(mesh_node_runtime_poll_once(&runtime) == 0);
+    assert(cluster_lookup_next_hop(&runtime.cluster, 0x31u, &next_hop, &is_local) == 0);
+    assert(!is_local);
+    assert(next_hop == 1u);
+    assert(transports[0].tx_count == 3u);
+    assert(mesh_decode_frame(transports[0].tx_queue[2].data, transports[0].tx_queue[2].len, &view));
+    assert(view.type == MESH_TYPE_LINK_STATE);
+    assert(mesh_parse_link_state(&view, &link_payload));
+    assert(link_payload.neighbor == 0x31u);
+    assert(link_payload.local_port == 1u);
+
+    memset(&route_payload, 0, sizeof(route_payload));
+    route_payload.dst = 0x41u;
+    route_payload.next_hop = 1u;
+    route_payload.metric = 1u;
+    route_payload.route_version = 2u;
+    route_payload.action = MESH_ROUTE_SET;
+    assert(mesh_build_route_update(0x01u, 0x24u, 0x2003u, 6u, &route_payload, frame, sizeof(frame), &frame_len));
+    fake_transport_queue_rx(&transports[0], frame, frame_len);
+    assert(mesh_node_runtime_poll_once(&runtime) == 0);
+    assert(cluster_lookup_next_hop(&runtime.cluster, 0x41u, &next_hop, &is_local) == 0);
+    assert(!is_local);
+    assert(next_hop == 1u);
+
+    memset(&ping_payload, 0, sizeof(ping_payload));
+    ping_payload.local_time_ms = 0x55667788u;
+    assert(mesh_build_ping(0x01u, 0x41u, 0x2004u, 6u, MESH_TYPE_PING, &ping_payload, frame, sizeof(frame), &frame_len));
+    fake_transport_queue_rx(&transports[0], frame, frame_len);
+    assert(mesh_node_runtime_poll_once(&runtime) == 0);
+    assert(transports[1].tx_count == 1u);
+    assert(transports[1].tx_next_hop[0] == 1u);
+    assert(mesh_decode_frame(transports[1].tx_queue[0].data, transports[1].tx_queue[0].len, &view));
+    assert(view.type == MESH_TYPE_PING);
+    assert(view.dst == 0x41u);
+    assert(view.hop == 5u);
 
     mesh_node_runtime_deinit(&runtime);
 }
 
 int main(void)
 {
-    test_auto_register_on_init_sends_uid_to_current_link();
+    test_auto_register_on_init_sends_uid_to_every_bound_port();
     test_assign_updates_local_addr_and_allows_server_reply();
     test_assign_with_foreign_uid_is_ignored();
+    test_multi_port_forward_uses_route_selected_egress();
 
     puts("mesh node runtime host tests passed");
     return 0;

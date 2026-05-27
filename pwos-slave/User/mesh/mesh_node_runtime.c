@@ -2,9 +2,16 @@
 
 #include <string.h>
 
-static int mesh_node_runtime_send_register(
+#define MESH_NODE_RUNTIME_CONTROLLER_ADDR 0x00u
+
+static int mesh_node_runtime_send_register_on_port(
     struct mesh_node_runtime *runtime,
-    uint8_t next_hop);
+    uint8_t port_id);
+static int mesh_node_runtime_send_link_state(
+    struct mesh_node_runtime *runtime,
+    uint8_t neighbor,
+    uint8_t report_port,
+    bool link_up);
 
 static uint16_t mesh_node_runtime_take_seq(struct mesh_node_runtime *runtime)
 {
@@ -27,22 +34,189 @@ static uint8_t mesh_node_runtime_default_hop(const struct mesh_node_runtime *run
     return runtime->config.default_hop;
 }
 
+static bool mesh_node_runtime_is_retryable_receive_error(int rc)
+{
+    return rc == -(int)MESH_ERR_BUSY;
+}
+
+static struct mesh_node_runtime_port *mesh_node_runtime_find_port(
+    struct mesh_node_runtime *runtime,
+    uint8_t port_id,
+    size_t *out_index)
+{
+    size_t i;
+
+    if (runtime == NULL) {
+        return NULL;
+    }
+
+    for (i = 0u; i < runtime->port_count; ++i) {
+        if (runtime->ports[i].initialized && runtime->ports[i].port_id == port_id) {
+            if (out_index != NULL) {
+                *out_index = i;
+            }
+            return &runtime->ports[i];
+        }
+    }
+
+    return NULL;
+}
+
+static int mesh_node_runtime_send_raw_on_port(
+    struct mesh_node_runtime *runtime,
+    uint8_t port_id,
+    const uint8_t *frame_data,
+    size_t frame_len)
+{
+    struct mesh_node_runtime_port *port;
+
+    if (runtime == NULL || !runtime->initialized || frame_data == NULL || frame_len == 0u) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    port = mesh_node_runtime_find_port(runtime, port_id, NULL);
+    if (port == NULL) {
+        return -(int)MESH_ERR_NO_ROUTE;
+    }
+
+    return port->send_frame(port->transport_ctx, port->port_id, frame_data, frame_len);
+}
+
+static int mesh_node_runtime_send_selected_port(
+    void *runtime_ctx,
+    uint8_t next_hop,
+    const uint8_t *tx_data,
+    size_t tx_len)
+{
+    return mesh_node_runtime_send_raw_on_port(
+        (struct mesh_node_runtime *)runtime_ctx,
+        next_hop,
+        tx_data,
+        tx_len);
+}
+
+static int mesh_node_runtime_receive_from_any_port(
+    void *runtime_ctx,
+    uint8_t *rx_data,
+    size_t rx_cap,
+    size_t *rx_len)
+{
+    struct mesh_node_runtime *runtime = (struct mesh_node_runtime *)runtime_ctx;
+    size_t checked;
+
+    if (runtime == NULL || !runtime->initialized || rx_data == NULL || rx_len == NULL) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    *rx_len = 0u;
+
+    for (checked = 0u; checked < runtime->port_count; ++checked) {
+        size_t index = (runtime->next_rx_port_index + checked) % runtime->port_count;
+        struct mesh_node_runtime_port *port = &runtime->ports[index];
+        int rc;
+
+        rc = port->receive_frame(port->transport_ctx, rx_data, rx_cap, rx_len);
+        if (rc == 0) {
+            runtime->active_rx_port = port->port_id;
+            runtime->next_rx_port_index = (index + 1u) % runtime->port_count;
+            return 0;
+        }
+        if (!mesh_node_runtime_is_retryable_receive_error(rc)) {
+            runtime->active_rx_port = MESH_NODE_RUNTIME_INVALID_PORT;
+            return rc;
+        }
+    }
+
+    runtime->active_rx_port = MESH_NODE_RUNTIME_INVALID_PORT;
+    return -(int)MESH_ERR_BUSY;
+}
+
+static uint8_t mesh_node_runtime_build_port_bitmap(
+    const struct mesh_node_runtime *runtime,
+    int *out_rc)
+{
+    uint8_t bitmap = 0u;
+    size_t i;
+
+    if (out_rc != NULL) {
+        *out_rc = 0;
+    }
+    if (runtime == NULL) {
+        if (out_rc != NULL) {
+            *out_rc = -(int)MESH_ERR_INVALID_STATE;
+        }
+        return 0u;
+    }
+
+    for (i = 0u; i < runtime->port_count; ++i) {
+        uint8_t port_id = runtime->ports[i].port_id;
+
+        if (port_id >= 8u) {
+            if (out_rc != NULL) {
+                *out_rc = -(int)MESH_ERR_BAD_FRAME;
+            }
+            return 0u;
+        }
+        bitmap = (uint8_t)(bitmap | (uint8_t)(1u << port_id));
+    }
+
+    return bitmap;
+}
+
+static int mesh_node_runtime_register_port(
+    struct mesh_node_runtime *runtime,
+    size_t index,
+    const struct mesh_node_runtime_port_config *port_config)
+{
+    if (runtime == NULL || port_config == NULL || index >= MESH_NODE_RUNTIME_MAX_PORTS) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+    if (port_config->send_frame == NULL || port_config->receive_frame == NULL) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+    if (port_config->port_id == MESH_NODE_RUNTIME_INVALID_PORT) {
+        return -(int)MESH_ERR_BAD_FRAME;
+    }
+    if (mesh_node_runtime_find_port(runtime, port_config->port_id, NULL) != NULL) {
+        return -(int)MESH_ERR_BUSY;
+    }
+
+    runtime->ports[index].initialized = true;
+    runtime->ports[index].port_id = port_config->port_id;
+    runtime->ports[index].send_frame = port_config->send_frame;
+    runtime->ports[index].receive_frame = port_config->receive_frame;
+    runtime->ports[index].transport_ctx = port_config->transport_ctx;
+    return 0;
+}
+
 /*
- * 点对点 UART 场景下，只要某个对端曾经在这条链路上给我发过帧，
- * 就说明它当前可以通过“本链路直达”。
+ * 子机 direct-table 维护的是：某个目标节点应当从哪个本地端口发出去。
  *
- * 因此这里把 src 直接写成一条 dst->dst 的 direct-table 路由。
- * send_frame 具体是否真的使用 next_hop，由底层 transport 决定；
- * 但 cluster 至少需要知道“这个地址可以从当前链路发出去”。
+ * 因此只要某个 src 曾经从某个本地端口给我发过帧，就把 src -> ingress_port
+ * 记成一条静态可达路由，后续回包、转发和 ROUTE_UPDATE 下发表都共用这套选择器语义。
  */
 static int mesh_node_runtime_refresh_direct_peer(
     struct mesh_node_runtime *runtime,
-    uint8_t mesh_addr)
+    uint8_t mesh_addr,
+    uint8_t ingress_port,
+    bool *out_route_changed)
 {
+    uint8_t previous_selector = MESH_NODE_RUNTIME_INVALID_PORT;
+    bool previous_local = false;
+    bool route_changed = true;
     int rc;
 
-    if (runtime == NULL || mesh_addr == MESH_ADDR_UNASSIGNED) {
+    if (out_route_changed != NULL) {
+        *out_route_changed = false;
+    }
+    if (runtime == NULL || mesh_addr == MESH_ADDR_UNASSIGNED ||
+        ingress_port == MESH_NODE_RUNTIME_INVALID_PORT) {
         return 0;
+    }
+
+    rc = cluster_lookup_next_hop(&runtime->cluster, mesh_addr, &previous_selector, &previous_local);
+    if (rc == 0 && !previous_local && previous_selector == ingress_port) {
+        route_changed = false;
     }
 
     rc = cluster_set_node_online(&runtime->cluster, mesh_addr, true);
@@ -50,7 +224,93 @@ static int mesh_node_runtime_refresh_direct_peer(
         return rc;
     }
 
-    return cluster_add_route(&runtime->cluster, mesh_addr, mesh_addr, 1u);
+    rc = cluster_add_route(&runtime->cluster, mesh_addr, ingress_port, 1u);
+    if (rc != 0) {
+        return rc;
+    }
+
+    if (out_route_changed != NULL) {
+        *out_route_changed = route_changed;
+    }
+    return 0;
+}
+
+static int mesh_node_runtime_send_register_on_port(
+    struct mesh_node_runtime *runtime,
+    uint8_t port_id)
+{
+    struct mesh_register_payload payload;
+    uint8_t frame[MESH_PROCESSER_FRAME_CAP];
+    size_t frame_len = 0u;
+
+    if (runtime == NULL || !runtime->initialized) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    memset(&payload, 0, sizeof(payload));
+    memcpy(payload.uid, runtime->config.local_uid, sizeof(payload.uid));
+    payload.boot_nonce = runtime->config.boot_nonce;
+    payload.capability_bits = runtime->config.capability_bits;
+    payload.port_bitmap = runtime->config.port_bitmap;
+
+    if (!mesh_build_register(
+            runtime->processor.config.local_addr,
+            mesh_node_runtime_take_seq(runtime),
+            mesh_node_runtime_default_hop(runtime),
+            &payload,
+            frame,
+            sizeof(frame),
+            &frame_len)) {
+        return -(int)MESH_ERR_BAD_FRAME;
+    }
+
+    return mesh_node_runtime_send_raw_on_port(runtime, port_id, frame, frame_len);
+}
+
+static int mesh_node_runtime_send_link_state(
+    struct mesh_node_runtime *runtime,
+    uint8_t neighbor,
+    uint8_t report_port,
+    bool link_up)
+{
+    struct mesh_link_state_payload payload;
+    uint8_t frame[MESH_PROCESSER_FRAME_CAP];
+    uint8_t tx_port;
+    size_t frame_len = 0u;
+
+    if (runtime == NULL || !runtime->initialized) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+    if (runtime->processor.config.local_addr == MESH_ADDR_UNASSIGNED ||
+        neighbor == MESH_ADDR_UNASSIGNED ||
+        report_port == MESH_NODE_RUNTIME_INVALID_PORT) {
+        return 0;
+    }
+
+    tx_port = runtime->control_plane_port;
+    if (tx_port == MESH_NODE_RUNTIME_INVALID_PORT) {
+        tx_port = report_port;
+    }
+
+    memset(&payload, 0, sizeof(payload));
+    payload.neighbor = neighbor;
+    payload.link_up = link_up ? 1u : 0u;
+    payload.quality = 1u;
+    payload.local_port = report_port;
+
+    if (!mesh_build_link_state(
+            runtime->processor.config.local_addr,
+            MESH_NODE_RUNTIME_CONTROLLER_ADDR,
+            mesh_node_runtime_take_seq(runtime),
+            mesh_node_runtime_default_hop(runtime),
+            &payload,
+            frame,
+            sizeof(frame),
+            &frame_len)) {
+        return -(int)MESH_ERR_BAD_FRAME;
+    }
+
+    return mesh_node_runtime_send_raw_on_port(runtime, tx_port, frame, frame_len);
 }
 
 /*
@@ -96,49 +356,18 @@ static int mesh_node_runtime_control_handler(
 
     if (assign_hits_local) {
         runtime->processor.config.local_addr = assign_payload.node_addr;
-        rc = mesh_node_runtime_send_register(runtime, frame->src);
+        runtime->control_plane_port = runtime->active_rx_port;
+        rc = mesh_node_runtime_send_register_on_port(runtime, runtime->active_rx_port);
+        if (rc != 0) {
+            return rc;
+        }
+        rc = mesh_node_runtime_send_link_state(runtime, frame->src, runtime->active_rx_port, true);
         if (rc != 0) {
             return rc;
         }
     }
 
     return 0;
-}
-
-static int mesh_node_runtime_send_register(
-    struct mesh_node_runtime *runtime,
-    uint8_t next_hop)
-{
-    struct mesh_register_payload payload;
-    uint8_t frame[MESH_PROCESSER_FRAME_CAP];
-    size_t frame_len = 0u;
-
-    if (runtime == NULL || !runtime->initialized) {
-        return -(int)MESH_ERR_INVALID_STATE;
-    }
-
-    memset(&payload, 0, sizeof(payload));
-    memcpy(payload.uid, runtime->config.local_uid, sizeof(payload.uid));
-    payload.boot_nonce = runtime->config.boot_nonce;
-    payload.capability_bits = runtime->config.capability_bits;
-    payload.port_bitmap = runtime->config.port_bitmap;
-
-    if (!mesh_build_register(
-            runtime->processor.config.local_addr,
-            mesh_node_runtime_take_seq(runtime),
-            mesh_node_runtime_default_hop(runtime),
-            &payload,
-            frame,
-            sizeof(frame),
-            &frame_len)) {
-        return -(int)MESH_ERR_BAD_FRAME;
-    }
-
-    return runtime->config.send_frame(
-        runtime->config.transport_ctx,
-        next_hop,
-        frame,
-        frame_len);
 }
 
 void mesh_node_runtime_get_default_config(struct mesh_node_runtime_config *out_config)
@@ -155,40 +384,85 @@ void mesh_node_runtime_get_default_config(struct mesh_node_runtime_config *out_c
 
 int mesh_node_runtime_init(
     struct mesh_node_runtime *runtime,
-    const struct mesh_node_runtime_config *config)
+    const struct mesh_node_runtime_config *config,
+    size_t port_count)
 {
     struct mesh_node_runtime_config merged_config;
     struct cluster_config cluster_config;
     struct mesh_processer_config processor_config;
+    size_t i;
     int rc;
 
     if (runtime == NULL) {
         return -(int)MESH_ERR_BAD_FRAME;
+    }
+    if (port_count == 0u || port_count > MESH_NODE_RUNTIME_MAX_PORTS) {
+        return -(int)MESH_ERR_INVALID_STATE;
     }
 
     mesh_node_runtime_get_default_config(&merged_config);
     if (config != NULL) {
         merged_config = *config;
     }
-    if (merged_config.send_frame == NULL || merged_config.receive_frame == NULL) {
-        return -(int)MESH_ERR_INVALID_STATE;
-    }
 
     memset(runtime, 0, sizeof(*runtime));
     runtime->config = merged_config;
+    runtime->port_count = port_count;
+    runtime->active_rx_port = MESH_NODE_RUNTIME_INVALID_PORT;
+    runtime->control_plane_port = MESH_NODE_RUNTIME_INVALID_PORT;
+
+    if (runtime->config.ports != NULL) {
+        for (i = 0u; i < port_count; ++i) {
+            rc = mesh_node_runtime_register_port(runtime, i, &runtime->config.ports[i]);
+            if (rc != 0) {
+                mesh_node_runtime_deinit(runtime);
+                return rc;
+            }
+        }
+    } else {
+        struct mesh_node_runtime_port_config single_port;
+
+        if (port_count != 1u ||
+            runtime->config.send_frame == NULL ||
+            runtime->config.receive_frame == NULL) {
+            mesh_node_runtime_deinit(runtime);
+            return -(int)MESH_ERR_INVALID_STATE;
+        }
+
+        memset(&single_port, 0, sizeof(single_port));
+        single_port.send_frame = runtime->config.send_frame;
+        single_port.receive_frame = runtime->config.receive_frame;
+        single_port.transport_ctx = runtime->config.transport_ctx;
+        single_port.port_id = 0u;
+        rc = mesh_node_runtime_register_port(runtime, 0u, &single_port);
+        if (rc != 0) {
+            mesh_node_runtime_deinit(runtime);
+            return rc;
+        }
+    }
+
+    if (runtime->config.port_bitmap == 0u) {
+        runtime->config.port_bitmap = mesh_node_runtime_build_port_bitmap(runtime, &rc);
+        if (rc != 0) {
+            mesh_node_runtime_deinit(runtime);
+            return rc;
+        }
+    }
 
     cluster_get_default_config(&cluster_config);
     cluster_config.local_addr = runtime->config.local_addr;
     cluster_config.mode = CLUSTER_MODE_DIRECT_TABLE;
+    cluster_config.direct_routes_use_port_selectors = true;
     rc = cluster_init(&runtime->cluster, &cluster_config);
     if (rc != 0) {
+        mesh_node_runtime_deinit(runtime);
         return rc;
     }
 
     mesh_processer_get_default_config(&processor_config);
-    processor_config.send_frame = runtime->config.send_frame;
-    processor_config.receive_frame = runtime->config.receive_frame;
-    processor_config.transport_ctx = runtime->config.transport_ctx;
+    processor_config.send_frame = mesh_node_runtime_send_selected_port;
+    processor_config.receive_frame = mesh_node_runtime_receive_from_any_port;
+    processor_config.transport_ctx = runtime;
     processor_config.route_lookup = cluster_processor_route_lookup;
     processor_config.cluster_ctx = &runtime->cluster;
     processor_config.control_handler = mesh_node_runtime_control_handler;
@@ -199,7 +473,7 @@ int mesh_node_runtime_init(
     processor_config.default_hop = mesh_node_runtime_default_hop(runtime);
     rc = mesh_processer_init(&runtime->processor, &processor_config);
     if (rc != 0) {
-        cluster_deinit(&runtime->cluster);
+        mesh_node_runtime_deinit(runtime);
         return rc;
     }
 
@@ -207,7 +481,7 @@ int mesh_node_runtime_init(
     runtime->initialized = true;
 
     if (runtime->config.auto_register_on_init) {
-        rc = mesh_node_runtime_send_register(runtime, runtime->config.bootstrap_next_hop);
+        rc = mesh_node_runtime_notify_link_up(runtime);
         if (rc != 0) {
             mesh_node_runtime_deinit(runtime);
             return rc;
@@ -230,11 +504,32 @@ void mesh_node_runtime_deinit(struct mesh_node_runtime *runtime)
 
 int mesh_node_runtime_notify_link_up(struct mesh_node_runtime *runtime)
 {
+    size_t i;
+
     if (runtime == NULL || !runtime->initialized) {
         return -(int)MESH_ERR_INVALID_STATE;
     }
 
-    return mesh_node_runtime_send_register(runtime, runtime->config.bootstrap_next_hop);
+    for (i = 0u; i < runtime->port_count; ++i) {
+        int rc = mesh_node_runtime_send_register_on_port(runtime, runtime->ports[i].port_id);
+
+        if (rc != 0) {
+            return rc;
+        }
+    }
+
+    return 0;
+}
+
+int mesh_node_runtime_notify_link_up_on_port(
+    struct mesh_node_runtime *runtime,
+    uint8_t port_id)
+{
+    if (runtime == NULL || !runtime->initialized) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    return mesh_node_runtime_send_register_on_port(runtime, port_id);
 }
 
 int mesh_node_runtime_process_frame(
@@ -242,7 +537,26 @@ int mesh_node_runtime_process_frame(
     const uint8_t *frame_data,
     size_t frame_len)
 {
+    if (runtime == NULL) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    return mesh_node_runtime_process_frame_on_port(
+        runtime,
+        MESH_NODE_RUNTIME_INVALID_PORT,
+        frame_data,
+        frame_len);
+}
+
+int mesh_node_runtime_process_frame_on_port(
+    struct mesh_node_runtime *runtime,
+    uint8_t port_id,
+    const uint8_t *frame_data,
+    size_t frame_len)
+{
     struct mesh_frame_view frame;
+    bool route_changed = false;
+    uint8_t previous_active_port;
     int rc;
 
     if (runtime == NULL || !runtime->initialized || frame_data == NULL) {
@@ -251,26 +565,38 @@ int mesh_node_runtime_process_frame(
     if (!mesh_decode_frame(frame_data, frame_len, &frame)) {
         return -(int)MESH_ERR_BAD_FRAME;
     }
-
-    rc = mesh_node_runtime_refresh_direct_peer(runtime, frame.src);
-    if (rc != 0) {
-        return rc;
+    if (port_id != MESH_NODE_RUNTIME_INVALID_PORT &&
+        mesh_node_runtime_find_port(runtime, port_id, NULL) == NULL) {
+        return -(int)MESH_ERR_INVALID_STATE;
     }
 
-    return mesh_processer_process_frame(&runtime->processor, frame_data, frame_len);
+    previous_active_port = runtime->active_rx_port;
+    runtime->active_rx_port = port_id;
+
+    rc = mesh_node_runtime_refresh_direct_peer(runtime, frame.src, port_id, &route_changed);
+    if (rc == 0) {
+        rc = mesh_processer_process_frame(&runtime->processor, frame_data, frame_len);
+    }
+    if (rc == 0 && route_changed && frame.type != MESH_TYPE_ASSIGN) {
+        rc = mesh_node_runtime_send_link_state(runtime, frame.src, port_id, true);
+    }
+
+    runtime->active_rx_port = previous_active_port;
+    return rc;
 }
 
 int mesh_node_runtime_poll_once(struct mesh_node_runtime *runtime)
 {
     size_t rx_len = 0u;
+    uint8_t ingress_port;
     int rc;
 
     if (runtime == NULL || !runtime->initialized) {
         return -(int)MESH_ERR_INVALID_STATE;
     }
 
-    rc = runtime->config.receive_frame(
-        runtime->config.transport_ctx,
+    rc = mesh_node_runtime_receive_from_any_port(
+        runtime,
         runtime->processor.rx_buffer,
         sizeof(runtime->processor.rx_buffer),
         &rx_len);
@@ -278,5 +604,10 @@ int mesh_node_runtime_poll_once(struct mesh_node_runtime *runtime)
         return rc;
     }
 
-    return mesh_node_runtime_process_frame(runtime, runtime->processor.rx_buffer, rx_len);
+    ingress_port = runtime->active_rx_port;
+    return mesh_node_runtime_process_frame_on_port(
+        runtime,
+        ingress_port,
+        runtime->processor.rx_buffer,
+        rx_len);
 }

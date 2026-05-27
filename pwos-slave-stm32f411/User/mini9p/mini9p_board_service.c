@@ -17,6 +17,7 @@
 #include "sys_vfs.h"
 
 extern UART_HandleTypeDef huart1;
+extern UART_HandleTypeDef huart2;
 
 static struct lfs_vfs g_lfs_vfs;
 static struct sys_vfs g_sys_vfs;
@@ -31,6 +32,7 @@ int mini9p_board_service_init(void)
     struct lfs_vfs_config lfs_config;
     struct node_vfs_config node_config;
     struct mini9p_service_backend backend;
+    UART_HandleTypeDef *mesh_uarts[2];
     struct lfs_vfs *active_lfs = NULL;
     int rc;
 
@@ -81,7 +83,10 @@ int mini9p_board_service_init(void)
     backend.ops = node_vfs_ops();
     backend.ops_ctx = &g_node_vfs;
     backend.default_iounit = g_node_vfs.iounit;
-    backend.uart = &huart1;
+    mesh_uarts[0] = &huart1;
+    mesh_uarts[1] = &huart2;
+    backend.uarts = mesh_uarts;
+    backend.uart_count = sizeof(mesh_uarts) / sizeof(mesh_uarts[0]);
     return mini9p_service_init_with_backend(&backend);
 }
 

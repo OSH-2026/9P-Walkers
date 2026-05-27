@@ -15,11 +15,11 @@
 /** 串口联调阶段的 RX/TX 帧缓冲区大小。 */
 #define MINI9P_SERVICE_FRAME_CAP M9P_SERVER_DEFAULT_MSIZE
 #define MINI9P_SERVICE_REGISTER_CAPABILITY_BITS 0x0001u
-#define MINI9P_SERVICE_REGISTER_PORT_BITMAP 0x01u
 
 static struct m9p_server g_mini9p_server;
-static struct mesh_uart_transport g_mesh_uart_transport;
+static struct mesh_uart_transport g_mesh_uart_transports[MESH_NODE_RUNTIME_MAX_PORTS];
 static struct mesh_node_runtime g_mesh_node_runtime;
+static struct mesh_node_runtime_port_config g_mesh_runtime_ports[MESH_NODE_RUNTIME_MAX_PORTS];
 static bool g_mini9p_service_initialized;
 
 static void mini9p_service_store_le32(uint8_t *dst, uint32_t value)
@@ -73,9 +73,27 @@ int mini9p_service_init_with_backend(const struct mini9p_service_backend *backen
     struct m9p_server_config server_config;
     struct mesh_uart_transport_config uart_config;
     struct mesh_node_runtime_config runtime_config;
+    UART_HandleTypeDef *single_uart_list[1];
+    UART_HandleTypeDef *const *uart_list;
+    size_t uart_count;
+    size_t i;
     int rc;
 
-    if (backend == NULL || backend->ops == NULL || backend->uart == NULL) {
+    if (backend == NULL || backend->ops == NULL) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    if (backend->uarts != NULL && backend->uart_count > 0u) {
+        uart_list = backend->uarts;
+        uart_count = backend->uart_count;
+    } else if (backend->uart != NULL) {
+        single_uart_list[0] = backend->uart;
+        uart_list = single_uart_list;
+        uart_count = 1u;
+    } else {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+    if (uart_count == 0u || uart_count > MESH_NODE_RUNTIME_MAX_PORTS) {
         return -(int)MESH_ERR_INVALID_STATE;
     }
 
@@ -89,29 +107,43 @@ int mini9p_service_init_with_backend(const struct mini9p_service_backend *backen
         return rc;
     }
 
-    mesh_uart_transport_get_default_config(&uart_config);
-    uart_config.uart = backend->uart;
-    uart_config.io_timeout_ms = MESH_UART_TRANSPORT_DEFAULT_TIMEOUT_MS;
-    uart_config.flush_before_receive = false;
-    rc = mesh_uart_transport_init(&g_mesh_uart_transport, &uart_config);
-    if (rc != 0) {
-        return rc;
+    memset(g_mesh_uart_transports, 0, sizeof(g_mesh_uart_transports));
+    for (i = 0u; i < uart_count; ++i) {
+        mesh_uart_transport_get_default_config(&uart_config);
+        uart_config.uart = uart_list[i];
+        uart_config.io_timeout_ms = MESH_UART_TRANSPORT_DEFAULT_TIMEOUT_MS;
+        uart_config.flush_before_receive = false;
+        rc = mesh_uart_transport_init(&g_mesh_uart_transports[i], &uart_config);
+        if (rc != 0) {
+            while (i > 0u) {
+                --i;
+                mesh_uart_transport_deinit(&g_mesh_uart_transports[i]);
+            }
+            return rc;
+        }
     }
 
     mesh_node_runtime_get_default_config(&runtime_config);
-    runtime_config.send_frame = mini9p_service_send_frame;
-    runtime_config.receive_frame = mini9p_service_receive_frame;
-    runtime_config.transport_ctx = &g_mesh_uart_transport;
+    memset(g_mesh_runtime_ports, 0, sizeof(g_mesh_runtime_ports));
+    for (i = 0u; i < uart_count; ++i) {
+        g_mesh_runtime_ports[i].send_frame = mini9p_service_send_frame;
+        g_mesh_runtime_ports[i].receive_frame = mini9p_service_receive_frame;
+        g_mesh_runtime_ports[i].transport_ctx = &g_mesh_uart_transports[i];
+        g_mesh_runtime_ports[i].port_id = (uint8_t)i;
+    }
+    runtime_config.ports = g_mesh_runtime_ports;
     runtime_config.mini9p_server_handler = m9p_server_handle_frame;
     runtime_config.mini9p_server_ctx = &g_mini9p_server;
     mini9p_service_fill_local_uid(runtime_config.local_uid);
     runtime_config.boot_nonce = mini9p_service_make_boot_nonce();
     runtime_config.capability_bits = MINI9P_SERVICE_REGISTER_CAPABILITY_BITS;
-    runtime_config.port_bitmap = MINI9P_SERVICE_REGISTER_PORT_BITMAP;
+    runtime_config.port_bitmap = 0u;
     runtime_config.auto_register_on_init = true;
-    rc = mesh_node_runtime_init(&g_mesh_node_runtime, &runtime_config);
+    rc = mesh_node_runtime_init(&g_mesh_node_runtime, &runtime_config, uart_count);
     if (rc != 0) {
-        mesh_uart_transport_deinit(&g_mesh_uart_transport);
+        for (i = 0u; i < uart_count; ++i) {
+            mesh_uart_transport_deinit(&g_mesh_uart_transports[i]);
+        }
         return rc;
     }
 

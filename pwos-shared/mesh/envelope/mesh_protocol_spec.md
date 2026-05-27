@@ -151,18 +151,19 @@
 | 字段 | 长度 | 说明 |
 |---|---:|---|
 | dst | 1 | 目标地址 |
-| next_hop | 1 | 下一跳地址 |
+| next_hop | 1 | 发送选择器；普通场景下通常是下一跳地址，子机多串口 direct-table 场景下是本地出口端口号 |
 | metric | 1 | 路由代价 |
 | route_version | 2 | 路由版本 |
 | action | 1 | 1=set，2=delete |
 
-### 7.6 LINK_STATE（固定 3 字节）
+### 7.6 LINK_STATE（固定 4 字节）
 
 | 字段 | 长度 | 说明 |
 |---|---:|---|
 | neighbor | 1 | 邻居地址 |
 | link_up | 1 | 0=down，非0=up |
 | quality | 1 | 链路质量指标 |
+| local_port | 1 | 当前 src 节点若要发往 neighbor，应从哪个本地端口发出 |
 
 ### 7.7 ERROR（固定 4 字节）
 

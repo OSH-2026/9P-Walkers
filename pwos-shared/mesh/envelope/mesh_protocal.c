@@ -589,7 +589,7 @@ bool mesh_build_link_state(
     size_t out_cap,
     size_t *out_len)
 {
-    uint8_t raw[3];
+    uint8_t raw[4];
 
     if (payload == NULL) {
         return false;
@@ -598,6 +598,7 @@ bool mesh_build_link_state(
     raw[0] = payload->neighbor;
     raw[1] = payload->link_up;
     raw[2] = payload->quality;
+    raw[3] = payload->local_port;
     return encode_payload_to_frame(
         MESH_TYPE_LINK_STATE,
         src,
@@ -617,13 +618,14 @@ bool mesh_parse_link_state(const struct mesh_frame_view *frame, struct mesh_link
     if (frame == NULL || out_payload == NULL) {
         return false;
     }
-    if (frame->type != MESH_TYPE_LINK_STATE || frame->payload_len != 3u) {
+    if (frame->type != MESH_TYPE_LINK_STATE || frame->payload_len != 4u) {
         return false;
     }
 
     out_payload->neighbor = frame->payload[0];
     out_payload->link_up = frame->payload[1];
     out_payload->quality = frame->payload[2];
+    out_payload->local_port = frame->payload[3];
     return true;
 }
 
