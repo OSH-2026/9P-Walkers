@@ -48,47 +48,48 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 )
 
 # Add sources to executable
-set(PWOS_SHARED_MINI9P_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mini9p)
+set(PWOS_USER_DIR ${CMAKE_SOURCE_DIR}/User)
+set(PWOS_USER_MINI9P_DIR ${PWOS_USER_DIR}/mini9p)
+set(PWOS_USER_MESH_DIR ${PWOS_USER_DIR}/mesh)
 set(PWOS_SHARED_MESH_CLUSTER_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/cluster)
 set(PWOS_SHARED_MESH_ENVELOPE_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/envelope)
 set(PWOS_SHARED_MESH_PROCESSER_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/processer)
-set(PWOS_SHARED_MESH_NODE_RUNTIME_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/node_runtime)
 set(PWOS_SHARED_MESH_TRANSPORT_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/transport)
 
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-    ${CMAKE_SOURCE_DIR}/User/fs/lfs.c
-    ${CMAKE_SOURCE_DIR}/User/fs/lfs_util.c
-    ${CMAKE_SOURCE_DIR}/User/drivers/storage/sd_blockdev.cpp
-    ${CMAKE_SOURCE_DIR}/User/drivers/storage/lfs_port.cpp
-    ${CMAKE_SOURCE_DIR}/User/app/fs_selftest.c
-    ${CMAKE_SOURCE_DIR}/User/app/vofa_firewater.c
-    ${CMAKE_SOURCE_DIR}/User/backend/dev_vfs.c
-    ${CMAKE_SOURCE_DIR}/User/backend/lfs_vfs.c
-    ${CMAKE_SOURCE_DIR}/User/backend/node_vfs.c
-    ${CMAKE_SOURCE_DIR}/User/backend/sys_vfs.c
-    ${CMAKE_SOURCE_DIR}/User/mini9p/mini9p_board_service.c
-    ${PWOS_SHARED_MINI9P_DIR}/mini9p_protocol.c
-    ${PWOS_SHARED_MINI9P_DIR}/mini9p_server.c
-    ${PWOS_SHARED_MINI9P_DIR}/mini9p_service.c
+    ${PWOS_USER_DIR}/fs/lfs.c
+    ${PWOS_USER_DIR}/fs/lfs_util.c
+    ${PWOS_USER_DIR}/drivers/storage/sd_blockdev.cpp
+    ${PWOS_USER_DIR}/drivers/storage/lfs_port.cpp
+    ${PWOS_USER_DIR}/app/fs_selftest.c
+    ${PWOS_USER_DIR}/app/vofa_firewater.c
+    ${PWOS_USER_DIR}/backend/dev_vfs.c
+    ${PWOS_USER_DIR}/backend/lfs_vfs.c
+    ${PWOS_USER_DIR}/backend/node_vfs.c
+    ${PWOS_USER_DIR}/backend/sys_vfs.c
+    ${PWOS_USER_MINI9P_DIR}/mini9p_board_service.c
+    ${PWOS_USER_MINI9P_DIR}/mini9p_service.c
     ${PWOS_SHARED_MESH_CLUSTER_DIR}/cluster.c
     ${PWOS_SHARED_MESH_ENVELOPE_DIR}/mesh_protocal.c
     ${PWOS_SHARED_MESH_PROCESSER_DIR}/mesh_processer.c
-    ${PWOS_SHARED_MESH_NODE_RUNTIME_DIR}/mesh_node_runtime.c
+    ${PWOS_USER_MESH_DIR}/mesh_node_runtime.c
     ${PWOS_SHARED_MESH_TRANSPORT_DIR}/mesh_uart_transport.c
+    ${CMAKE_SOURCE_DIR}/../pwos-shared/mini9p/mini9p_protocol.c
+    ${CMAKE_SOURCE_DIR}/../pwos-shared/mini9p/mini9p_server.c
 )
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
-    ${CMAKE_SOURCE_DIR}/User/fs
-    ${CMAKE_SOURCE_DIR}/User/drivers/storage
-    ${CMAKE_SOURCE_DIR}/User/app
-    ${CMAKE_SOURCE_DIR}/User/backend
-    ${CMAKE_SOURCE_DIR}/User/mini9p
-    ${PWOS_SHARED_MINI9P_DIR}
+    ${PWOS_USER_DIR}/fs
+    ${PWOS_USER_DIR}/drivers/storage
+    ${PWOS_USER_DIR}/app
+    ${PWOS_USER_DIR}/backend
+    ${PWOS_USER_MINI9P_DIR}
+    ${PWOS_USER_MESH_DIR}
+    ${CMAKE_SOURCE_DIR}/../pwos-shared/mini9p
     ${PWOS_SHARED_MESH_CLUSTER_DIR}
     ${PWOS_SHARED_MESH_ENVELOPE_DIR}
     ${PWOS_SHARED_MESH_PROCESSER_DIR}
-    ${PWOS_SHARED_MESH_NODE_RUNTIME_DIR}
     ${PWOS_SHARED_MESH_TRANSPORT_DIR}
 )
 
