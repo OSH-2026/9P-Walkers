@@ -45,7 +45,7 @@
 #include <stdint.h>
 
 #include "mini9p_client.h"
-#include "../../pwos-shared/mesh/processer/mesh_processer.h"
+#include "mesh_processer.h"
 #include "cluster_config.h"
 
 #ifdef __cplusplus
@@ -201,7 +201,7 @@ int mesh_host_runtime_poll_once(struct mesh_host_runtime *runtime);
  *
  * 默认路径会自动完成：
  * 1. cluster_config_init_mesh_host()
- * 2. m9p_uart_transport_init_default()
+ * 2. mesh_transport_manager_init_default()
  * 3. 基于默认 UART transport 装配 runtime
  */
 int mesh_host_runtime_init_default(void);

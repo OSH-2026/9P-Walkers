@@ -2,7 +2,7 @@
 
 #include <string.h>
 
-#include "mesh_uart_transport.h"
+#include "mesh_transport_manager.h"
 
 #ifdef ESP_PLATFORM
 #include "freertos/FreeRTOS.h"
@@ -538,25 +538,6 @@ static int mesh_host_runtime_control_handler(
     }
 }
 
-static int mesh_host_runtime_uart_send_frame(
-    void *transport_ctx,
-    uint8_t next_hop,
-    const uint8_t *tx_data,
-    size_t tx_len)
-{
-    (void)next_hop;
-    return mesh_uart_transport_send_frame((struct mesh_uart_transport *)transport_ctx, tx_data, tx_len);
-}
-
-static int mesh_host_runtime_uart_receive_frame(
-    void *transport_ctx,
-    uint8_t *rx_data,
-    size_t rx_cap,
-    size_t *rx_len)
-{
-    return mesh_uart_transport_receive_frame((struct mesh_uart_transport *)transport_ctx, rx_data, rx_cap, rx_len);
-}
-
 #ifdef ESP_PLATFORM
 static void mesh_host_runtime_default_task(void *arg)
 {
@@ -687,16 +668,16 @@ int mesh_host_runtime_init_default(void)
     if (rc != 0) {
         return rc;
     }
-    rc = mesh_uart_transport_init_default();
+    rc = mesh_transport_manager_init_default();
     if (rc != 0) {
         return rc;
     }
 
     mesh_host_runtime_get_default_config(&config);
     config.mesh_cluster = cluster_config_mesh_cluster();
-    config.transport_ctx = mesh_uart_transport_default();
-    config.send_frame = mesh_host_runtime_uart_send_frame;
-    config.receive_frame = mesh_host_runtime_uart_receive_frame;
+    config.transport_ctx = mesh_transport_manager_default();
+    config.send_frame = mesh_transport_manager_send_frame;
+    config.receive_frame = mesh_transport_manager_receive_frame;
 
     return mesh_host_runtime_init(&g_default_runtime, &config);
 }

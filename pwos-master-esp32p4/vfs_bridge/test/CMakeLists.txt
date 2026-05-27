@@ -6,13 +6,15 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
 set(VFS_BRIDGE_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
+set(MASTER_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..)
+set(MASTER_CLUSTER_ROOT ${MASTER_ROOT}/cluster)
 set(MINI9P_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../../pwos-shared/mini9p)
 set(MESH_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../../pwos-shared/mesh)
 
 add_executable(cluster_vfs_test
     test_main.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../transport/uart_transport.c
-    ${VFS_BRIDGE_ROOT}/cluster_config.c
+    ${MASTER_CLUSTER_ROOT}/cluster_config.c
     ${VFS_BRIDGE_ROOT}/cluster_vfs.c
     ${MESH_ROOT}/cluster/cluster.c
     ${MESH_ROOT}/envelope/mesh_protocal.c
@@ -22,6 +24,7 @@ add_executable(cluster_vfs_test
 
 target_include_directories(cluster_vfs_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../transport
+    ${MASTER_CLUSTER_ROOT}
     ${VFS_BRIDGE_ROOT}
     ${MINI9P_ROOT}
     ${MESH_ROOT}/cluster
