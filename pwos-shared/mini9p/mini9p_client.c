@@ -30,7 +30,8 @@ static int request_with_frame(
     for (attempt = 0u; attempt < M9P_CLIENT_TIMEOUT_RETRY_ATTEMPTS; ++attempt) {
         size_t rx_len = 0u;
         int rc;
-
+        //参见： pwos-master-esp32p4/vfs_bridge/mesh_host_runtime.c：mesh_host_runtime_client_request函数
+        //初始化在：mesh_host_runtime.c：mesh_host_runtime_sync_registered_node
         rc = client->transport(
             client->transport_ctx,
             client->tx_buffer,
