@@ -67,24 +67,28 @@ m9p_server_init(&server, &config);
 - `mesh_node_service.h`
 - `mesh_node_service.c`
 
-service 是 STM32 节点侧的薄组装层，内部持有静态实例：
+service 是 STM32 节点侧的 mesh 装配层，内部持有静态实例：
 
-- `m9p_server`
 - `mesh_uart_transport`
 - `mesh_node_runtime`
 
-具体 backend（例如 `lfs_vfs` 或从机本地 `node_vfs`）由板级代码持有和初始化。
+具体 backend（例如 `lfs_vfs` 或从机本地 `node_vfs`）和 `m9p_server` 由板级代码持有和初始化。
 
-对外暴露三个入口：
+对外暴露入口：
 
 ```c
-struct mesh_node_service_backend {
-    const struct m9p_server_ops *ops;
-    void *ops_ctx;
-    uint16_t default_iounit;
+struct mesh_node_service_config {
+    UART_HandleTypeDef *uart;
+    mesh_processer_mini9p_server_handler_fn mini9p_server_handler;
+    void *mini9p_server_ctx;
+    uint16_t capability_bits;
+    uint8_t port_bitmap;
+    bool auto_register_on_init;
 };
 
-int mesh_node_service_init_with_backend(const struct mesh_node_service_backend *backend);
+void mesh_node_service_get_default_config(struct mesh_node_service_config *out_config);
+int mesh_node_service_init(const struct mesh_node_service_config *config);
+void mesh_node_service_deinit(void);
 int mesh_node_service_notify_link_up(void);
 int mesh_node_service_poll_once(void);
 ```
@@ -93,10 +97,10 @@ int mesh_node_service_poll_once(void);
 
 ```text
 board code initializes backend
-  -> mesh_node_service_init_with_backend(backend)
-  -> m9p_server_init(backend.ops)
+  -> m9p_server_init(backend ops)
+  -> mesh_node_service_init(config with m9p_server_handle_frame + server ctx)
   -> mesh_uart_transport_init
-  -> mesh_node_runtime_init(send_frame/receive_frame + m9p_server_handle_frame)
+  -> mesh_node_runtime_init(send_frame/receive_frame + injected Mini9P handler)
   -> auto REGISTER
 ```
 
@@ -111,7 +115,7 @@ mesh_node_service_poll_once
   -> local R* -> 封回 mesh MINI9P frame 发出
 ```
 
-在节点侧，`mesh_node_service_init_with_backend()` 会给 `mesh_node_runtime` 配好 `local_uid`、`boot_nonce` 和 REGISTER 能力位；
+在节点侧，`mesh_node_service_init(config)` 会给 `mesh_node_runtime` 配好 `local_uid`、`boot_nonce`、REGISTER 能力位和 Mini9P handler；
 `mesh_node_service_notify_link_up()` 可在未来链路明确恢复后再次主动发 REGISTER。
 
 ## PC 测试

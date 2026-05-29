@@ -57,8 +57,8 @@ mesh_host_service_start_default_task();
 在当前从机接线里，这个 REGISTER 不是靠上层业务手写触发，而是由每条 UART
 各自持有的 `mesh_node_runtime` 自动完成：
 
-1. `mesh_node_service_init()` 先初始化本地 `mini9p_server` 和 raw mesh UART transport。
-2. 然后初始化对应的 `mesh_node_runtime`。
+1. `mesh_node_board_service_init()` 先初始化本地 backend 和 `mini9p_server`，再把 server handler/context 注入 `mesh_node_service_init(config)`。
+2. `mesh_node_service_init(config)` 初始化 raw mesh UART transport 和对应的 `mesh_node_runtime`。
 3. `mesh_node_runtime` 在 init 成功后，立即向这条 UART 发送一帧 REGISTER。
 4. REGISTER 里会携带当前板子的稳定硬件 UID，以及这条链路对应的能力/端口位图。
 

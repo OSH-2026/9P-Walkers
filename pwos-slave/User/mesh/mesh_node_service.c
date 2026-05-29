@@ -1,23 +1,14 @@
 /**
  * @file mesh_node_service.c
- * @brief STM32 slave 侧 Mesh + mesh 节点服务组装层。
+ * @brief STM32 slave 侧 Mesh 节点服务装配层。
  */
 
 #include "mesh_node_service.h"
 
-#include <stdbool.h>
 #include <string.h>
 
-#include "mini9p_server.h"
-#include "mesh_node_runtime.h"
-#include "mesh_uart_transport.h"
+#define MESH_NODE_SERVICE_DEFAULT_LOCAL_ADDR MESH_ADDR_UNASSIGNED
 
-/** 串口联调阶段的 RX/TX 帧缓冲区大小。 */
-#define MESH_NODE_SERVICE_FRAME_CAP M9P_SERVER_DEFAULT_MSIZE
-#define MESH_NODE_SERVICE_REGISTER_CAPABILITY_BITS 0x0001u
-#define MESH_NODE_SERVICE_REGISTER_PORT_BITMAP 0x01u
-
-static struct m9p_server g_mini9p_server;
 static struct mesh_uart_transport g_mesh_uart_transport;
 static struct mesh_node_runtime g_mesh_node_runtime;
 static bool g_mesh_node_service_initialized;
@@ -68,29 +59,34 @@ static int mesh_node_service_receive_frame(
         rx_len);
 }
 
-int mesh_node_service_init_with_backend(const struct mesh_node_service_backend *backend)
+void mesh_node_service_get_default_config(struct mesh_node_service_config *out_config)
 {
-    struct m9p_server_config server_config;
+    if (out_config == NULL) {
+        return;
+    }
+
+    memset(out_config, 0, sizeof(*out_config));
+    out_config->capability_bits = MESH_NODE_SERVICE_REGISTER_CAPABILITY_BITS;
+    out_config->port_bitmap = MESH_NODE_SERVICE_REGISTER_PORT_BITMAP;
+    out_config->auto_register_on_init = true;
+}
+
+int mesh_node_service_init(const struct mesh_node_service_config *config)
+{
     struct mesh_uart_transport_config uart_config;
     struct mesh_node_runtime_config runtime_config;
     int rc;
 
-    if (backend == NULL || backend->ops == NULL || backend->uart == NULL) {
+    if (config == NULL || config->uart == NULL || config->mini9p_server_handler == NULL) {
         return -(int)MESH_ERR_INVALID_STATE;
     }
 
-    m9p_server_get_default_config(&server_config);
-    server_config.ops = backend->ops;
-    server_config.ops_ctx = backend->ops_ctx;
-    server_config.max_msize = MESH_NODE_SERVICE_FRAME_CAP;
-    server_config.default_iounit = backend->default_iounit;
-    rc = m9p_server_init(&g_mini9p_server, &server_config);
-    if (rc < 0) {
-        return rc;
+    if (g_mesh_node_service_initialized) {
+        mesh_node_service_deinit();
     }
 
     mesh_uart_transport_get_default_config(&uart_config);
-    uart_config.uart = backend->uart;
+    uart_config.uart = config->uart;
     uart_config.io_timeout_ms = MESH_UART_TRANSPORT_DEFAULT_TIMEOUT_MS;
     uart_config.flush_before_receive = false;
     rc = mesh_uart_transport_init(&g_mesh_uart_transport, &uart_config);
@@ -102,13 +98,14 @@ int mesh_node_service_init_with_backend(const struct mesh_node_service_backend *
     runtime_config.send_frame = mesh_node_service_send_frame;
     runtime_config.receive_frame = mesh_node_service_receive_frame;
     runtime_config.transport_ctx = &g_mesh_uart_transport;
-    runtime_config.mini9p_server_handler = m9p_server_handle_frame;
-    runtime_config.mini9p_server_ctx = &g_mini9p_server;
+    runtime_config.mini9p_server_handler = config->mini9p_server_handler;
+    runtime_config.mini9p_server_ctx = config->mini9p_server_ctx;
     mesh_node_service_fill_local_uid(runtime_config.local_uid);
     runtime_config.boot_nonce = mesh_node_service_make_boot_nonce();
-    runtime_config.capability_bits = MESH_NODE_SERVICE_REGISTER_CAPABILITY_BITS;
-    runtime_config.port_bitmap = MESH_NODE_SERVICE_REGISTER_PORT_BITMAP;
-    runtime_config.auto_register_on_init = true;
+    runtime_config.capability_bits = config->capability_bits;
+    runtime_config.port_bitmap = config->port_bitmap;
+    runtime_config.local_addr = MESH_NODE_SERVICE_DEFAULT_LOCAL_ADDR;
+    runtime_config.auto_register_on_init = config->auto_register_on_init;
     rc = mesh_node_runtime_init(&g_mesh_node_runtime, &runtime_config);
     if (rc != 0) {
         mesh_uart_transport_deinit(&g_mesh_uart_transport);
@@ -117,6 +114,13 @@ int mesh_node_service_init_with_backend(const struct mesh_node_service_backend *
 
     g_mesh_node_service_initialized = true;
     return 0;
+}
+
+void mesh_node_service_deinit(void)
+{
+    mesh_node_runtime_deinit(&g_mesh_node_runtime);
+    mesh_uart_transport_deinit(&g_mesh_uart_transport);
+    g_mesh_node_service_initialized = false;
 }
 
 int mesh_node_service_notify_link_up(void)
@@ -137,87 +141,11 @@ int mesh_node_service_poll_once(void)
     return mesh_node_runtime_poll_once(&g_mesh_node_runtime);
 }
 
-/**
- * @file mesh_node_service.c
- * @brief Initializes pwos-slave local VFS backends and injects them into mesh node service.
- */
-
-#include "mesh_node_service.h"
-
-#include <string.h>
-
-#include "dev_vfs.h"
-#include "fs_selftest.h"
-#include "lfs_port.hpp"
-#include "lfs_vfs.h"
-#include "mesh_node_service.h"
-#include "node_vfs.h"
-#include "sys_vfs.h"
-#include "usart.h"
-
-static struct lfs_vfs g_lfs_vfs;
-static struct sys_vfs g_sys_vfs;
-static struct dev_vfs g_dev_vfs;
-static struct node_vfs g_node_vfs;
-static FS_SelfTestReport g_fs_report;
-
-int mesh_node_service_init(void)
+struct mesh_node_runtime *mesh_node_service_runtime(void)
 {
-    struct sys_vfs_config sys_config;
-    struct dev_vfs_config dev_config;
-    struct lfs_vfs_config lfs_config;
-    struct node_vfs_config node_config;
-    struct mesh_node_service_backend backend;
-    struct lfs_vfs *active_lfs = NULL;
-    int rc;
-
-#ifndef PWOS_SKIP_LFS_MOUNT
-    lfs_vfs_get_default_config(&lfs_config);
-    rc = lfs_vfs_init(&g_lfs_vfs, &lfs_config);
-    if (rc == 0) {
-#ifdef PWOS_ENABLE_LFS_SELFTEST
-        (void)fs_selftest_run_on_fs(lfs_vfs_fs(&g_lfs_vfs), lfs_port_backend_name(), &g_fs_report);
-#endif
-        active_lfs = &g_lfs_vfs;
-    }
-#else
-    (void)lfs_config;
-#endif
-
-    memset(&sys_config, 0, sizeof(sys_config));
-    sys_config.info_text = active_lfs != NULL ? "pwos node lfs=ok\n" : "pwos node lfs=unavailable\n";
-    sys_config.iounit = SYS_VFS_DEFAULT_IOUNIT;
-    rc = sys_vfs_init(&g_sys_vfs, &sys_config);
-    if (rc != 0) {
-        return rc;
+    if (!g_mesh_node_service_initialized) {
+        return NULL;
     }
 
-    memset(&dev_config, 0, sizeof(dev_config));
-    dev_config.iounit = DEV_VFS_DEFAULT_IOUNIT;
-    rc = dev_vfs_init(&g_dev_vfs, &dev_config);
-    if (rc != 0) {
-        return rc;
-    }
-
-    memset(&node_config, 0, sizeof(node_config));
-    node_config.sys_ops = sys_vfs_ops();
-    node_config.sys_ctx = &g_sys_vfs;
-    node_config.dev_ops = dev_vfs_ops();
-    node_config.dev_ctx = &g_dev_vfs;
-    if (active_lfs != NULL) {
-        node_config.lfs_ops = lfs_vfs_ops();
-        node_config.lfs_ctx = active_lfs;
-    }
-    node_config.iounit = NODE_VFS_DEFAULT_IOUNIT;
-    rc = node_vfs_init(&g_node_vfs, &node_config);
-    if (rc != 0) {
-        return rc;
-    }
-
-    memset(&backend, 0, sizeof(backend));
-    backend.ops = node_vfs_ops();
-    backend.ops_ctx = &g_node_vfs;
-    backend.default_iounit = g_node_vfs.iounit;
-    backend.uart = &huart2;
-    return mesh_node_service_init_with_backend(&backend);
+    return &g_mesh_node_runtime;
 }
