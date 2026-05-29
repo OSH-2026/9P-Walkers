@@ -5,7 +5,7 @@
 #include <string.h>
 
 #include "cluster_config.h"
-#include "cluster_vfs.h"
+#include "cluster_host_vfs.h"
 #include "mesh_host_runtime.h"
 
 #define TEST_FRAME_CAP (MESH_FRAME_OVERHEAD + MESH_MAX_PAYLOAD_LEN)

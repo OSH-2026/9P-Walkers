@@ -5,7 +5,7 @@
 #include <string.h>
 
 #include "cluster_config.h"
-#include "cluster_vfs.h"
+#include "cluster_host_vfs.h"
 
 static int g_failures;
 

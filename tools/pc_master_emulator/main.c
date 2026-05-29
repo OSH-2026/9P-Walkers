@@ -34,7 +34,7 @@
  */
 
 #include "cluster_config.h"
-#include "cluster_vfs.h"
+#include "cluster_host_vfs.h"
 #include "mesh_host_runtime.h"
 #include "mesh_protocal.h"
 #include "mini9p_protocol.h"

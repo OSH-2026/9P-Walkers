@@ -14,7 +14,7 @@ set(MESH_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../../pwos-shared/mesh)
 add_executable(cluster_vfs_test
     test_main.c
     ${MASTER_CLUSTER_ROOT}/cluster_config.c
-    ${VFS_BRIDGE_ROOT}/cluster_vfs.c
+    ${VFS_BRIDGE_ROOT}/cluster_host_vfs.c
     ${MESH_ROOT}/cluster/cluster.c
     ${MESH_ROOT}/envelope/mesh_protocal.c
     ${MINI9P_ROOT}/mini9p_client.c

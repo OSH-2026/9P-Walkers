@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "cluster_vfs.h"
+#include "cluster_host_vfs.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"

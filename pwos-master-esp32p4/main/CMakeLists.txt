@@ -28,7 +28,7 @@ idf_component_register(
         "${PWOS_SHARED_MESH_CLUSTER_DIR}/cluster.c"
         "${PWOS_SHARED_MESH_TRANSPORT_DIR}/mesh_uart_transport.c"
         "../cluster/cluster_config.c"
-        "../vfs_bridge/cluster_vfs.c"
+        "../vfs_bridge/cluster_host_vfs.c"
         "../mesh/mesh_host_runtime.c"
         "../mesh/mesh_host_service.c"
         "../shell/shell.c"

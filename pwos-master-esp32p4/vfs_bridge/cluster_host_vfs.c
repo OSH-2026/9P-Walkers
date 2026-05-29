@@ -1,4 +1,4 @@
-#include "cluster_vfs.h"
+#include "cluster_host_vfs.h"
 
 #include <stdio.h>
 #include <string.h>
