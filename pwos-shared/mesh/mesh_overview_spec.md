@@ -104,7 +104,7 @@ processor 不直接依赖 UART 驱动，而是依赖两条回调：
 
 ### 3.3 receive_frame 语义
 
-`receive_frame(transport_ctx, rx_data, rx_cap, rx_len)`
+`receive_frame(transport_ctx, rx_data, rx_cap, rx_len, out_ingress_port)`
 
 - 成功时返回 `0` 并输出一帧完整 mesh 帧。
 - 失败/暂未收齐时返回负值（例如可重试错误）。

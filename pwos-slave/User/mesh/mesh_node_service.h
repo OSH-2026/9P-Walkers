@@ -24,12 +24,12 @@ extern "C" {
 
 #define MESH_NODE_SERVICE_FRAME_CAP M9P_SERVER_DEFAULT_MSIZE
 #define MESH_NODE_SERVICE_MAX_PORTS 4u
+#define MESH_NODE_SERVICE_MAX_BOOTSTRAP_PENDING 8u
 #define MESH_NODE_SERVICE_NEIGHBOR_ANY 0xffu
 #define MESH_NODE_SERVICE_REGISTER_CAPABILITY_BITS 0x0001u
 
 struct mesh_node_service_port_config {
     bool enabled;
-    uint8_t neighbor_addr;
     struct mesh_uart_transport_config uart_config;
 };
 

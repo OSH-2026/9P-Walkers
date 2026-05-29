@@ -79,7 +79,6 @@ service 是 STM32 节点侧的 mesh 装配层，内部持有静态实例：
 ```c
 struct mesh_node_service_port_config {
     bool enabled;
-    uint8_t neighbor_addr;
     struct mesh_uart_transport_config uart_config;
 };
 

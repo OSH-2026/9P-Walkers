@@ -33,58 +33,23 @@ extern "C" {
  *    确保后续回包不再继续使用 0xFF。
  */
 
-/* 当前单个 runtime 最多管理的总传输端口数（UART + 可选 Wi-Fi）。 */
-#define MESH_NODE_RUNTIME_MAX_PORTS 8u
+struct mesh_node_runtime;
 
-/* 为 Wi-Fi 保留最高位后，当前 runtime 最多能直接管理的 UART 数量。 */
-#define MESH_NODE_RUNTIME_MAX_UART_PORTS MESH_PORT_SELECTOR_WIFI_ID
-
-/* Wi-Fi 在 runtime 内部固定映射到保留端口号。 */
-#define MESH_NODE_RUNTIME_WIFI_PORT_ID CLUSTER_PORT_WIFI_ID
-
-/* 无效或未知的本地端口编号。 */
-#define MESH_NODE_RUNTIME_INVALID_PORT CLUSTER_PORT_INVALID
-
-/*
- * 一个物理端口的静态配置。
- *
- * send_frame/receive_frame 与 shared mesh_processer 使用的签名保持一致，
- * 这样 runtime 内部既可以包装真实 UART，也可以在主机测试里直接挂 fake transport。
- */
-struct mesh_node_runtime_port_config {
-    mesh_processer_send_frame_fn send_frame;     /**< 绑定到该物理端口的原始发帧函数。 */
-    mesh_processer_receive_frame_fn receive_frame; /**< 绑定到该物理端口的原始收帧函数。 */
-    void *transport_ctx;                         /**< 原样传给该端口 send/receive 的上下文。 */
-    uint8_t port_id;                            /**< runtime 内部使用的稳定本地端口编号。 */
-};
-
-/* 运行时内部保存的一条端口绑定。 */
-struct mesh_node_runtime_port {
-    bool initialized;                           /**< 该端口是否已成功注册到 runtime。 */
-    uint8_t port_id;                            /**< 本地端口编号。 */
-    mesh_processer_send_frame_fn send_frame;    /**< 该端口的底层发帧函数。 */
-    mesh_processer_receive_frame_fn receive_frame; /**< 该端口的底层收帧函数。 */
-    void *transport_ctx;                        /**< 该端口的链路上下文。 */
-};
+typedef int (*mesh_node_runtime_bootstrap_bridge_fn)(
+    void *bridge_ctx,
+    struct mesh_node_runtime *runtime,
+    const uint8_t *frame_data,
+    size_t frame_len,
+    const struct mesh_frame_view *frame,
+    uint8_t ingress_port,
+    bool *out_handled);
 
 struct mesh_node_runtime_config {
-    /*
-     * 多端口主路径：
-     * - ports 指向长度至少为 port_count 的端口配置数组；
-     * - runtime_init() 会按端口数组逐个绑定、编号并纳入轮询。
-     */
-    const struct mesh_node_runtime_port_config *ports;
-
-    /*
-     * 兼容旧版的单端口快捷字段。
-     * 当 ports == NULL 且 runtime_init(..., port_count=1) 时，runtime 会退化为
-     * 仅使用这一组 send/receive/transport_ctx，端口编号固定为 0。
-     */
-    mesh_processer_send_frame_fn send_frame;
-    mesh_processer_receive_frame_fn receive_frame;
-    void *transport_ctx;
-    const struct mesh_wifi_config *wifi_config;                 /**< 启用 Wi-Fi 时使用的 mesh_wifi 配置。 */
-
+    mesh_processer_send_frame_fn send_frame; /**< 原始链路发帧函数，不可为 NULL。 */
+    mesh_processer_receive_frame_fn receive_frame; /**< 原始链路收帧函数，不可为 NULL。 */
+    void *transport_ctx; /**< 原样传给 send/receive 的链路上下文。 */
+    mesh_node_runtime_bootstrap_bridge_fn bootstrap_bridge; /**< 可选 bootstrap 中继 hook。 */
+    void *bootstrap_bridge_ctx; /**< bootstrap_bridge 上下文。 */
     mesh_processer_mini9p_server_handler_fn mini9p_server_handler; /**< 本地 mini9P server 处理器。 */
     void *mini9p_server_ctx;                                      /**< 传给 mini9P server 的上下文。 */
     uint8_t local_uid[MESH_UID_LEN];                              /**< 当前节点对外通告的稳定硬件 UID。 */
@@ -161,23 +126,12 @@ int mesh_node_runtime_process_frame(
     const uint8_t *frame_data,
     size_t frame_len);
 
-/*
- * 处理一帧来自指定本地端口的 mesh 数据。
- *
- * runtime 会把 frame.src -> port_id 记入 direct-table cluster，后续再向该 src
- * 发包时，就会自动通过该端口发出。
- */
-int mesh_node_runtime_process_frame_on_port(
+int mesh_node_runtime_process_frame_from_port(
     struct mesh_node_runtime *runtime,
-    uint8_t port_id,
     const uint8_t *frame_data,
-    size_t frame_len);
+    size_t frame_len,
+    uint8_t ingress_port);
 
-/*
- * 从所有已绑定端口中轮询至多一帧并处理。
- *
- * 轮询策略为 round-robin：每次从 next_rx_port_index 开始扫描，谁先有完整帧就处理谁。
- */
 int mesh_node_runtime_poll_once(struct mesh_node_runtime *runtime);
 
 #ifdef __cplusplus
