@@ -80,7 +80,7 @@ Mini9P 是本项目使用的轻量级 9P 变体。帧格式包括 magic `0x39 0x
 
 ### Cluster VFS
 
-`pwos-master-esp32p4/vfs_bridge/cluster_vfs.c` 是主控上的统一命名空间桥接层。它不是完整 POSIX 文件系统，而是维护静态路由表和本地 fd 表：
+`pwos-master-esp32p4/vfs_bridge/cluster_host_vfs.c` 是主控上的统一命名空间桥接层。它不是完整 POSIX 文件系统，而是维护静态路由表和本地 fd 表：
 
 - 直连路由：`/mcu1/dev/temp` 命中 `mcu1`，发送到从机时转为 `/dev/temp`。
 - 本地 fd：`local_fd -> route + remote_fid`，其中 `remote_fid` 是 Mini9P session 内的远端句柄。

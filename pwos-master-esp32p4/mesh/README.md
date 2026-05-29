@@ -5,17 +5,17 @@
 ## 文件说明
 
 - `mesh_host_runtime.c/.h`
-  - 拥有主机 mesh runtime 对象。
+  - 提供主机 mesh runtime 对象与实例级函数接口。
   - 封装共享的 `mesh_processer`。
   - 处理 `REGISTER`、`LINK_STATE` 和 `ROUTE_UPDATE` 等 mesh 控制帧。
-  - 为已发现的 mesh 节点创建长期存在的 Mini9P 客户端，并将其注册到 `cluster_config` / `cluster_vfs`。
-  - 提供默认初始化和 ESP 轮询任务入口点。
+  - 为已发现的 mesh 节点创建长期存在的 Mini9P 客户端，并将其注册到 `cluster_config` / `cluster_host_vfs`。
 
 - `mesh_host_service.c/.h`
-  - 拥有一个或多个原始 mesh UART 传输端口。
+  - 拥有一个或多个原始 mesh UART 传输端口，以及默认主机 runtime 实例。
   - 提供与 `mesh_processer` 兼容的发送/接收回调。
   - 在多端口配置下，根据 `next_hop` 选择出口 UART。
   - 将所有已配置 UART 的入口帧多路复用为 `mesh_host_runtime` 期望的单一接收流。
+  - 提供默认初始化和 ESP 轮询任务入口点。
 
 ## 运行时流程
 
@@ -54,7 +54,7 @@ host -- UART2 -- mcu3(0x33)
 
 发往 `mcu2` 的请求通过集群路由解析得到 `next_hop = 0x11`；服务随后在配置了 `neighbor_addr = 0x11` 的 UART 上发送。
 
-单端口默认模式使用 `MESH_HOST_SERVICE_NEIGHBOR_ANY`，因此现有默认运行时初始化继续通过唯一配置的 UART 发送所有流量。
+单端口默认模式使用 `MESH_HOST_SERVICE_NEIGHBOR_ANY`，因此现有默认主机服务继续通过唯一配置的 UART 发送所有流量。
 
 ## 当前限制
 

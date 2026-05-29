@@ -2,12 +2,36 @@
 
 #include <string.h>
 
-static struct mesh_host_service g_default_manager;
+#ifdef ESP_PLATFORM
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#endif
+
+static struct mesh_host_service g_default_service;
+
+#ifdef ESP_PLATFORM
+static TaskHandle_t g_default_service_task;
+#endif
 
 static bool mesh_host_service_error_is_soft(int rc)
 {
     return rc == -(int)MESH_ERR_BUSY || rc == -(int)MESH_ERR_NO_ROUTE;
 }
+
+#ifdef ESP_PLATFORM
+static void mesh_host_service_default_task(void *arg)
+{
+    struct mesh_host_service *service = (struct mesh_host_service *)arg;
+
+    for (;;) {
+        int rc = mesh_host_runtime_poll_once(&service->runtime);
+
+        if (rc != 0) {
+            vTaskDelay(pdMS_TO_TICKS(MESH_HOST_RUNTIME_IDLE_DELAY_MS));
+        }
+    }
+}
+#endif
 
 static size_t mesh_host_service_count_ports(const struct mesh_host_service *manager)
 {
@@ -98,8 +122,10 @@ int mesh_host_service_init(
     struct mesh_host_service *manager,
     const struct mesh_host_service_config *config)
 {
+    struct mesh_host_runtime_config runtime_config;
     size_t i;
     size_t enabled_count = 0u;
+    int rc;
 
     if (manager == NULL || config == NULL || config->port_count == 0u ||
         config->port_count > MESH_HOST_SERVICE_MAX_PORTS) {
@@ -110,8 +136,6 @@ int mesh_host_service_init(
     manager->port_count = config->port_count;
 
     for (i = 0u; i < config->port_count; ++i) {
-        int rc;
-
         if (!config->ports[i].enabled) {
             continue;
         }
@@ -136,6 +160,23 @@ int mesh_host_service_init(
         return -(int)MESH_ERR_INVALID_STATE;
     }
 
+    rc = cluster_config_init_mesh_host();
+    if (rc != 0) {
+        mesh_host_service_deinit(manager);
+        return rc;
+    }
+
+    mesh_host_runtime_get_default_config(&runtime_config);
+    runtime_config.mesh_cluster = cluster_config_mesh_cluster();
+    runtime_config.transport_ctx = manager;
+    runtime_config.send_frame = mesh_host_service_send_frame;
+    runtime_config.receive_frame = mesh_host_service_receive_frame;
+    rc = mesh_host_runtime_init(&manager->runtime, &runtime_config);
+    if (rc != 0) {
+        mesh_host_service_deinit(manager);
+        return rc;
+    }
+
     manager->next_rx_index = 0u;
     manager->initialized = true;
     return 0;
@@ -148,6 +189,8 @@ void mesh_host_service_deinit(struct mesh_host_service *manager)
     if (manager == NULL) {
         return;
     }
+
+    mesh_host_runtime_deinit(&manager->runtime);
 
     for (i = 0u; i < manager->port_count; ++i) {
         if (manager->ports[i].initialized) {
@@ -162,26 +205,63 @@ int mesh_host_service_init_default(void)
 {
     struct mesh_host_service_config config;
 
-    if (g_default_manager.initialized) {
+    if (g_default_service.initialized) {
         return 0;
     }
 
     mesh_host_service_get_default_config(&config);
-    return mesh_host_service_init(&g_default_manager, &config);
+    return mesh_host_service_init(&g_default_service, &config);
 }
 
 void mesh_host_service_deinit_default(void)
 {
-    mesh_host_service_deinit(&g_default_manager);
+    mesh_host_service_deinit(&g_default_service);
 }
 
 struct mesh_host_service *mesh_host_service_default(void)
 {
-    if (!g_default_manager.initialized) {
+    if (!g_default_service.initialized) {
         return NULL;
     }
 
-    return &g_default_manager;
+    return &g_default_service;
+}
+
+struct mesh_host_runtime *mesh_host_service_default_runtime(void)
+{
+    if (!g_default_service.initialized || !g_default_service.runtime.initialized) {
+        return NULL;
+    }
+
+    return &g_default_service.runtime;
+}
+
+int mesh_host_service_start_default_task(void)
+{
+    int rc;
+
+    rc = mesh_host_service_init_default();
+    if (rc != 0) {
+        return rc;
+    }
+
+#ifdef ESP_PLATFORM
+    if (g_default_service_task != NULL) {
+        return 0;
+    }
+    if (xTaskCreate(
+            mesh_host_service_default_task,
+            "mesh_host_rt",
+            MESH_HOST_RUNTIME_TASK_STACK_SIZE,
+            &g_default_manager,
+            MESH_HOST_RUNTIME_TASK_PRIORITY,
+            &g_default_service_task) != pdPASS) {
+        return -(int)M9P_ERR_EIO;
+    }
+    return 0;
+#else
+    return -(int)M9P_ERR_ENOTSUP;
+#endif
 }
 
 int mesh_host_service_send_frame(

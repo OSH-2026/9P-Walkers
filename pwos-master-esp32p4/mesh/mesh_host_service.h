@@ -5,7 +5,8 @@
  * @file mesh_host_service.h
  * @brief 主机侧原始 mesh 主机服务。
  *
- * 该管理器拥有一个或多个 `mesh_uart_transport` 实例，并提供与
+ * 该管理器拥有一个或多个 `mesh_uart_transport` 实例和对应的
+ * `mesh_host_runtime` 实例，并提供与
  * `mesh_processer_send_frame_fn` 和 `mesh_processer_receive_frame_fn` 兼容的回调。
  *
  * 发送回调使用调用方提供的 `next_hop` 地址选择出口 UART 端口。
@@ -17,6 +18,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "mesh_host_runtime.h"
 #include "mesh_uart_transport.h"
 
 #ifdef __cplusplus
@@ -74,7 +76,8 @@ struct mesh_host_service_port {
 /**
  * @brief 主机侧 mesh 主机服务的运行时状态。
  *
- * 该对象拥有所有已初始化的 `mesh_uart_transport` 实例。
+ * 该对象拥有所有已初始化的 `mesh_uart_transport` 实例和一个主机侧
+ * `mesh_host_runtime` 实例。
  * 它可以是静态/全局对象，或嵌入另一个长期运行的运行时对象中。
  */
 struct mesh_host_service {
@@ -86,6 +89,9 @@ struct mesh_host_service {
 
     /** 下一轮轮询接收扫描的起始槽位。 */
     size_t next_rx_index;
+
+    /** 服务拥有的主机侧 mesh runtime。 */
+    struct mesh_host_runtime runtime;
 
     /** 受管端口运行时状态表。 */
     struct mesh_host_service_port ports[MESH_HOST_SERVICE_MAX_PORTS];
@@ -128,8 +134,7 @@ void mesh_host_service_deinit(struct mesh_host_service *manager);
 /**
  * @brief 初始化进程级默认主机服务。
  *
- * 默认管理器使用单端口默认配置。这是
- * `mesh_host_runtime_init_default()` 所使用的路径。
+ * 默认管理器使用单端口默认配置，并装配其持有的默认 runtime。
  *
  * @return 成功返回 0，失败返回负 `MESH_ERR_*` 错误码。
  */
@@ -138,12 +143,19 @@ int mesh_host_service_init_default(void);
 /** @brief 去初始化进程级默认主机服务。 */
 void mesh_host_service_deinit_default(void);
 
-/**
- * @brief 返回进程级默认主机服务。
- *
- * @return 已初始化的默认管理器指针，若未初始化则返回 NULL。
- */
+/** @brief 返回进程级默认主机服务。 */
 struct mesh_host_service *mesh_host_service_default(void);
+
+/** @brief 返回进程级默认主机服务持有的 runtime。 */
+struct mesh_host_runtime *mesh_host_service_default_runtime(void);
+
+/**
+ * @brief 启动默认主机服务的后台轮询任务。
+ *
+ * 默认路径会初始化 cluster_config、UART host service 和 host runtime；
+ * ESP 平台会创建后台任务持续轮询 runtime，主机测试环境返回 -M9P_ERR_ENOTSUP。
+ */
+int mesh_host_service_start_default_task(void);
 
 /**
  * @brief 通过选定的出口端口发送一个完整的原始 mesh 帧。

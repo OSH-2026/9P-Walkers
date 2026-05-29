@@ -38,7 +38,7 @@
 主机启动时调用：
 
 ```c
-mesh_host_runtime_start_default_task();
+mesh_host_service_start_default_task();
 ```
 
 该入口会自动完成：
@@ -156,14 +156,14 @@ cluster_vfs_write_path("/mcu1/dev/led", data, len, &written);
 
 这套 runtime 对外接口可以按三层理解。
 
-### 5.1 第一层：runtime 启动接口
+### 5.1 第一层：service 启动接口
 
 这层用于“把自动链条拉起来”。
 
 #### 默认启动入口
 
 ```c
-int mesh_host_runtime_start_default_task(void);
+int mesh_host_service_start_default_task(void);
 ```
 
 用途：
@@ -178,8 +178,9 @@ int mesh_host_runtime_start_default_task(void);
 #### 默认实例初始化
 
 ```c
-int mesh_host_runtime_init_default(void);
-struct mesh_host_runtime *mesh_host_runtime_default(void);
+int mesh_host_service_init_default(void);
+struct mesh_host_service *mesh_host_service_default(void);
+struct mesh_host_runtime *mesh_host_service_default_runtime(void);
 ```
 
 用途：
@@ -329,7 +330,7 @@ int cluster_vfs_stat(const char *path, struct m9p_stat *out_stat);
 
 推荐顺序：
 
-1. 启动时调用 `mesh_host_runtime_start_default_task()`。
+1. 启动时调用 `mesh_host_service_start_default_task()`。
 2. 等待 runtime 自动发现节点。
 3. 用 shared mesh cluster 或 `cluster_config_*` 查询节点是否在线/可达。
 4. 对需要访问的节点执行 `cluster_vfs_attach("mcuN")`。

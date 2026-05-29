@@ -157,10 +157,11 @@ cluster_config_refresh_node_connectivity(mesh_addr, &reachable);
 - `cluster_config_refresh_all_nodes_connectivity`
 - `cluster_config_on_node_departed`
 
-主机 runtime 入口：
+主机 service 入口：
 
-- `mesh_host_runtime_init_default`
-- `mesh_host_runtime_start_default_task`
+- `mesh_host_service_init_default`
+- `mesh_host_service_start_default_task`
+- `mesh_host_service_default_runtime`
 
 VFS 节点管理接口：
 
