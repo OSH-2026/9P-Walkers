@@ -84,11 +84,6 @@ static int fake_receive_frame(
     return 0;
 }
 
-static int fake_wifi_receive_frame(void *transport_ctx, uint8_t *rx_data, size_t rx_cap, size_t *rx_len)
-{
-    return fake_receive_frame(transport_ctx, rx_data, rx_cap, rx_len);
-}
-
 static int fake_mini9p_server_handler(
     void *server_ctx,
     const uint8_t *request_data,
@@ -116,22 +111,18 @@ static void init_runtime(
     struct fake_transport *transports,
     const uint8_t *port_ids,
     size_t port_count,
-    struct fake_transport *wifi_transport,
-    bool wifi_supported,
     struct fake_server_ctx *server_ctx,
     const uint8_t uid[MESH_UID_LEN],
     bool auto_register_on_init)
 {
     struct mesh_node_runtime_config config;
     struct mesh_node_runtime_port_config port_configs[MESH_NODE_RUNTIME_MAX_PORTS];
-    struct mesh_wifi_config wifi_config;
     size_t i;
 
     assert(port_count <= MESH_NODE_RUNTIME_MAX_UART_PORTS);
 
     mesh_node_runtime_get_default_config(&config);
     memset(port_configs, 0, sizeof(port_configs));
-    mesh_wifi_get_default_config(&wifi_config);
     for (i = 0u; i < port_count; ++i) {
         port_configs[i].send_frame = fake_send_frame;
         port_configs[i].receive_frame = fake_receive_frame;
@@ -148,15 +139,7 @@ static void init_runtime(
     config.port_bitmap = 0u;
     config.auto_register_on_init = auto_register_on_init;
 
-    if (wifi_supported) {
-        assert(wifi_transport != NULL);
-        wifi_config.send_frame = fake_wifi_send_frame;
-        wifi_config.receive_frame = fake_wifi_receive_frame;
-        wifi_config.io_ctx = wifi_transport;
-        config.wifi_config = &wifi_config;
-    }
-
-    assert(mesh_node_runtime_init(runtime, &config, port_count, wifi_supported) == 0);
+    assert(mesh_node_runtime_init(runtime, &config, port_count) == 0);
 }
 
 static void test_auto_register_on_init_sends_uid_to_every_bound_port(void)
@@ -175,7 +158,7 @@ static void test_auto_register_on_init_sends_uid_to_every_bound_port(void)
         fake_transport_reset(&transports[i]);
     }
 
-    init_runtime(&runtime, transports, port_ids, 2u, NULL, false, &server_ctx, uid, true);
+    init_runtime(&runtime, transports, port_ids, 2u, &server_ctx, uid, true);
 
     assert(transports[0].tx_count == 1u);
     assert(transports[1].tx_count == 1u);
@@ -218,7 +201,7 @@ static void test_assign_updates_local_addr_and_allows_server_reply(void)
     memset(&server_ctx, 0, sizeof(server_ctx));
     fake_transport_reset(&transports[0]);
 
-    init_runtime(&runtime, transports, port_ids, 1u, NULL, false, &server_ctx, uid, false);
+    init_runtime(&runtime, transports, port_ids, 1u, &server_ctx, uid, false);
 
     memset(&assign_payload, 0, sizeof(assign_payload));
     memcpy(assign_payload.uid, uid, sizeof(uid));
@@ -303,7 +286,7 @@ static void test_assign_with_foreign_uid_is_ignored(void)
     memset(&server_ctx, 0, sizeof(server_ctx));
     fake_transport_reset(&transports[0]);
 
-    init_runtime(&runtime, transports, port_ids, 1u, NULL, false, &server_ctx, local_uid, false);
+    init_runtime(&runtime, transports, port_ids, 1u, &server_ctx, local_uid, false);
 
     memset(&assign_payload, 0, sizeof(assign_payload));
     memcpy(assign_payload.uid, foreign_uid, sizeof(foreign_uid));
@@ -356,7 +339,7 @@ static void test_multi_port_forward_uses_route_selected_egress(void)
         fake_transport_reset(&transports[i]);
     }
 
-    init_runtime(&runtime, transports, port_ids, 2u, NULL, false, &server_ctx, uid, false);
+    init_runtime(&runtime, transports, port_ids, 2u, &server_ctx, uid, false);
 
     memset(&assign_payload, 0, sizeof(assign_payload));
     memcpy(assign_payload.uid, uid, sizeof(uid));

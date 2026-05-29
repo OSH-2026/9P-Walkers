@@ -2,6 +2,8 @@
 
 #include <string.h>
 
+#define MESH_HOST_RUNTIME_WIFI_LINK_METRIC 1u
+
 /*
  * 这个文件的核心思路是：
  * - mesh_processer 继续负责“协议层分流”；

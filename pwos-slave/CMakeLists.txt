@@ -54,7 +54,6 @@ set(PWOS_SHARED_MESH_CLUSTER_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/cluster
 set(PWOS_SHARED_MESH_ENVELOPE_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/envelope)
 set(PWOS_SHARED_MESH_PROCESSER_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/processer)
 set(PWOS_SHARED_MESH_TRANSPORT_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/transport)
-set(PWOS_SHARED_MESH_WIFI_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/wifi)
 
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${PWOS_USER_DIR}/fs/lfs.c
@@ -74,7 +73,6 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${PWOS_SHARED_MESH_PROCESSER_DIR}/mesh_processer.c
     ${PWOS_USER_MESH_DIR}/mesh_node_runtime.c
     ${PWOS_SHARED_MESH_TRANSPORT_DIR}/mesh_uart_transport.c
-    ${PWOS_SHARED_MESH_WIFI_DIR}/mesh_wifi.c
     ${CMAKE_SOURCE_DIR}/../pwos-shared/mini9p/mini9p_protocol.c
     ${CMAKE_SOURCE_DIR}/../pwos-shared/mini9p/mini9p_server.c
 )

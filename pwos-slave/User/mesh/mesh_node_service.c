@@ -345,7 +345,11 @@ static int mesh_node_service_forward_bootstrap_assign(
     if (rc != 0) {
         return rc;
     }
-    rc = cluster_add_route(&runtime->cluster, payload->node_addr, payload->node_addr, 1u);
+    rc = cluster_add_route(&runtime->cluster, payload->node_addr, ingress_port, 1u);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = mesh_node_runtime_report_neighbor_link(runtime, payload->node_addr, ingress_port, true);
     if (rc != 0) {
         return rc;
     }
@@ -570,10 +574,9 @@ int mesh_node_service_init(const struct mesh_node_service_config *config)
     runtime_config.boot_nonce = mesh_node_service_make_boot_nonce();
     runtime_config.capability_bits = MESH_NODE_SERVICE_REGISTER_CAPABILITY_BITS;
     runtime_config.port_bitmap = mesh_node_service_make_port_bitmap(&g_mesh_node_service);
-    runtime_config.bootstrap_next_hop = MESH_NODE_SERVICE_NEIGHBOR_ANY;
     runtime_config.local_addr = MESH_NODE_SERVICE_DEFAULT_LOCAL_ADDR;
     g_mesh_node_service.initialized = true;
-    rc = mesh_node_runtime_init(&g_mesh_node_service.runtime, &runtime_config);
+    rc = mesh_node_runtime_init(&g_mesh_node_service.runtime, &runtime_config, enabled_count);
     if (rc != 0) {
         mesh_node_service_deinit();
         return rc;
