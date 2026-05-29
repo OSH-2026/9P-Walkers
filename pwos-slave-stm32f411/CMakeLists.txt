@@ -48,7 +48,6 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 
 set(PWOS_SHARED_MINI9P_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mini9p)
 set(PWOS_SLAVE_USER_DIR ${CMAKE_SOURCE_DIR}/../pwos-slave/User)
-set(PWOS_SLAVE_USER_MINI9P_DIR ${PWOS_SLAVE_USER_DIR}/mini9p)
 set(PWOS_SLAVE_USER_MESH_DIR ${PWOS_SLAVE_USER_DIR}/mesh)
 set(PWOS_SHARED_MESH_CLUSTER_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/cluster)
 set(PWOS_SHARED_MESH_ENVELOPE_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/envelope)
@@ -65,8 +64,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${PWOS_SLAVE_USER_DIR}/fs/lfs_util.c
     ${PWOS_SLAVE_USER_DIR}/drivers/storage/lfs_port.cpp
     ${PWOS_SLAVE_USER_DIR}/app/fs_selftest.c
-    User/mini9p/mini9p_board_service.c
-    ${PWOS_SLAVE_USER_MINI9P_DIR}/mini9p_service.c
+    ${PWOS_SLAVE_USER_MESH_DIR}/mesh_node_service.c
     ${PWOS_SHARED_MESH_CLUSTER_DIR}/cluster.c
     ${PWOS_SHARED_MESH_ENVELOPE_DIR}/mesh_protocal.c
     ${PWOS_SHARED_MESH_PROCESSER_DIR}/mesh_processer.c
@@ -86,8 +84,6 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${PWOS_SLAVE_USER_DIR}/fs
     ${PWOS_SLAVE_USER_DIR}/drivers/storage
     ${PWOS_SLAVE_USER_DIR}/app
-    User/mini9p
-    ${PWOS_SLAVE_USER_MINI9P_DIR}
     ${PWOS_SLAVE_USER_MESH_DIR}
     ${PWOS_SHARED_MINI9P_DIR}
     ${PWOS_SHARED_MESH_CLUSTER_DIR}

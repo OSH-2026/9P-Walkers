@@ -2,7 +2,7 @@
 
 #include <string.h>
 
-#include "mesh_transport_manager.h"
+#include "mesh_host_service.h"
 
 #ifdef ESP_PLATFORM
 #include "freertos/FreeRTOS.h"
@@ -668,16 +668,16 @@ int mesh_host_runtime_init_default(void)
     if (rc != 0) {
         return rc;
     }
-    rc = mesh_transport_manager_init_default();
+    rc = mesh_host_service_init_default();
     if (rc != 0) {
         return rc;
     }
 
     mesh_host_runtime_get_default_config(&config);
     config.mesh_cluster = cluster_config_mesh_cluster();
-    config.transport_ctx = mesh_transport_manager_default();
-    config.send_frame = mesh_transport_manager_send_frame;
-    config.receive_frame = mesh_transport_manager_receive_frame;
+    config.transport_ctx = mesh_host_service_default();
+    config.send_frame = mesh_host_service_send_frame;
+    config.receive_frame = mesh_host_service_receive_frame;
 
     return mesh_host_runtime_init(&g_default_runtime, &config);
 }

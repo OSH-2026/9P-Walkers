@@ -57,7 +57,7 @@ mesh_host_runtime_start_default_task();
 在当前从机接线里，这个 REGISTER 不是靠上层业务手写触发，而是由每条 UART
 各自持有的 `mesh_node_runtime` 自动完成：
 
-1. `mini9p_service_init()` 先初始化本地 `mini9p_server` 和 raw mesh UART transport。
+1. `mesh_node_service_init()` 先初始化本地 `mini9p_server` 和 raw mesh UART transport。
 2. 然后初始化对应的 `mesh_node_runtime`。
 3. `mesh_node_runtime` 在 init 成功后，立即向这条 UART 发送一帧 REGISTER。
 4. REGISTER 里会携带当前板子的稳定硬件 UID，以及这条链路对应的能力/端口位图。
@@ -68,7 +68,7 @@ mesh_host_runtime_start_default_task();
 - 后 4 字节取 `HAL_GetUIDw1() ^ HAL_GetUIDw2()`。
 
 如果未来板级代码能够显式检测某条 UART 的 link-up 事件，还可以继续调用
-`mini9p_service_notify_link_up()` 或更底层的 `mesh_node_runtime_notify_link_up()`，
+`mesh_node_service_notify_link_up()` 或更底层的 `mesh_node_runtime_notify_link_up()`，
 在该事件上再次向对应串口重发 REGISTER。
 
 runtime 收到后，会自动完成：

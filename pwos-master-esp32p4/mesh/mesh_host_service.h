@@ -1,9 +1,9 @@
-#ifndef PWOS_MASTER_MESH_TRANSPORT_MANAGER_H
-#define PWOS_MASTER_MESH_TRANSPORT_MANAGER_H
+#ifndef PWOS_MASTER_MESH_HOST_SERVICE_H
+#define PWOS_MASTER_MESH_HOST_SERVICE_H
 
 /**
- * @file mesh_transport_manager.h
- * @brief 主机侧原始 mesh 传输管理器。
+ * @file mesh_host_service.h
+ * @brief 主机侧原始 mesh 主机服务。
  *
  * 该管理器拥有一个或多个 `mesh_uart_transport` 实例，并提供与
  * `mesh_processer_send_frame_fn` 和 `mesh_processer_receive_frame_fn` 兼容的回调。
@@ -23,11 +23,11 @@
 extern "C" {
 #endif
 
-/** @brief 一个传输管理器最多管理的 UART 端口数。 */
-#define MESH_TRANSPORT_MANAGER_MAX_PORTS 4u
+/** @brief 一个主机服务最多管理的 UART 端口数。 */
+#define MESH_HOST_SERVICE_MAX_PORTS 4u
 
 /** @brief 单端口/默认配置使用的通配邻居地址。 */
-#define MESH_TRANSPORT_MANAGER_NEIGHBOR_ANY 0xffu
+#define MESH_HOST_SERVICE_NEIGHBOR_ANY 0xffu
 
 /**
  * @brief 一个受管 UART 传输端口的配置。
@@ -35,11 +35,11 @@ extern "C" {
  * `neighbor_addr` 是可通过该 UART 到达的直接下一跳 mesh 地址，
  * 不是路由流量的最终目的地址。
  */
-struct mesh_transport_manager_port_config {
+struct mesh_host_service_port_config {
     /** 该槽位是否应被初始化并使用。 */
     bool enabled;
 
-    /** 该端口的直接下一跳 mesh 地址，或 `MESH_TRANSPORT_MANAGER_NEIGHBOR_ANY`。 */
+    /** 该端口的直接下一跳 mesh 地址，或 `MESH_HOST_SERVICE_NEIGHBOR_ANY`。 */
     uint8_t neighbor_addr;
 
     /** 该端口底层 UART 传输配置。 */
@@ -47,20 +47,20 @@ struct mesh_transport_manager_port_config {
 };
 
 /**
- * @brief mesh 传输管理器实例的配置。
+ * @brief mesh 主机服务实例的配置。
  */
-struct mesh_transport_manager_config {
+struct mesh_host_service_config {
     /** `ports` 中应被考虑的条目数量。 */
     size_t port_count;
 
     /** 固定大小的端口配置表。 */
-    struct mesh_transport_manager_port_config ports[MESH_TRANSPORT_MANAGER_MAX_PORTS];
+    struct mesh_host_service_port_config ports[MESH_HOST_SERVICE_MAX_PORTS];
 };
 
 /**
  * @brief 一个受管 UART 端口的运行时状态。
  */
-struct mesh_transport_manager_port {
+struct mesh_host_service_port {
     /** 该端口是否已成功初始化。 */
     bool initialized;
 
@@ -72,12 +72,12 @@ struct mesh_transport_manager_port {
 };
 
 /**
- * @brief 主机侧 mesh 传输管理器的运行时状态。
+ * @brief 主机侧 mesh 主机服务的运行时状态。
  *
  * 该对象拥有所有已初始化的 `mesh_uart_transport` 实例。
  * 它可以是静态/全局对象，或嵌入另一个长期运行的运行时对象中。
  */
-struct mesh_transport_manager {
+struct mesh_host_service {
     /** 管理器是否已成功初始化。 */
     bool initialized;
 
@@ -88,7 +88,7 @@ struct mesh_transport_manager {
     size_t next_rx_index;
 
     /** 受管端口运行时状态表。 */
-    struct mesh_transport_manager_port ports[MESH_TRANSPORT_MANAGER_MAX_PORTS];
+    struct mesh_host_service_port ports[MESH_HOST_SERVICE_MAX_PORTS];
 };
 
 /**
@@ -96,14 +96,14 @@ struct mesh_transport_manager {
  *
  * 默认配置启用一个 UART 端口，使用
  * `mesh_uart_transport_get_default_config()`，并将其映射到
- * `MESH_TRANSPORT_MANAGER_NEIGHBOR_ANY`。
+ * `MESH_HOST_SERVICE_NEIGHBOR_ANY`。
  *
  * @param[out] out_config 要填充的配置对象。NULL 会被忽略。
  */
-void mesh_transport_manager_get_default_config(struct mesh_transport_manager_config *out_config);
+void mesh_host_service_get_default_config(struct mesh_host_service_config *out_config);
 
 /**
- * @brief 初始化一个 mesh 传输管理器实例。
+ * @brief 初始化一个 mesh 主机服务实例。
  *
  * 初始化会验证端口表、拒绝重复的具体 `neighbor_addr` 值、
  * 初始化所有已启用的 UART 传输，并准备接收轮询游标。
@@ -112,38 +112,38 @@ void mesh_transport_manager_get_default_config(struct mesh_transport_manager_con
  * @param[in] config 管理器配置。
  * @return 成功返回 0，失败返回负 `MESH_ERR_*` 错误码。
  */
-int mesh_transport_manager_init(
-    struct mesh_transport_manager *manager,
-    const struct mesh_transport_manager_config *config);
+int mesh_host_service_init(
+    struct mesh_host_service *manager,
+    const struct mesh_host_service_config *config);
 
 /**
- * @brief 去初始化一个 mesh 传输管理器实例。
+ * @brief 去初始化一个 mesh 主机服务实例。
  *
  * 所有已初始化的 UART 端口都会被去初始化，管理器对象被重置。
  *
  * @param[in,out] manager 管理器实例，NULL 为无操作。
  */
-void mesh_transport_manager_deinit(struct mesh_transport_manager *manager);
+void mesh_host_service_deinit(struct mesh_host_service *manager);
 
 /**
- * @brief 初始化进程级默认传输管理器。
+ * @brief 初始化进程级默认主机服务。
  *
  * 默认管理器使用单端口默认配置。这是
  * `mesh_host_runtime_init_default()` 所使用的路径。
  *
  * @return 成功返回 0，失败返回负 `MESH_ERR_*` 错误码。
  */
-int mesh_transport_manager_init_default(void);
+int mesh_host_service_init_default(void);
 
-/** @brief 去初始化进程级默认传输管理器。 */
-void mesh_transport_manager_deinit_default(void);
+/** @brief 去初始化进程级默认主机服务。 */
+void mesh_host_service_deinit_default(void);
 
 /**
- * @brief 返回进程级默认传输管理器。
+ * @brief 返回进程级默认主机服务。
  *
  * @return 已初始化的默认管理器指针，若未初始化则返回 NULL。
  */
-struct mesh_transport_manager *mesh_transport_manager_default(void);
+struct mesh_host_service *mesh_host_service_default(void);
 
 /**
  * @brief 通过选定的出口端口发送一个完整的原始 mesh 帧。
@@ -151,13 +151,13 @@ struct mesh_transport_manager *mesh_transport_manager_default(void);
  * 只有一个已初始化端口时，所有帧都通过该端口发送。
  * 多个端口时，`next_hop` 必须匹配一个已配置的具体 `neighbor_addr`。
  *
- * @param[in] transport_ctx 作为不透明上下文传递的 `struct mesh_transport_manager *`。
+ * @param[in] transport_ctx 作为不透明上下文传递的 `struct mesh_host_service *`。
  * @param[in] next_hop 集群路由选择的直接下一跳 mesh 地址。
  * @param[in] tx_data 完整的原始 mesh 帧字节。
  * @param[in] tx_len `tx_data` 中的字节数。
  * @return 成功返回 0，失败返回负 `MESH_ERR_*` 错误码。
  */
-int mesh_transport_manager_send_frame(
+int mesh_host_service_send_frame(
     void *transport_ctx,
     uint8_t next_hop,
     const uint8_t *tx_data,
@@ -169,13 +169,13 @@ int mesh_transport_manager_send_frame(
  * 管理器以轮询顺序扫描已初始化端口，返回第一个成功接收的帧。
  * 软错误（无帧/忙）允许扫描继续到后续端口。
  *
- * @param[in] transport_ctx 作为不透明上下文传递的 `struct mesh_transport_manager *`。
+ * @param[in] transport_ctx 作为不透明上下文传递的 `struct mesh_host_service *`。
  * @param[out] rx_data 接收原始 mesh 帧字节的缓冲区。
  * @param[in] rx_cap `rx_data` 的容量。
  * @param[out] rx_len 已接收的字节数；扫描前被设为 0。
  * @return 成功返回 0，失败返回负 `MESH_ERR_*` 错误码。
  */
-int mesh_transport_manager_receive_frame(
+int mesh_host_service_receive_frame(
     void *transport_ctx,
     uint8_t *rx_data,
     size_t rx_cap,
@@ -185,4 +185,4 @@ int mesh_transport_manager_receive_frame(
 }
 #endif
 
-#endif /* PWOS_MASTER_MESH_TRANSPORT_MANAGER_H */
+#endif /* PWOS_MASTER_MESH_HOST_SERVICE_H */

@@ -30,7 +30,7 @@ idf_component_register(
         "../cluster/cluster_config.c"
         "../vfs_bridge/cluster_vfs.c"
         "../mesh/mesh_host_runtime.c"
-        "../mesh/mesh_transport_manager.c"
+        "../mesh/mesh_host_service.c"
         "../shell/shell.c"
         "../web/http_server.c"
         "../web/websocket_shell.c"

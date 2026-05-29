@@ -39,7 +39,7 @@ add_executable(pc_master_emulator
     ${MASTER_CLUSTER_ROOT}/cluster_config.c
     ${VFS_BRIDGE_ROOT}/cluster_vfs.c
     ${MASTER_MESH_ROOT}/mesh_host_runtime.c
-    ${MASTER_MESH_ROOT}/mesh_transport_manager.c
+    ${MASTER_MESH_ROOT}/mesh_host_service.c
     ${MESH_ROOT}/cluster/cluster.c
     ${MESH_ROOT}/envelope/mesh_protocal.c
     ${MESH_ROOT}/processer/mesh_processer.c

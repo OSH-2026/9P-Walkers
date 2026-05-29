@@ -199,7 +199,7 @@ int mesh_host_runtime_poll_once(struct mesh_host_runtime *runtime);
  *
  * 默认路径会自动完成：
  * 1. cluster_config_init_mesh_host()
- * 2. mesh_transport_manager_init_default()
+ * 2. mesh_host_service_init_default()
  * 3. 基于默认 UART transport 装配 runtime
  */
 int mesh_host_runtime_init_default(void);

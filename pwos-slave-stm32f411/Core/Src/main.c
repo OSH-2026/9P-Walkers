@@ -21,7 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "mini9p_board_service.h"
+#include "mesh_node_service.h"
 
 /* USER CODE END Includes */
 
@@ -102,7 +102,7 @@ int main(void)
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
 #if !PWOS_UART1_TX_SMOKE_TEST
-  if (mini9p_board_service_init() != 0)
+  if (mesh_node_service_init() != 0)
   {
     Error_Handler();
   }
@@ -122,7 +122,7 @@ int main(void)
     (void)HAL_UART_Transmit(&huart1, msg, sizeof(msg) - 1u, HAL_MAX_DELAY);
     HAL_Delay(1000);
 #else
-    (void)mini9p_board_service_poll_once();
+    (void)mesh_node_service_poll_once();
 #endif
   }
   /* USER CODE END 3 */

@@ -5,7 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "mesh_transport_manager.h"
+#include "mesh_host_service.h"
 
 #define FAKE_PORT_COUNT 4u
 #define FAKE_RX_CAP 8u
@@ -152,11 +152,11 @@ struct mesh_uart_transport *mesh_uart_transport_default(void)
 }
 
 static void configure_port(
-    struct mesh_transport_manager_config *config,
+    struct mesh_host_service_config *config,
     size_t index,
     uint8_t neighbor)
 {
-    assert(index < MESH_TRANSPORT_MANAGER_MAX_PORTS);
+    assert(index < MESH_HOST_SERVICE_MAX_PORTS);
     config->ports[index].enabled = true;
     config->ports[index].neighbor_addr = neighbor;
     config->ports[index].uart_config.uart = (void *)index;
@@ -164,26 +164,26 @@ static void configure_port(
 
 static void test_single_port_sends_any_next_hop(void)
 {
-    struct mesh_transport_manager manager;
-    struct mesh_transport_manager_config config;
+    struct mesh_host_service manager;
+    struct mesh_host_service_config config;
     const uint8_t frame[] = {0x10u, 0x20u, 0x30u};
 
     fake_ports_reset();
-    mesh_transport_manager_get_default_config(&config);
+    mesh_host_service_get_default_config(&config);
     config.ports[0].uart_config.uart = (void *)0u;
 
-    assert(mesh_transport_manager_init(&manager, &config) == 0);
-    assert(mesh_transport_manager_send_frame(&manager, 0x44u, frame, sizeof(frame)) == 0);
+    assert(mesh_host_service_init(&manager, &config) == 0);
+    assert(mesh_host_service_send_frame(&manager, 0x44u, frame, sizeof(frame)) == 0);
     assert(g_fake_ports[0].send_count == 1u);
     assert(g_fake_ports[0].last_tx_len == sizeof(frame));
     assert(memcmp(g_fake_ports[0].last_tx, frame, sizeof(frame)) == 0);
-    mesh_transport_manager_deinit(&manager);
+    mesh_host_service_deinit(&manager);
 }
 
 static void test_multi_port_sends_by_next_hop(void)
 {
-    struct mesh_transport_manager manager;
-    struct mesh_transport_manager_config config;
+    struct mesh_host_service manager;
+    struct mesh_host_service_config config;
     const uint8_t frame[] = {0xaau};
 
     fake_ports_reset();
@@ -192,17 +192,17 @@ static void test_multi_port_sends_by_next_hop(void)
     configure_port(&config, 0u, 0x11u);
     configure_port(&config, 1u, 0x33u);
 
-    assert(mesh_transport_manager_init(&manager, &config) == 0);
-    assert(mesh_transport_manager_send_frame(&manager, 0x33u, frame, sizeof(frame)) == 0);
+    assert(mesh_host_service_init(&manager, &config) == 0);
+    assert(mesh_host_service_send_frame(&manager, 0x33u, frame, sizeof(frame)) == 0);
     assert(g_fake_ports[0].send_count == 0u);
     assert(g_fake_ports[1].send_count == 1u);
-    mesh_transport_manager_deinit(&manager);
+    mesh_host_service_deinit(&manager);
 }
 
 static void test_unknown_next_hop_fails_on_multi_port(void)
 {
-    struct mesh_transport_manager manager;
-    struct mesh_transport_manager_config config;
+    struct mesh_host_service manager;
+    struct mesh_host_service_config config;
     const uint8_t frame[] = {0xaau};
 
     fake_ports_reset();
@@ -211,17 +211,17 @@ static void test_unknown_next_hop_fails_on_multi_port(void)
     configure_port(&config, 0u, 0x11u);
     configure_port(&config, 1u, 0x33u);
 
-    assert(mesh_transport_manager_init(&manager, &config) == 0);
-    assert(mesh_transport_manager_send_frame(&manager, 0x22u, frame, sizeof(frame)) == -(int)MESH_ERR_NO_ROUTE);
+    assert(mesh_host_service_init(&manager, &config) == 0);
+    assert(mesh_host_service_send_frame(&manager, 0x22u, frame, sizeof(frame)) == -(int)MESH_ERR_NO_ROUTE);
     assert(g_fake_ports[0].send_count == 0u);
     assert(g_fake_ports[1].send_count == 0u);
-    mesh_transport_manager_deinit(&manager);
+    mesh_host_service_deinit(&manager);
 }
 
 static void test_duplicate_neighbor_rejected(void)
 {
-    struct mesh_transport_manager manager;
-    struct mesh_transport_manager_config config;
+    struct mesh_host_service manager;
+    struct mesh_host_service_config config;
 
     fake_ports_reset();
     memset(&config, 0, sizeof(config));
@@ -229,13 +229,13 @@ static void test_duplicate_neighbor_rejected(void)
     configure_port(&config, 0u, 0x11u);
     configure_port(&config, 1u, 0x11u);
 
-    assert(mesh_transport_manager_init(&manager, &config) == -(int)MESH_ERR_INVALID_STATE);
+    assert(mesh_host_service_init(&manager, &config) == -(int)MESH_ERR_INVALID_STATE);
 }
 
 static void test_receive_round_robin_scans_ports(void)
 {
-    struct mesh_transport_manager manager;
-    struct mesh_transport_manager_config config;
+    struct mesh_host_service manager;
+    struct mesh_host_service_config config;
     const uint8_t first[] = {0x01u};
     const uint8_t second[] = {0x02u};
     uint8_t rx[FAKE_RX_CAP];
@@ -247,19 +247,19 @@ static void test_receive_round_robin_scans_ports(void)
     configure_port(&config, 0u, 0x11u);
     configure_port(&config, 1u, 0x33u);
 
-    assert(mesh_transport_manager_init(&manager, &config) == 0);
+    assert(mesh_host_service_init(&manager, &config) == 0);
     fake_queue_rx(1u, first, sizeof(first));
-    assert(mesh_transport_manager_receive_frame(&manager, rx, sizeof(rx), &rx_len) == 0);
+    assert(mesh_host_service_receive_frame(&manager, rx, sizeof(rx), &rx_len) == 0);
     assert(rx_len == sizeof(first));
     assert(rx[0] == first[0]);
     assert(g_fake_ports[0].receive_count == 1u);
     assert(g_fake_ports[1].receive_count == 1u);
 
     fake_queue_rx(0u, second, sizeof(second));
-    assert(mesh_transport_manager_receive_frame(&manager, rx, sizeof(rx), &rx_len) == 0);
+    assert(mesh_host_service_receive_frame(&manager, rx, sizeof(rx), &rx_len) == 0);
     assert(rx_len == sizeof(second));
     assert(rx[0] == second[0]);
-    mesh_transport_manager_deinit(&manager);
+    mesh_host_service_deinit(&manager);
 }
 
 int main(void)
@@ -269,6 +269,6 @@ int main(void)
     test_unknown_next_hop_fails_on_multi_port();
     test_duplicate_neighbor_rejected();
     test_receive_round_robin_scans_ports();
-    printf("mesh_transport_manager tests passed\n");
+    printf("mesh_host_service tests passed\n");
     return 0;
 }

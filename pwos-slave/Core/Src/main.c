@@ -25,7 +25,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #ifdef PWOS_ENABLE_MINI9P_SERIAL
-#include "mini9p_board_service.h"
+#include "mesh_node_service.h"
 #else
 #include "fs_selftest.h"
 #include "vofa_firewater.h"
@@ -138,7 +138,7 @@ int main(void)
 #endif
 #endif
 #ifdef PWOS_ENABLE_MINI9P_SERIAL
-  if (mini9p_board_service_init() != 0) {
+  if (mesh_node_service_init() != 0) {
     Error_Handler();
   }
 #else
@@ -169,7 +169,7 @@ int main(void)
       }
     }
 #endif
-    (void)mini9p_board_service_poll_once();
+    (void)mesh_node_service_poll_once();
 #else
     (void)vofa_firewater_send_fs_report(&g_fs_report, HAL_GetTick());
     HAL_Delay(1000);
