@@ -22,6 +22,13 @@
 
 # 目前从机主循环的uart还是轮询！
 
-# 两个方案：
-1、 考虑把runtime改成多端口
-2、 考虑runtime单端口，service启动多个node runtime
+## 备选：邻居传播路由模型
+
+- 当前路由策略先保持“控制器下发指定路由”：主机/控制器计算或指定 `dst -> next_hop -> metric`，节点只应用收到的路由更新。
+- 后续可评估邻居传播模型：每个节点周期或触发式向直连邻居广播自己的可达表，接收方用“邻居宣告 metric + 1”与本地路由表比较，选择更优路由。
+- 在该模型里，接收方的 `next_hop` 应该是宣告该路由的邻居地址，也就是入站控制帧的 `src`；不应直接信任 payload 里的 `next_hop`，否则会把邻居内部路径误当成本机下一跳。
+- `addr -> port` 映射可以由入站端口学习，但应优先从直连邻居控制帧学习，不能简单用普通转发数据帧的原始 `src` 推断直连关系。
+- 需要处理 count-to-infinity/环路收敛问题：metric 会增大但不代表立刻无环，需要设置最大 metric、路由老化、版本/序列号、split horizon 或 poison reverse。
+- 如果以后实现，建议新增“route advertise”语义，避免和现有“控制器指定 route update”混用。
+
+![alt text](image.png)
