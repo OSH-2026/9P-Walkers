@@ -8,7 +8,11 @@
 
 #include <stdint.h>
 
+#include "dev_vfs.h"
+#include "fs_selftest.h"
+#include "lfs_vfs.h"
 #include "mini9p_server.h"
+#include "sys_vfs.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -17,16 +21,14 @@ extern "C" {
 #define NODE_VFS_DEFAULT_IOUNIT 128u
 
 struct node_vfs_config {
-    const struct m9p_server_ops *sys_ops;
-    void *sys_ctx;
-    const struct m9p_server_ops *dev_ops;
-    void *dev_ctx;
-    const struct m9p_server_ops *lfs_ops;
-    void *lfs_ctx;
     uint16_t iounit;
 };
 
 struct node_vfs {
+    struct sys_vfs sys_vfs;
+    struct dev_vfs dev_vfs;
+    struct lfs_vfs lfs_vfs;
+    FS_SelfTestReport fs_report;
     const struct m9p_server_ops *sys_ops;
     void *sys_ctx;
     const struct m9p_server_ops *dev_ops;

@@ -21,6 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "mesh_node_mini9p_service.h"
 #include "mesh_node_service.h"
 
 /* USER CODE END Includes */
@@ -102,7 +103,7 @@ int main(void)
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
 #if !PWOS_UART1_TX_SMOKE_TEST
-  if (mesh_node_service_init() != 0)
+  if (mesh_node_mini9p_service_init() != 0)
   {
     Error_Handler();
   }
