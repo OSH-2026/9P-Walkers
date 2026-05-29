@@ -89,7 +89,6 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${PWOS_SHARED_MESH_ENVELOPE_DIR}
     ${PWOS_SHARED_MESH_PROCESSER_DIR}
     ${PWOS_SHARED_MESH_TRANSPORT_DIR}
-    ${PWOS_SHARED_MESH_WIFI_DIR}
 )
 
 # Add project symbols (macros)

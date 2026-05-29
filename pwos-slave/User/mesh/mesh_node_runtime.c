@@ -263,7 +263,6 @@ static int mesh_node_runtime_send_register_on_port(
     payload.boot_nonce = runtime->config.boot_nonce;
     payload.capability_bits = runtime->config.capability_bits;
     payload.port_bitmap = runtime->config.port_bitmap;
-    payload.wifi_supported = false;
 
     if (!mesh_build_register(
             runtime->processor.config.local_addr,
@@ -459,8 +458,6 @@ int mesh_node_runtime_init(
             mesh_node_runtime_deinit(runtime);
             return rc;
         }
-    } else {
-        runtime->config.port_bitmap = (uint8_t)(runtime->config.port_bitmap & (uint8_t)~CLUSTER_PORT_WIFI_MASK);
     }
 
     cluster_get_default_config(&cluster_config);
