@@ -10,6 +10,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "lfs_port.hpp"
+
 enum node_vfs_route_kind {
     NODE_VFS_ROUTE_ROOT = 0,
     NODE_VFS_ROUTE_SYS,
@@ -325,17 +327,52 @@ static const struct m9p_server_ops k_node_vfs_ops = {
 
 int node_vfs_init(struct node_vfs *vfs, const struct node_vfs_config *config)
 {
+    struct sys_vfs_config sys_config;
+    struct dev_vfs_config dev_config;
+    struct lfs_vfs_config lfs_config;
+    struct lfs_vfs *active_lfs = NULL;
+    int rc;
+
     if (vfs == NULL || config == NULL) {
         return -(int)M9P_ERR_EINVAL;
     }
 
     memset(vfs, 0, sizeof(*vfs));
-    vfs->sys_ops = config->sys_ops;
-    vfs->sys_ctx = config->sys_ctx;
-    vfs->dev_ops = config->dev_ops;
-    vfs->dev_ctx = config->dev_ctx;
-    vfs->lfs_ops = config->lfs_ops;
-    vfs->lfs_ctx = config->lfs_ctx;
+
+#ifndef PWOS_SKIP_LFS_MOUNT
+    lfs_vfs_get_default_config(&lfs_config);
+    rc = lfs_vfs_init(&vfs->lfs_vfs, &lfs_config);
+    if (rc == 0) {
+#ifdef PWOS_ENABLE_LFS_SELFTEST
+        (void)fs_selftest_run_on_fs(lfs_vfs_fs(&vfs->lfs_vfs), lfs_port_backend_name(), &vfs->fs_report);
+#endif
+        active_lfs = &vfs->lfs_vfs;
+    }
+#endif
+
+    memset(&sys_config, 0, sizeof(sys_config));
+    sys_config.info_text = active_lfs != NULL ? "pwos node lfs=ok\n" : "pwos node lfs=unavailable\n";
+    sys_config.iounit = SYS_VFS_DEFAULT_IOUNIT;
+    rc = sys_vfs_init(&vfs->sys_vfs, &sys_config);
+    if (rc != 0) {
+        return rc;
+    }
+
+    memset(&dev_config, 0, sizeof(dev_config));
+    dev_config.iounit = DEV_VFS_DEFAULT_IOUNIT;
+    rc = dev_vfs_init(&vfs->dev_vfs, &dev_config);
+    if (rc != 0) {
+        return rc;
+    }
+
+    vfs->sys_ops = sys_vfs_ops();
+    vfs->sys_ctx = &vfs->sys_vfs;
+    vfs->dev_ops = dev_vfs_ops();
+    vfs->dev_ctx = &vfs->dev_vfs;
+    if (active_lfs != NULL) {
+        vfs->lfs_ops = lfs_vfs_ops();
+        vfs->lfs_ctx = active_lfs;
+    }
     vfs->iounit = config->iounit == 0u ? NODE_VFS_DEFAULT_IOUNIT : config->iounit;
     return 0;
 }

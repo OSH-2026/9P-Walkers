@@ -48,6 +48,9 @@ extern "C" {
  */
 #define MESH_PROCESSER_FRAME_CAP (MESH_MAX_PAYLOAD_LEN + MESH_FRAME_OVERHEAD)
 
+/* receive_frame 未暴露物理入口端口时使用的占位值。 */
+#define MESH_PROCESSER_INGRESS_PORT_NONE 0xffu
+
 /*
  * 原始链路发帧接口。
  *
@@ -77,6 +80,8 @@ typedef int (*mesh_processer_send_frame_fn)(
  * - transport_ctx：与 send_frame 相同的链路上下文。
  * - rx_data / rx_cap：收帧缓冲区及其容量。
  * - rx_len：输出实际收到的帧长度。
+ * - out_ingress_port：输出入口端口索引；无端口概念时填
+ *   MESH_PROCESSER_INGRESS_PORT_NONE。
  *
  * 返回值约定：
  * - 0 表示收到了一帧完整数据。
@@ -89,7 +94,8 @@ typedef int (*mesh_processer_receive_frame_fn)(
     void *transport_ctx,
     uint8_t *rx_data,
     size_t rx_cap,
-    size_t *rx_len);
+    size_t *rx_len,
+    uint8_t *out_ingress_port);
 
 /*
  * 路由查询接口。

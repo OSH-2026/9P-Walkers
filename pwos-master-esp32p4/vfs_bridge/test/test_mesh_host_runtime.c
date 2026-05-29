@@ -5,7 +5,7 @@
 #include <string.h>
 
 #include "cluster_config.h"
-#include "cluster_vfs.h"
+#include "cluster_host_vfs.h"
 #include "mesh_host_runtime.h"
 
 #define TEST_FRAME_CAP (MESH_FRAME_OVERHEAD + MESH_MAX_PAYLOAD_LEN)
@@ -124,14 +124,16 @@ static int fake_receive_frame(
     void *transport_ctx,
     uint8_t *rx_data,
     size_t rx_cap,
-    size_t *rx_len)
+    size_t *rx_len,
+    uint8_t *out_ingress_port)
 {
     struct fake_mesh_io *io = (struct fake_mesh_io *)transport_ctx;
     size_t slot;
 
-    if (io == NULL || rx_data == NULL || rx_len == NULL) {
+    if (io == NULL || rx_data == NULL || rx_len == NULL || out_ingress_port == NULL) {
         return -(int)M9P_ERR_EINVAL;
     }
+    *out_ingress_port = MESH_PROCESSER_INGRESS_PORT_NONE;
     if (io->rx_count == 0u) {
         return -(int)M9P_ERR_EAGAIN;
     }

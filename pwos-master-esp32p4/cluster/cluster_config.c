@@ -1,6 +1,6 @@
 #include "cluster_config.h"
 
-#include "cluster_vfs.h"
+#include "cluster_host_vfs.h"
 
 #define CLUSTER_CONFIG_HOST_ADDR 0x00u
 #define CLUSTER_CONFIG_DIRECT_LINK_METRIC 1u

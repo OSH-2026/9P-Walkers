@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "cluster_vfs.h"
+#include "cluster_host_vfs.h"
 #include "lauxlib.h"
 #include "lua.h"
 #include "mini9p_client.h"

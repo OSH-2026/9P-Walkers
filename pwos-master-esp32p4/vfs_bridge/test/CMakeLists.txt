@@ -13,28 +13,39 @@ set(MESH_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../../pwos-shared/mesh)
 
 add_executable(cluster_vfs_test
     test_main.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../transport/uart_transport.c
     ${MASTER_CLUSTER_ROOT}/cluster_config.c
-    ${VFS_BRIDGE_ROOT}/cluster_vfs.c
+    ${VFS_BRIDGE_ROOT}/cluster_host_vfs.c
     ${MESH_ROOT}/cluster/cluster.c
     ${MESH_ROOT}/envelope/mesh_protocal.c
     ${MINI9P_ROOT}/mini9p_client.c
     ${MINI9P_ROOT}/mini9p_protocol.c
 )
 
-add_executable(mesh_transport_manager_test
-    test_mesh_transport_manager.c
-    ${MASTER_ROOT}/mesh/mesh_transport_manager.c
+add_executable(mesh_host_service_test
+    test_mesh_host_service.c
+    ${MASTER_ROOT}/mesh/mesh_host_service.c
+    ${MASTER_ROOT}/mesh/mesh_host_runtime.c
+    ${MASTER_CLUSTER_ROOT}/cluster_config.c
+    ${VFS_BRIDGE_ROOT}/cluster_host_vfs.c
+    ${MESH_ROOT}/cluster/cluster.c
+    ${MESH_ROOT}/processer/mesh_processer.c
+    ${MESH_ROOT}/envelope/mesh_protocal.c
+    ${MINI9P_ROOT}/mini9p_client.c
+    ${MINI9P_ROOT}/mini9p_protocol.c
 )
 
-target_include_directories(mesh_transport_manager_test PRIVATE
+target_include_directories(mesh_host_service_test PRIVATE
     ${MASTER_ROOT}/mesh
+    ${MASTER_CLUSTER_ROOT}
+    ${VFS_BRIDGE_ROOT}
+    ${MINI9P_ROOT}
     ${MESH_ROOT}/transport
+    ${MESH_ROOT}/cluster
+    ${MESH_ROOT}/processer
     ${MESH_ROOT}/envelope
 )
 
 target_include_directories(cluster_vfs_test PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../transport
     ${MASTER_CLUSTER_ROOT}
     ${VFS_BRIDGE_ROOT}
     ${MINI9P_ROOT}

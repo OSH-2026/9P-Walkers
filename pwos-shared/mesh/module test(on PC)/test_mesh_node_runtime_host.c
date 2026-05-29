@@ -59,16 +59,18 @@ static int fake_send_frame(void *transport_ctx, uint8_t next_hop, const uint8_t 
     return 0;
 }
 
-static int fake_wifi_send_frame(void *transport_ctx, const uint8_t *tx_data, size_t tx_len)
-{
-    return fake_send_frame(transport_ctx, MESH_NODE_RUNTIME_WIFI_PORT_ID, tx_data, tx_len);
-}
-
-static int fake_receive_frame(void *transport_ctx, uint8_t *rx_data, size_t rx_cap, size_t *rx_len)
+static int fake_receive_frame(
+    void *transport_ctx,
+    uint8_t *rx_data,
+    size_t rx_cap,
+    size_t *rx_len,
+    uint8_t *out_ingress_port)
 {
     struct fake_transport *transport = (struct fake_transport *)transport_ctx;
 
     assert(transport != NULL);
+    assert(out_ingress_port != NULL);
+    *out_ingress_port = MESH_PROCESSER_INGRESS_PORT_NONE;
     if (transport->rx_index >= transport->rx_count) {
         return -(int)MESH_ERR_BUSY;
     }

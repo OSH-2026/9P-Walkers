@@ -2,13 +2,6 @@
 
 #include <string.h>
 
-#include "mesh_transport_manager.h"
-
-#ifdef ESP_PLATFORM
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#endif
-
 /*
  * 这个文件的核心思路是：
  * - mesh_processer 继续负责“协议层分流”；
@@ -22,14 +15,6 @@
  * 3. 当前实现保持“同一时刻只允许一个同步请求占用接收链路”，用最小复杂度
  *    换取一个真正可运行、可调试的 runtime 闭环。
  */
-
-static struct mesh_host_runtime g_default_runtime;
-
-#define MESH_HOST_RUNTIME_WIFI_LINK_METRIC 1u
-
-#ifdef ESP_PLATFORM
-static TaskHandle_t g_default_runtime_task;
-#endif
 
 static bool m9p_type_is_response(uint8_t type)
 {
@@ -491,12 +476,14 @@ static int mesh_host_runtime_client_request(
 
     while (1) {
         struct mesh_frame_view mesh_frame;
+        uint8_t ingress_port = MESH_PROCESSER_INGRESS_PORT_NONE;
 
         rc = runtime->config.receive_frame(
             runtime->config.transport_ctx,
             runtime->processor.rx_buffer,
             sizeof(runtime->processor.rx_buffer),
-            rx_len);
+            rx_len,
+            &ingress_port);
         if (rc != 0) {
             goto out;
         }
@@ -729,21 +716,6 @@ static int mesh_host_runtime_control_handler(
     }
 }
 
-#ifdef ESP_PLATFORM
-static void mesh_host_runtime_default_task(void *arg)
-{
-    struct mesh_host_runtime *runtime = (struct mesh_host_runtime *)arg;
-
-    for (;;) {
-        int rc = mesh_host_runtime_poll_once(runtime);
-
-        if (rc != 0) {
-            vTaskDelay(pdMS_TO_TICKS(MESH_HOST_RUNTIME_IDLE_DELAY_MS));
-        }
-    }
-}
-#endif
-
 void mesh_host_runtime_get_default_config(struct mesh_host_runtime_config *out_config)
 {
     if (out_config == NULL) {
@@ -844,68 +816,4 @@ int mesh_host_runtime_poll_once(struct mesh_host_runtime *runtime)
     rc = mesh_processer_poll_once(&runtime->processor);
     mesh_host_runtime_release_dispatch(runtime);
     return rc;
-}
-
-int mesh_host_runtime_init_default(void)
-{
-    struct mesh_host_runtime_config config;
-    int rc;
-
-    if (g_default_runtime.initialized) {
-        return 0;
-    }
-
-    rc = cluster_config_init_mesh_host();
-    if (rc != 0) {
-        return rc;
-    }
-    rc = mesh_transport_manager_init_default();
-    if (rc != 0) {
-        return rc;
-    }
-
-    mesh_host_runtime_get_default_config(&config);
-    config.mesh_cluster = cluster_config_mesh_cluster();
-    config.transport_ctx = mesh_transport_manager_default();
-    config.send_frame = mesh_transport_manager_send_frame;
-    config.receive_frame = mesh_transport_manager_receive_frame;
-
-    return mesh_host_runtime_init(&g_default_runtime, &config);
-}
-
-struct mesh_host_runtime *mesh_host_runtime_default(void)
-{
-    if (!g_default_runtime.initialized) {
-        return NULL;
-    }
-
-    return &g_default_runtime;
-}
-
-int mesh_host_runtime_start_default_task(void)
-{
-    int rc;
-
-    rc = mesh_host_runtime_init_default();
-    if (rc != 0) {
-        return rc;
-    }
-
-#ifdef ESP_PLATFORM
-    if (g_default_runtime_task != NULL) {
-        return 0;
-    }
-    if (xTaskCreate(
-            mesh_host_runtime_default_task,
-            "mesh_host_rt",
-            MESH_HOST_RUNTIME_TASK_STACK_SIZE,
-            &g_default_runtime,
-            MESH_HOST_RUNTIME_TASK_PRIORITY,
-            &g_default_runtime_task) != pdPASS) {
-        return -(int)M9P_ERR_EIO;
-    }
-    return 0;
-#else
-    return -(int)M9P_ERR_ENOTSUP;
-#endif
 }
