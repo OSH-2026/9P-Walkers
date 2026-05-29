@@ -25,7 +25,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #ifdef PWOS_ENABLE_MINI9P_SERIAL
-#include "mesh_node_mini9p_service.h"
+#include "mesh_node_mini9p_init.h"
 #include "mesh_node_service.h"
 #else
 #include "fs_selftest.h"
@@ -139,7 +139,7 @@ int main(void)
 #endif
 #endif
 #ifdef PWOS_ENABLE_MINI9P_SERIAL
-  if (mesh_node_mini9p_service_init() != 0) {
+  if (mesh_node_mini9p_init() != 0) {
     Error_Handler();
   }
 #else

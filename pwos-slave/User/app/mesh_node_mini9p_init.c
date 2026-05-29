@@ -1,4 +1,4 @@
-#include "mesh_node_mini9p_service.h"
+#include "mesh_node_mini9p_init.h"
 
 #include "mesh_node_service.h"
 #include "mini9p_server.h"
@@ -9,7 +9,7 @@ extern UART_HandleTypeDef huart2;
 static struct node_vfs g_node_vfs;
 static struct m9p_server g_mini9p_server;
 
-int mesh_node_mini9p_service_init(void)
+int mesh_node_mini9p_init(void)
 {
     struct node_vfs_config node_config;
     struct m9p_server_config server_config;
@@ -33,7 +33,7 @@ int mesh_node_mini9p_service_init(void)
     }
 
     mesh_node_service_get_default_config(&mesh_config);
-    mesh_config.uart = &huart2;
+    mesh_config.ports[0].uart_config.uart = &huart2;
     mesh_config.mini9p_server_handler = m9p_server_handle_frame;
     mesh_config.mini9p_server_ctx = &g_mini9p_server;
     return mesh_node_service_init(&mesh_config);

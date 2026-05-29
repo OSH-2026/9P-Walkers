@@ -72,7 +72,7 @@ service 是 STM32 节点侧的 mesh 装配层，内部持有静态实例：
 - 一组 `mesh_uart_transport`
 - `mesh_node_runtime`
 
-具体 backend 由 `node_vfs_init()` 内部初始化并挂载；`mesh_node_mini9p_service` 持有 `m9p_server` 并只把 `node_vfs_ops()` 接入 Mini9P server。
+具体 backend 由 `node_vfs_init()` 内部初始化并挂载；`mesh_node_mini9p_init` 持有 `m9p_server` 并只把 `node_vfs_ops()` 接入 Mini9P server。
 
 对外暴露入口：
 

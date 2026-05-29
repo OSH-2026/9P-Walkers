@@ -61,7 +61,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${PWOS_USER_DIR}/drivers/storage/sd_blockdev.cpp
     ${PWOS_USER_DIR}/drivers/storage/lfs_port.cpp
     ${PWOS_USER_DIR}/app/fs_selftest.c
-    ${PWOS_USER_DIR}/app/mesh_node_mini9p_service.c
+    ${PWOS_USER_DIR}/app/mesh_node_mini9p_init.c
     ${PWOS_USER_DIR}/app/vofa_firewater.c
     ${PWOS_USER_DIR}/backend/dev_vfs.c
     ${PWOS_USER_DIR}/backend/lfs_vfs.c
