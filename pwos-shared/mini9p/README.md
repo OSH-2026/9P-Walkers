@@ -69,7 +69,7 @@ m9p_server_init(&server, &config);
 
 service 是 STM32 节点侧的 mesh 装配层，内部持有静态实例：
 
-- `mesh_uart_transport`
+- 一组 `mesh_uart_transport`
 - `mesh_node_runtime`
 
 具体 backend 由 `node_vfs_init()` 内部初始化并挂载；`mesh_node_mini9p_service` 持有 `m9p_server` 并只把 `node_vfs_ops()` 接入 Mini9P server。
@@ -77,13 +77,17 @@ service 是 STM32 节点侧的 mesh 装配层，内部持有静态实例：
 对外暴露入口：
 
 ```c
+struct mesh_node_service_port_config {
+    bool enabled;
+    uint8_t neighbor_addr;
+    struct mesh_uart_transport_config uart_config;
+};
+
 struct mesh_node_service_config {
-    UART_HandleTypeDef *uart;
     mesh_processer_mini9p_server_handler_fn mini9p_server_handler;
     void *mini9p_server_ctx;
-    uint16_t capability_bits;
-    uint8_t port_bitmap;
-    bool auto_register_on_init;
+    size_t port_count;
+    struct mesh_node_service_port_config ports[MESH_NODE_SERVICE_MAX_PORTS];
 };
 
 void mesh_node_service_get_default_config(struct mesh_node_service_config *out_config);
