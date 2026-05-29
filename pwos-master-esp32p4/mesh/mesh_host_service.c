@@ -253,7 +253,7 @@ int mesh_host_service_start_default_task(void)
             mesh_host_service_default_task,
             "mesh_host_rt",
             MESH_HOST_RUNTIME_TASK_STACK_SIZE,
-            &g_default_manager,
+            &g_default_service,
             MESH_HOST_RUNTIME_TASK_PRIORITY,
             &g_default_service_task) != pdPASS) {
         return -(int)M9P_ERR_EIO;
