@@ -342,12 +342,14 @@ static int mesh_host_runtime_client_request(
 
     while (1) {
         struct mesh_frame_view mesh_frame;
+        uint8_t ingress_port = MESH_PROCESSER_INGRESS_PORT_NONE;
 
         rc = runtime->config.receive_frame(
             runtime->config.transport_ctx,
             runtime->processor.rx_buffer,
             sizeof(runtime->processor.rx_buffer),
-            rx_len);
+            rx_len,
+            &ingress_port);
         if (rc != 0) {
             goto out;
         }

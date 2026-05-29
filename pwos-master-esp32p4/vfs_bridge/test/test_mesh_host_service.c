@@ -240,6 +240,7 @@ static void test_receive_round_robin_scans_ports(void)
     const uint8_t second[] = {0x02u};
     uint8_t rx[FAKE_RX_CAP];
     size_t rx_len = 0u;
+    uint8_t ingress_port = MESH_PROCESSER_INGRESS_PORT_NONE;
 
     fake_ports_reset();
     memset(&config, 0, sizeof(config));
@@ -249,16 +250,18 @@ static void test_receive_round_robin_scans_ports(void)
 
     assert(mesh_host_service_init(&manager, &config) == 0);
     fake_queue_rx(1u, first, sizeof(first));
-    assert(mesh_host_service_receive_frame(&manager, rx, sizeof(rx), &rx_len) == 0);
+    assert(mesh_host_service_receive_frame(&manager, rx, sizeof(rx), &rx_len, &ingress_port) == 0);
     assert(rx_len == sizeof(first));
     assert(rx[0] == first[0]);
+    assert(ingress_port == 1u);
     assert(g_fake_ports[0].receive_count == 1u);
     assert(g_fake_ports[1].receive_count == 1u);
 
     fake_queue_rx(0u, second, sizeof(second));
-    assert(mesh_host_service_receive_frame(&manager, rx, sizeof(rx), &rx_len) == 0);
+    assert(mesh_host_service_receive_frame(&manager, rx, sizeof(rx), &rx_len, &ingress_port) == 0);
     assert(rx_len == sizeof(second));
     assert(rx[0] == second[0]);
+    assert(ingress_port == 0u);
     mesh_host_service_deinit(&manager);
 }
 

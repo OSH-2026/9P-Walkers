@@ -289,17 +289,20 @@ int mesh_host_service_receive_frame(
     void *transport_ctx,
     uint8_t *rx_data,
     size_t rx_cap,
-    size_t *rx_len)
+    size_t *rx_len,
+    uint8_t *out_ingress_port)
 {
     struct mesh_host_service *manager = (struct mesh_host_service *)transport_ctx;
     int soft_error = -(int)MESH_ERR_BUSY;
     size_t checked;
 
-    if (manager == NULL || !manager->initialized || rx_data == NULL || rx_len == NULL) {
+    if (manager == NULL || !manager->initialized || rx_data == NULL || rx_len == NULL ||
+        out_ingress_port == NULL) {
         return -(int)MESH_ERR_INVALID_STATE;
     }
 
     *rx_len = 0u;
+    *out_ingress_port = MESH_PROCESSER_INGRESS_PORT_NONE;
     for (checked = 0u; checked < manager->port_count; ++checked) {
         size_t index = (manager->next_rx_index + checked) % manager->port_count;
         int rc;
@@ -310,6 +313,7 @@ int mesh_host_service_receive_frame(
 
         rc = mesh_uart_transport_receive_frame(&manager->ports[index].transport, rx_data, rx_cap, rx_len);
         if (rc == 0) {
+            *out_ingress_port = (uint8_t)index;
             manager->next_rx_index = (index + 1u) % manager->port_count;
             return 0;
         }

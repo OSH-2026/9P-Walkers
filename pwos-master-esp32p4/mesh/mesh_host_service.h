@@ -191,7 +191,8 @@ int mesh_host_service_receive_frame(
     void *transport_ctx,
     uint8_t *rx_data,
     size_t rx_cap,
-    size_t *rx_len);
+    size_t *rx_len,
+    uint8_t *out_ingress_port);
 
 #ifdef __cplusplus
 }
