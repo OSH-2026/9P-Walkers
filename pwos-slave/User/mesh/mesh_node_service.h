@@ -63,6 +63,13 @@ int mini9p_service_notify_link_up(void);
  */
 int mini9p_service_poll_once(void);
 
+
+
+int mini9p_board_service_init(void);
+int mini9p_board_service_poll_once(void);
+
+
+
 #ifdef __cplusplus
 }
 #endif
