@@ -10,6 +10,7 @@ pwos-slave/.vscode/
 # Local development files
 venv/
 # Logs and temporary files
+AGENTS.md
 *.o
 tmp*.md
 ref/
