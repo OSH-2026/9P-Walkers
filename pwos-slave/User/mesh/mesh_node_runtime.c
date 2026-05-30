@@ -28,8 +28,8 @@ static uint8_t mesh_node_runtime_default_hop(const struct mesh_node_runtime *run
 }
 
 /*
- * 点对点 UART 场景下，只要某个对端曾经在这条链路上给我发过帧，
- * 就说明它当前可以通过“本链路直达”。
+ * 当前 direct-table 模型中，只要某个非 0xFF src 从某个入口端口发来帧，
+ * runtime 就认为该 mesh 地址可作为直接 next_hop。
  *
  * 因此这里把 src 直接写成一条 dst->dst 的 direct-table 路由，保持
  * cluster 的 next_hop 语义仍是 mesh addr。实际 addr->UART port 的映射由

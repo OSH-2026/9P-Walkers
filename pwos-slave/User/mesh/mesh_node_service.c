@@ -1,6 +1,6 @@
 /**
  * @file mesh_node_service.c
- * @brief STM32 slave 侧 Mesh 节点服务装配层。
+ * @brief STM32 slave 侧多 UART mesh service 实现。
  */
 
 #include "mesh_node_service.h"
