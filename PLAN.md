@@ -70,14 +70,13 @@
    - 在 mesh protocol 中新增 `NEIGHBOR_PROBE_REQUEST` 和 `NEIGHBOR_PROBE_RESPONSE` 控制类型。
    - `NEIGHBOR_PROBE_REQUEST` 是单链路本地请求：接收端不得转发，不进入 route lookup，不向主机上报。
    - 接收端收到 `NEIGHBOR_PROBE_REQUEST` 后读取自己的当前 mesh addr；如果本机已有正式地址，立即从同一 ingress port 回 `NEIGHBOR_PROBE_RESPONSE(src=本机地址)`。
-   - 如果本机仍是 `0xff` 未分配地址，先不回或回 `src=0xff`，实现时选择一种并写入协议注释；推荐不回，调用方靠重试收敛。
+   - 如果本机仍是 `0xff` 未分配地址，先不回调用方靠重试收敛。
    - `NEIGHBOR_PROBE_RESPONSE` 也是单链路本地响应：接收端不得转发，只用于学习 `response.src -> ingress_port`。
    - 请求和响应都必须绕过普通多跳转发语义；这是端口邻居地址发现，不是路由传播。
    - 只有 `NEIGHBOR_PROBE_RESPONSE` 可以建立 direct neighbor `addr -> ingress_port`；普通 mesh frame 的 ingress port 只用于 pending REGISTER/ASSIGN 回转和调试，不用于认定 `src` 是直连邻居。
 
-2. 增加 direct neighbor 表：
-   - 表项：`used, mesh_addr, ingress_port, reported`，用于记录已分配地址邻居的动态端口学习和上报状态。
-   - 表大小使用小固定数组，优先匹配当前 `MESH_NODE_SERVICE_MAX_PORTS` 或一个 runtime-local 小上限。
+2. direct neighbor 表：
+   - 不新增 runtime 侧表。`mesh_addr -> ingress_port` 映射复用 service 已有的 `addr_ports`，NEIGHBOR_PROBE_RESPONSE 学习后通过 `learn_peer_port` 回调更新即可。
 
 3. 邻居发现触发：
    - 本机 ASSIGN 完成、link-up 通知、或某 port 尚无邻居地址时，对该 port 发送 `NEIGHBOR_PROBE_REQUEST`。
@@ -85,7 +84,7 @@
 4. 邻居发现响应与学习：
    - 收到 `NEIGHBOR_PROBE_RESPONSE src=neighbor_addr` 后，runtime 写 direct route：`dst=neighbor_addr, next_hop=neighbor_addr, metric=1`。
    - runtime 通知 service 学习/刷新动态映射：`neighbor_addr -> ingress_port`。
-   - direct neighbor 表记录/刷新 `neighbor_addr -> ingress_port`。
+   
 
 验收：
 
@@ -98,8 +97,7 @@
 目标：实现 `pending REGISTER -> ASSIGN 回转 -> LINK_STATE 上报 -> 主机可下发路由`，复用 Phase 3 已建立的邻居发现能力。
 
 1. 在 `mesh_node_runtime` 增加 relay bootstrap pending 状态：
-   - pending 表项：`used, uid[MESH_UID_LEN], boot_nonce, ingress_port`。
-   - 表大小使用小固定数组，优先匹配当前 `MESH_NODE_SERVICE_MAX_PORTS` 或一个 runtime-local 小上限。
+   - pending 表项：`used, uid[MESH_UID_LEN], boot_nonce, ingress_port`；表上限同 `MESH_NODE_SERVICE_MAX_PORTS`。
 
 2. 处理下游 bootstrap REGISTER：
    - 在 `mesh_node_runtime_process_frame_from_port()` 中识别 `MESH_TYPE_REGISTER` 且 `src=0xff, dst=0xff`。
@@ -112,8 +110,7 @@
    - 本机收到命中自己 UID 的 ASSIGN 后，更新本机 mesh addr。
    - 同时记录 ASSIGN 的 ingress port 为 upstream/control-plane port。
    - 后续本机 REGISTER/LINK_STATE 上报优先发往该 upstream port；未分配前仍可按现有 bootstrap 广播值发送。
-   - 本机 ASSIGN 完成后，向上游发送确认 REGISTER，对所有已启用 UART port 发起 `NEIGHBOR_PROBE_REQUEST`，并重放 direct neighbor 表中尚未上报的 LINK_STATE。
-   - 如果本机尚未获得上游 control-plane port，Phase 3 direct neighbor 表中的发现结果先保持 `reported=false`；本机收到自己的 ASSIGN 后重放这些 LINK_STATE。
+   - 本机 ASSIGN 完成后：a) 向上游发送确认 REGISTER；b) 对所有已启用 UART port 发起 `NEIGHBOR_PROBE_REQUEST`；c) 遍历 service `addr_ports` 表，对每个已用 entry 向上游发送 `LINK_STATE(src=本机, dst=host, neighbor=entry.mesh_addr)`。
 
 4. 处理主机 ASSIGN 回转：
    - 收到 `MESH_TYPE_ASSIGN` 时 parse ASSIGN。
@@ -121,7 +118,7 @@
      - 原始 ASSIGN 转发回 pending 的下游 ingress port。
      - 通知 service 学习 `payload.node_addr -> pending.ingress_port`。
      - 在本地 direct route 写 `dst=payload.node_addr, next_hop=payload.node_addr`。
-     - direct neighbor 表记录/刷新 `payload.node_addr -> pending.ingress_port`。
+     - service `addr_ports` 记录 `payload.node_addr -> pending.ingress_port`（通过 `learn_peer_port` 回调）。
      - 构造并向主机上报 `LINK_STATE(src=本机, dst=host, neighbor=payload.node_addr, local_port=ingress_port)`。
      - 清理 pending。
    - 如果 ASSIGN UID 命中本机 UID，走本机 ASSIGN 逻辑，不误转发给下游。
