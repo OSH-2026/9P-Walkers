@@ -176,6 +176,28 @@ static int mesh_node_service_send_frame(
     return mesh_uart_transport_send_frame(&service->ports[port_index].transport, tx_data, tx_len);
 }
 
+/*
+ * 向指定物理端口直接发送帧，不走 addr->port 查表。
+ * 用于 NEIGHBOR_PROBE_RESPONSE 等 port-local 回复。
+ */
+static int mesh_node_service_send_frame_to_port(
+    void *ctx,
+    uint8_t port_id,
+    const uint8_t *tx_data,
+    size_t tx_len)
+{
+    struct mesh_node_service *service = (struct mesh_node_service *)ctx;
+
+    if (service == NULL || !service->initialized || tx_data == NULL || tx_len == 0u) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+    if (port_id >= service->port_count || !service->ports[port_id].initialized) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    return mesh_uart_transport_send_frame(&service->ports[port_id].transport, tx_data, tx_len);
+}
+
 static int mesh_node_service_receive_frame(
     void *transport_ctx,
     uint8_t *rx_data,
@@ -274,6 +296,7 @@ int mesh_node_service_init(const struct mesh_node_service_config *config)
 
     mesh_node_runtime_get_default_config(&runtime_config);
     runtime_config.send_frame = mesh_node_service_send_frame;
+    runtime_config.send_frame_to_port = mesh_node_service_send_frame_to_port;
     runtime_config.receive_frame = mesh_node_service_receive_frame;
     runtime_config.transport_ctx = &g_mesh_node_service;
     runtime_config.learn_peer_port = mesh_node_service_learn_addr_port_ctx;

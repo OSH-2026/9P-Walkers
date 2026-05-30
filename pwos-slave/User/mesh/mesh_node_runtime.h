@@ -31,6 +31,8 @@ struct mesh_node_runtime_config {
     /** 原始 mesh 帧发送函数，不可为 NULL。next_hop 使用 cluster 返回的 mesh 地址语义。 */
     mesh_processer_send_frame_fn send_frame;
     /** 原始 mesh 帧接收函数，不可为 NULL，必须返回入口端口或 MESH_PROCESSER_INGRESS_PORT_NONE。 */
+    /** 向指定物理端口直接发送帧的回调；用于 NEIGHBOR_PROBE_RESPONSE 等 port-local 回复。可不填，此时 PROBE_RESPONSE 降级用 send_frame(next_hop=port_id)。 */
+    int (*send_frame_to_port)(void *ctx, uint8_t port_id, const uint8_t *tx_data, size_t tx_len);
     mesh_processer_receive_frame_fn receive_frame;
     /** 原样传给 send_frame/receive_frame 的底层 transport 上下文。 */
     void *transport_ctx;
@@ -74,6 +76,9 @@ struct mesh_node_runtime {
     bool initialized;
     /** 下一帧由 runtime 主动生成的 mesh seq。 */
     uint16_t next_mesh_seq;
+    /** 最近到达帧的入口端口，供 control_handler 回调读取。 */
+    uint8_t last_ingress_port;
+    /** 收到本机 ASSIGN 的端口（上游 control-plane port）。 */
 };
 
 /**
@@ -134,11 +139,10 @@ int mesh_node_runtime_process_frame(
 /**
  * @brief 处理一帧 mesh 数据，并携带该帧进入的 UART 端口。
  *
- * runtime 会先刷新 direct-table 路由 `src -> src`，并通过 learn_peer_port
- * 回调把 `src -> ingress_port` 通知给 service；随后交给 mesh_processer
- * 做本机分发或转发。
+ * frame type 为 NEIGHBOR_PROBE_REQUEST/RESPONSE 时由 runtime 本地处理：
+ * PROBE_REQUEST 在拥有地址时原地回复，PROBE_RESPONSE 才建立直连邻居。
+ * 其他类型交给 mesh_processer 做本机分发或转发，不从普通帧 src 自动推断直连邻居。
  *
- * @param[in,out] runtime runtime 实例。
  * @param[in] frame_data 完整 mesh 帧。
  * @param[in] frame_len mesh 帧长度。
  * @param[in] ingress_port 收到该帧的端口索引，未知时传 MESH_PROCESSER_INGRESS_PORT_NONE。

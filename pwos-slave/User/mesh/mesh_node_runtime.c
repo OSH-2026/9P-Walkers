@@ -6,6 +6,10 @@ static int mesh_node_runtime_send_register(
     struct mesh_node_runtime *runtime,
     uint8_t next_hop);
 
+static int mesh_node_runtime_send_neighbor_probe(
+    struct mesh_node_runtime *runtime,
+    uint8_t next_hop);
+
 static uint16_t mesh_node_runtime_take_seq(struct mesh_node_runtime *runtime)
 {
     uint16_t seq;
@@ -28,10 +32,10 @@ static uint8_t mesh_node_runtime_default_hop(const struct mesh_node_runtime *run
 }
 
 /*
- * 当前 direct-table 模型中，只要某个非 0xFF src 从某个入口端口发来帧，
- * runtime 就认为该 mesh 地址可作为直接 next_hop。
+ * 直连邻居学习：只有 NEIGHBOR_PROBE_RESPONSE（以及未来 Phase 4 的
+ * ASSIGN 回转）才会调用该逻辑，不会从普通 mesh frame 的 src 自动推断。
  *
- * 因此这里把 src 直接写成一条 dst->dst 的 direct-table 路由，保持
+ * 把 mesh_addr 写成一条 dst->dst 的 direct-table 路由，保持
  * cluster 的 next_hop 语义仍是 mesh addr。实际 addr->UART port 的映射由
  * service 在 learn_peer_port 回调里维护。
  */
@@ -68,8 +72,53 @@ static int mesh_node_runtime_refresh_direct_peer(
 }
 
 /*
+ * 收到 NEIGHBOR_PROBE_REQUEST 后，若本机已有正式地址，立即从同一
+ * ingress port 回 NEIGHBOR_PROBE_RESPONSE，不使用普通转发路径。
+ */
+static int mesh_node_runtime_handle_probe_request(
+    struct mesh_node_runtime *runtime,
+    uint8_t ingress_port)
+{
+    uint8_t frame[MESH_PROCESSER_FRAME_CAP];
+    size_t frame_len = 0u;
+
+    if (!mesh_build_neighbor_probe_response(
+            runtime->processor.config.local_addr,
+            MESH_ADDR_UNASSIGNED,
+            mesh_node_runtime_take_seq(runtime),
+            mesh_node_runtime_default_hop(runtime),
+            frame,
+            sizeof(frame),
+            &frame_len)) {
+        return -(int)MESH_ERR_BAD_FRAME;
+    }
+
+    if (runtime->config.send_frame_to_port != NULL) {
+        return runtime->config.send_frame_to_port(
+            runtime->config.transport_ctx,
+            ingress_port,
+            frame,
+            frame_len);
+    }
+
+    /* 降级：使用 send_frame，next_hop 填入 ingress port id。仅当
+       transport 层能正确处理该语义时才生效。 */
+    return runtime->config.send_frame(
+        runtime->config.transport_ctx,
+        (uint8_t)ingress_port,
+        frame,
+        frame_len);
+}
+
+/*
  * 节点在 bootstrap 阶段 local_addr 仍是 0xFF。
  * 如果不按 UID 再过滤一次，任何发到 0xFF 的 ASSIGN 都会被误接收。
+ *
+ * 本机命中 ASSIGN 后：
+ * - 记录 upstream_port（上游 control-plane port）
+ * - 更新本机地址
+ * - 向上游重发确认 REGISTER
+ * - 对所有端口发起 NEIGHBOR_PROBE_REQUEST
  */
 static int mesh_node_runtime_control_handler(
     void *runtime_ctx,
@@ -110,7 +159,16 @@ static int mesh_node_runtime_control_handler(
 
     if (assign_hits_local) {
         runtime->processor.config.local_addr = assign_payload.node_addr;
+        /* 记录 ASSIGN 入口端口为 upstream/control-plane port。 */
+
+
         rc = mesh_node_runtime_send_register(runtime, frame->src);
+        if (rc != 0) {
+            return rc;
+        }
+
+        /* 对所有端口广播 NEIGHBOR_PROBE_REQUEST，主动发现直连邻居。 */
+        rc = mesh_node_runtime_send_neighbor_probe(runtime, runtime->config.bootstrap_next_hop);
         if (rc != 0) {
             return rc;
         }
@@ -142,6 +200,41 @@ static int mesh_node_runtime_send_register(
             mesh_node_runtime_take_seq(runtime),
             mesh_node_runtime_default_hop(runtime),
             &payload,
+            frame,
+            sizeof(frame),
+            &frame_len)) {
+        return -(int)MESH_ERR_BAD_FRAME;
+    }
+
+    return runtime->config.send_frame(
+        runtime->config.transport_ctx,
+        next_hop,
+        frame,
+        frame_len);
+}
+
+/*
+ * 向所有端口发送 NEIGHBOR_PROBE_REQUEST，用于本机 ASSIGN 完成后
+ * 主动发现直连邻居。next_hop 使用 NEIGHBOR_ANY 广播语义。
+ */
+static int mesh_node_runtime_send_neighbor_probe(
+    struct mesh_node_runtime *runtime,
+    uint8_t next_hop)
+{
+    uint8_t frame[MESH_PROCESSER_FRAME_CAP];
+    size_t frame_len = 0u;
+
+    if (runtime == NULL || !runtime->initialized) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+    if (runtime->processor.config.local_addr == MESH_ADDR_UNASSIGNED) {
+        return 0;
+    }
+
+    if (!mesh_build_neighbor_probe_request(
+            runtime->processor.config.local_addr,
+            mesh_node_runtime_take_seq(runtime),
+            mesh_node_runtime_default_hop(runtime),
             frame,
             sizeof(frame),
             &frame_len)) {
@@ -219,6 +312,7 @@ int mesh_node_runtime_init(
 
     runtime->next_mesh_seq = 1u;
     runtime->initialized = true;
+    runtime->last_ingress_port = MESH_PROCESSER_INGRESS_PORT_NONE;
 
     if (runtime->config.auto_register_on_init) {
         rc = mesh_node_runtime_send_register(runtime, runtime->config.bootstrap_next_hop);
@@ -258,7 +352,6 @@ int mesh_node_runtime_process_frame_from_port(
     uint8_t ingress_port)
 {
     struct mesh_frame_view frame;
-    int rc;
 
     if (runtime == NULL || !runtime->initialized || frame_data == NULL) {
         return -(int)MESH_ERR_INVALID_STATE;
@@ -267,11 +360,31 @@ int mesh_node_runtime_process_frame_from_port(
         return -(int)MESH_ERR_BAD_FRAME;
     }
 
-    rc = mesh_node_runtime_refresh_direct_peer(runtime, frame.src, ingress_port);
-    if (rc != 0) {
-        return rc;
+    runtime->last_ingress_port = ingress_port;
+
+    /* NEIGHBOR_PROBE_REQUEST: 只做本地应答，绝不转发。 */
+    if (frame.type == MESH_TYPE_NEIGHBOR_PROBE_REQUEST) {
+        if (runtime->processor.config.local_addr == MESH_ADDR_UNASSIGNED ||
+            ingress_port == MESH_PROCESSER_INGRESS_PORT_NONE) {
+            return 0;
+        }
+        return mesh_node_runtime_handle_probe_request(runtime, ingress_port);
     }
 
+    /* NEIGHBOR_PROBE_RESPONSE: 唯一能建立直连邻居的帧类型。 */
+    if (frame.type == MESH_TYPE_NEIGHBOR_PROBE_RESPONSE) {
+        if (frame.src == MESH_ADDR_UNASSIGNED ||
+            ingress_port == MESH_PROCESSER_INGRESS_PORT_NONE) {
+            return 0;
+        }
+        return mesh_node_runtime_refresh_direct_peer(runtime, frame.src, ingress_port);
+    }
+
+    /*
+     * 其他 frame type：不再从 src 自动推断直连邻居。
+     * ASSIGN 回转/学习中继下游地址由 Phase 4 的 pending registrar 完成；
+     * 当前只做正常处理或转发。
+     */
     return mesh_processer_process_frame_from_port(
         &runtime->processor,
         frame_data,
