@@ -75,6 +75,12 @@ int mesh_node_runtime_process_frame(
     const uint8_t *frame_data,
     size_t frame_len);
 
+int mesh_node_runtime_process_frame_from_port(
+    struct mesh_node_runtime *runtime,
+    const uint8_t *frame_data,
+    size_t frame_len,
+    uint8_t ingress_port);
+
 int mesh_node_runtime_poll_once(struct mesh_node_runtime *runtime);
 
 #ifdef __cplusplus

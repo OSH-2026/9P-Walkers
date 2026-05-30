@@ -357,12 +357,15 @@ void mesh_processer_deinit(struct mesh_processer *processor)
     memset(processor, 0, sizeof(*processor));
 }
 
-int mesh_processer_process_frame(
+int mesh_processer_process_frame_from_port(
     struct mesh_processer *processor,
     const uint8_t *frame_data,
-    size_t frame_len)
+    size_t frame_len,
+    uint8_t ingress_port)
 {
     struct mesh_frame_view frame;
+
+    (void)ingress_port;
 
     if (processor == NULL || !processor->initialized || frame_data == NULL) {
         return -(int)MESH_ERR_BAD_FRAME;
@@ -386,6 +389,18 @@ int mesh_processer_process_frame(
     }
 
     return -(int)MESH_ERR_UNSUPPORTED_TYPE;
+}
+
+int mesh_processer_process_frame(
+    struct mesh_processer *processor,
+    const uint8_t *frame_data,
+    size_t frame_len)
+{
+    return mesh_processer_process_frame_from_port(
+        processor,
+        frame_data,
+        frame_len,
+        MESH_PROCESSER_INGRESS_PORT_NONE);
 }
 
 /*
@@ -414,5 +429,9 @@ int mesh_processer_poll_once(struct mesh_processer *processor)
         return rc;
     }
 
-    return mesh_processer_process_frame(processor, processor->rx_buffer, rx_len);
+    return mesh_processer_process_frame_from_port(
+        processor,
+        processor->rx_buffer,
+        rx_len,
+        ingress_port);
 }

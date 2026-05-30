@@ -697,16 +697,22 @@ static int pc_mesh_confirm_assigned_node(struct pc_mesh_transport *transport, ui
  * @return 0 = 成功，帧已放入 rx_data；-MESH_ERR_BUSY = 帧已消费（第一次 REGISTER）；
  *         负数 = 错误
  */
-static int pc_mesh_receive_frame(void *transport_ctx, uint8_t *rx_data, size_t rx_cap, size_t *rx_len)
+static int pc_mesh_receive_frame(
+    void *transport_ctx,
+    uint8_t *rx_data,
+    size_t rx_cap,
+    size_t *rx_len,
+    uint8_t *out_ingress_port)
 {
     struct pc_mesh_transport *transport = (struct pc_mesh_transport *)transport_ctx;
     struct mesh_frame_view view;
     int rc;
 
-    if (transport == NULL || transport->fd < 0) {
+    if (transport == NULL || transport->fd < 0 || out_ingress_port == NULL) {
         return -(int)MESH_ERR_INVALID_STATE;
     }
 
+    *out_ingress_port = MESH_PROCESSER_INGRESS_PORT_NONE;
     rc = pc_receive_mesh_frame(transport->fd, rx_data, rx_cap, rx_len);
     if (rc != 0) {
         return rc;

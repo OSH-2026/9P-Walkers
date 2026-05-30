@@ -237,10 +237,11 @@ int mesh_node_runtime_notify_link_up(struct mesh_node_runtime *runtime)
     return mesh_node_runtime_send_register(runtime, runtime->config.bootstrap_next_hop);
 }
 
-int mesh_node_runtime_process_frame(
+int mesh_node_runtime_process_frame_from_port(
     struct mesh_node_runtime *runtime,
     const uint8_t *frame_data,
-    size_t frame_len)
+    size_t frame_len,
+    uint8_t ingress_port)
 {
     struct mesh_frame_view frame;
     int rc;
@@ -257,12 +258,29 @@ int mesh_node_runtime_process_frame(
         return rc;
     }
 
-    return mesh_processer_process_frame(&runtime->processor, frame_data, frame_len);
+    return mesh_processer_process_frame_from_port(
+        &runtime->processor,
+        frame_data,
+        frame_len,
+        ingress_port);
+}
+
+int mesh_node_runtime_process_frame(
+    struct mesh_node_runtime *runtime,
+    const uint8_t *frame_data,
+    size_t frame_len)
+{
+    return mesh_node_runtime_process_frame_from_port(
+        runtime,
+        frame_data,
+        frame_len,
+        MESH_PROCESSER_INGRESS_PORT_NONE);
 }
 
 int mesh_node_runtime_poll_once(struct mesh_node_runtime *runtime)
 {
     size_t rx_len = 0u;
+    uint8_t ingress_port = MESH_PROCESSER_INGRESS_PORT_NONE;
     int rc;
 
     if (runtime == NULL || !runtime->initialized) {
@@ -273,10 +291,15 @@ int mesh_node_runtime_poll_once(struct mesh_node_runtime *runtime)
         runtime->config.transport_ctx,
         runtime->processor.rx_buffer,
         sizeof(runtime->processor.rx_buffer),
-        &rx_len);
+        &rx_len,
+        &ingress_port);
     if (rc != 0) {
         return rc;
     }
 
-    return mesh_node_runtime_process_frame(runtime, runtime->processor.rx_buffer, rx_len);
+    return mesh_node_runtime_process_frame_from_port(
+        runtime,
+        runtime->processor.rx_buffer,
+        rx_len,
+        ingress_port);
 }
