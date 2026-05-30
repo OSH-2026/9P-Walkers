@@ -6,7 +6,7 @@
 - 新 base 中 `mesh_processer_receive_frame_fn` typedef 已经是 5 参数，包含 `uint8_t *out_ingress_port`。
 - `mesh_processer_poll_once()` 已经调用 receive callback 并拿到 `ingress_port`，但目前没有继续把该端口传入 frame processing。
 - 主机 `mesh_host_service_receive_frame()` 已经返回实际 UART ingress port。
-- 从机 `mesh_node_service_receive_frame()` 仍是旧 4 参数实现，且从机 service config/runtime 内仍存在静态 `neighbor_addr` 路由假设。
+- 从机 `mesh_node_service_receive_frame()` 已返回实际 UART ingress port；从机 service config/runtime 不再使用静态 `neighbor_addr` 路由假设。
 - 从机 runtime 当前只有 `mesh_node_runtime_process_frame(runtime, frame, len)`，没有显式 ingress-port 入口。
 - 主机 runtime 已有 `LINK_STATE` 处理：调用 shared cluster control handler、补 host-local link、刷新 VFS connectivity、同步 runtime slots。仍需核对 route table 下发闭环是否已存在。
 - 本计划不引入从机 Wi-Fi，不引入 `mesh_wifi`、`wifi_supported` runtime 配置、虚拟 Wi-Fi port；不恢复旧分支静态 `neighbor_addr` 配置。
@@ -121,12 +121,12 @@
    - 只由主机下发，relay/node 只落地 ROUTE_UPDATE，不互相传播路由。
 
 4. 明确 host service ingress port：
-   - 主机 service 已能返回 ingress port；如 route sync 需要 host 端口 selector，保持主机现有静态 `neighbor_addr` 机制或最小映射，不把该机制复制到从机。
+   - 主机 service 已能返回 ingress port；如 route sync 需要主机侧端口选择，保持主机现有机制或最小映射，不把静态 `neighbor_addr` 机制复制到从机。
 
 验收：
 
 - LINK_STATE 后 cluster topology 可见 `relay -> child`。
-- 主机能给 relay/相关节点下发指定路由，relay 通过 direct table 按 port selector 转发到 child。
+- 主机能给 relay/相关节点下发指定路由，relay 通过 service 动态 `next_hop addr -> UART port` 查表转发到 child。
 
 ## Phase 5: tests
 
@@ -140,7 +140,7 @@
    - 本机 ASSIGN 从某个 ingress port 到达后，runtime 记录 upstream port。
    - 下游 REGISTER 从 port N 到达后，pending 表记录 `uid + boot_nonce -> N`。
    - 主机 ASSIGN 到达后，原始 ASSIGN 从 port N 发出。
-   - 学习 `payload.node_addr -> port N`，mini9P/后续转发使用该 selector。
+   - 学习 `payload.node_addr -> port N`，mini9P/后续转发使用 service 的动态 addr->port 查表。
    - 上报 LINK_STATE 到 upstream port。
 
 3. 更新 host runtime/service tests：
@@ -149,7 +149,7 @@
 
 4. 测试断言风格：
    - 不依赖旧 `tx_count` 固定下标来表达主行为。
-   - 通过解析发出的 mesh frame type/src/dst/payload 和 send selector 来断言。
+   - 通过解析发出的 mesh frame type/src/dst/payload 和 service 学到的 addr->port 映射来断言。
 
 验收命令：
 

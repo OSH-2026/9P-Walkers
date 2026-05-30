@@ -5,7 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../node_runtime/mesh_node_runtime.h"
+#include "../../../pwos-slave/User/mesh/mesh_node_runtime.h"
 #include "../../mini9p/mini9p_protocol.h"
 
 #define TEST_FRAME_CAP (MESH_FRAME_OVERHEAD + MESH_MAX_PAYLOAD_LEN)
@@ -13,6 +13,7 @@
 struct fake_frame {
     uint8_t data[TEST_FRAME_CAP];
     size_t len;
+    uint8_t ingress_port;
 };
 
 struct fake_transport {
@@ -22,6 +23,9 @@ struct fake_transport {
     struct fake_frame tx_queue[8];
     uint8_t tx_next_hop[8];
     size_t tx_count;
+    uint8_t learned_addr[8];
+    uint8_t learned_port[8];
+    size_t learned_count;
 };
 
 struct fake_server_ctx {
@@ -34,14 +38,24 @@ static void fake_transport_reset(struct fake_transport *transport)
     memset(transport, 0, sizeof(*transport));
 }
 
-static void fake_transport_queue_rx(struct fake_transport *transport, const uint8_t *data, size_t len)
+static void fake_transport_queue_rx_on_port(
+    struct fake_transport *transport,
+    const uint8_t *data,
+    size_t len,
+    uint8_t ingress_port)
 {
     assert(transport->rx_count < (sizeof(transport->rx_queue) / sizeof(transport->rx_queue[0])));
     assert(len <= sizeof(transport->rx_queue[transport->rx_count].data));
 
     memcpy(transport->rx_queue[transport->rx_count].data, data, len);
     transport->rx_queue[transport->rx_count].len = len;
+    transport->rx_queue[transport->rx_count].ingress_port = ingress_port;
     ++transport->rx_count;
+}
+
+static void fake_transport_queue_rx(struct fake_transport *transport, const uint8_t *data, size_t len)
+{
+    fake_transport_queue_rx_on_port(transport, data, len, MESH_PROCESSER_INGRESS_PORT_NONE);
 }
 
 static int fake_send_frame(void *transport_ctx, uint8_t next_hop, const uint8_t *tx_data, size_t tx_len)
@@ -70,7 +84,6 @@ static int fake_receive_frame(
 
     assert(transport != NULL);
     assert(out_ingress_port != NULL);
-    *out_ingress_port = MESH_PROCESSER_INGRESS_PORT_NONE;
     if (transport->rx_index >= transport->rx_count) {
         return -(int)MESH_ERR_BUSY;
     }
@@ -80,7 +93,21 @@ static int fake_receive_frame(
            transport->rx_queue[transport->rx_index].data,
            transport->rx_queue[transport->rx_index].len);
     *rx_len = transport->rx_queue[transport->rx_index].len;
+    *out_ingress_port = transport->rx_queue[transport->rx_index].ingress_port;
     ++transport->rx_index;
+    return 0;
+}
+
+static int fake_learn_peer_port(void *ctx, uint8_t mesh_addr, uint8_t port_id)
+{
+    struct fake_transport *transport = (struct fake_transport *)ctx;
+
+    assert(transport != NULL);
+    assert(transport->learned_count < (sizeof(transport->learned_addr) / sizeof(transport->learned_addr[0])));
+
+    transport->learned_addr[transport->learned_count] = mesh_addr;
+    transport->learned_port[transport->learned_count] = port_id;
+    ++transport->learned_count;
     return 0;
 }
 
@@ -119,6 +146,8 @@ static void init_runtime(
     config.send_frame = fake_send_frame;
     config.receive_frame = fake_receive_frame;
     config.transport_ctx = transport;
+    config.learn_peer_port = fake_learn_peer_port;
+    config.learn_peer_port_ctx = transport;
     config.mini9p_server_handler = fake_mini9p_server_handler;
     config.mini9p_server_ctx = server_ctx;
     memcpy(config.local_uid, uid, MESH_UID_LEN);
@@ -200,7 +229,7 @@ static void test_assign_updates_local_addr_and_allows_server_reply(void)
         assign_frame,
         sizeof(assign_frame),
         &assign_len));
-    fake_transport_queue_rx(&transport, assign_frame, assign_len);
+    fake_transport_queue_rx_on_port(&transport, assign_frame, assign_len, 2u);
     assert(mesh_node_runtime_poll_once(&runtime) == 0);
     assert(runtime.cluster.config.local_addr == 0x24u);
     assert(runtime.processor.config.local_addr == 0x24u);
@@ -215,6 +244,9 @@ static void test_assign_updates_local_addr_and_allows_server_reply(void)
     assert(cluster_lookup_next_hop(&runtime.cluster, 0x01u, &next_hop, &is_local) == 0);
     assert(!is_local);
     assert(next_hop == 0x01u);
+    assert(transport.learned_count == 1u);
+    assert(transport.learned_addr[0] == 0x01u);
+    assert(transport.learned_port[0] == 2u);
 
     assert(m9p_build_tclunk(0x3344u, 9u, request_frame, sizeof(request_frame), &request_len));
     assert(mesh_build_mini9p_frame(
@@ -228,13 +260,16 @@ static void test_assign_updates_local_addr_and_allows_server_reply(void)
         mesh_frame,
         sizeof(mesh_frame),
         &mesh_len));
-    fake_transport_queue_rx(&transport, mesh_frame, mesh_len);
+    fake_transport_queue_rx_on_port(&transport, mesh_frame, mesh_len, 2u);
 
     assert(mesh_node_runtime_poll_once(&runtime) == 0);
     assert(server_ctx.call_count == 1u);
     assert(server_ctx.last_tag == 0x3344u);
     assert(transport.tx_count == 2u);
     assert(transport.tx_next_hop[1] == 0x01u);
+    assert(transport.learned_count == 2u);
+    assert(transport.learned_addr[1] == 0x01u);
+    assert(transport.learned_port[1] == 2u);
     assert(mesh_decode_frame(transport.tx_queue[1].data, transport.tx_queue[1].len, &view));
     assert(view.type == MESH_TYPE_MINI9P);
     assert(view.src == 0x24u);

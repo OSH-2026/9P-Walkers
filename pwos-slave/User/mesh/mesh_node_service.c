@@ -9,9 +9,14 @@
 
 #define MESH_NODE_SERVICE_DEFAULT_LOCAL_ADDR MESH_ADDR_UNASSIGNED
 
+struct mesh_node_service_addr_port {
+    bool used;
+    uint8_t mesh_addr;
+    uint8_t port_id;
+};
+
 struct mesh_node_service_port {
     bool initialized;
-    uint8_t neighbor_addr;
     struct mesh_uart_transport transport;
 };
 
@@ -21,6 +26,7 @@ struct mesh_node_service {
     size_t next_rx_index;
     struct mesh_node_runtime runtime;
     struct mesh_node_service_port ports[MESH_NODE_SERVICE_MAX_PORTS];
+    struct mesh_node_service_addr_port addr_ports[MESH_NODE_SERVICE_MAX_PORTS];
 };
 
 static struct mesh_node_service g_mesh_node_service;
@@ -31,31 +37,11 @@ static bool mesh_node_service_error_is_soft(int rc)
     return rc == -(int)MESH_ERR_BUSY || rc == -(int)MESH_ERR_NO_ROUTE;
 }
 
-static size_t mesh_node_service_count_ports(const struct mesh_node_service *service)
+static bool mesh_node_service_port_is_ready(const struct mesh_node_service *service, uint8_t port_id)
 {
-    size_t count = 0u;
-    size_t i;
-
-    for (i = 0u; i < service->port_count; ++i) {
-        if (service->ports[i].initialized) {
-            ++count;
-        }
-    }
-
-    return count;
-}
-
-static int mesh_node_service_find_single_port(const struct mesh_node_service *service)
-{
-    size_t i;
-
-    for (i = 0u; i < service->port_count; ++i) {
-        if (service->ports[i].initialized) {
-            return (int)i;
-        }
-    }
-
-    return -1;
+    return service != NULL &&
+        port_id < service->port_count &&
+        service->ports[port_id].initialized;
 }
 
 static int mesh_node_service_find_port_for_next_hop(
@@ -64,43 +50,55 @@ static int mesh_node_service_find_port_for_next_hop(
 {
     size_t i;
 
-    if (mesh_node_service_count_ports(service) == 1u) {
-        return mesh_node_service_find_single_port(service);
+    if (service == NULL) {
+        return -1;
     }
 
-    for (i = 0u; i < service->port_count; ++i) {
-        if (!service->ports[i].initialized) {
+    for (i = 0u; i < MESH_NODE_SERVICE_MAX_PORTS; ++i) {
+        if (!service->addr_ports[i].used) {
             continue;
         }
-        if (service->ports[i].neighbor_addr == next_hop) {
-            return (int)i;
+        if (service->addr_ports[i].mesh_addr == next_hop &&
+            mesh_node_service_port_is_ready(service, service->addr_ports[i].port_id)) {
+            return (int)service->addr_ports[i].port_id;
         }
     }
 
     return -1;
 }
 
-static bool mesh_node_service_has_duplicate_neighbor(
-    const struct mesh_node_service_config *config,
-    size_t port_index)
+static int mesh_node_service_learn_addr_port_ctx(void *ctx, uint8_t mesh_addr, uint8_t port_id)
 {
+    struct mesh_node_service *service = (struct mesh_node_service *)ctx;
+    struct mesh_node_service_addr_port *free_slot = NULL;
     size_t i;
-    uint8_t neighbor = config->ports[port_index].neighbor_addr;
 
-    if (neighbor == MESH_NODE_SERVICE_NEIGHBOR_ANY) {
-        return false;
+    if (service == NULL || !service->initialized || mesh_addr == MESH_ADDR_UNASSIGNED ||
+        !mesh_node_service_port_is_ready(service, port_id)) {
+        return -(int)MESH_ERR_INVALID_STATE;
     }
 
-    for (i = 0u; i < port_index; ++i) {
-        if (!config->ports[i].enabled) {
+    for (i = 0u; i < MESH_NODE_SERVICE_MAX_PORTS; ++i) {
+        if (!service->addr_ports[i].used) {
+            if (free_slot == NULL) {
+                free_slot = &service->addr_ports[i];
+            }
             continue;
         }
-        if (config->ports[i].neighbor_addr == neighbor) {
-            return true;
+        if (service->addr_ports[i].mesh_addr == mesh_addr) {
+            service->addr_ports[i].port_id = port_id;
+            return 0;
         }
     }
 
-    return false;
+    if (free_slot == NULL) {
+        return -(int)MESH_ERR_BUSY;
+    }
+
+    free_slot->used = true;
+    free_slot->mesh_addr = mesh_addr;
+    free_slot->port_id = port_id;
+    return 0;
 }
 
 static uint8_t mesh_node_service_make_port_bitmap(const struct mesh_node_service *service)
@@ -230,7 +228,6 @@ void mesh_node_service_get_default_config(struct mesh_node_service_config *out_c
     memset(out_config, 0, sizeof(*out_config));
     out_config->port_count = 1u;
     out_config->ports[0].enabled = true;
-    out_config->ports[0].neighbor_addr = MESH_NODE_SERVICE_NEIGHBOR_ANY;
     mesh_uart_transport_get_default_config(&out_config->ports[0].uart_config);
 }
 
@@ -257,10 +254,6 @@ int mesh_node_service_init(const struct mesh_node_service_config *config)
         if (!config->ports[i].enabled) {
             continue;
         }
-        if (mesh_node_service_has_duplicate_neighbor(config, i)) {
-            mesh_node_service_deinit();
-            return -(int)MESH_ERR_INVALID_STATE;
-        }
 
         rc = mesh_uart_transport_init(
             &g_mesh_node_service.ports[i].transport,
@@ -270,7 +263,6 @@ int mesh_node_service_init(const struct mesh_node_service_config *config)
             return rc;
         }
 
-        g_mesh_node_service.ports[i].neighbor_addr = config->ports[i].neighbor_addr;
         g_mesh_node_service.ports[i].initialized = true;
         ++enabled_count;
     }
@@ -284,6 +276,8 @@ int mesh_node_service_init(const struct mesh_node_service_config *config)
     runtime_config.send_frame = mesh_node_service_send_frame;
     runtime_config.receive_frame = mesh_node_service_receive_frame;
     runtime_config.transport_ctx = &g_mesh_node_service;
+    runtime_config.learn_peer_port = mesh_node_service_learn_addr_port_ctx;
+    runtime_config.learn_peer_port_ctx = &g_mesh_node_service;
     runtime_config.mini9p_server_handler = config->mini9p_server_handler;
     runtime_config.mini9p_server_ctx = config->mini9p_server_ctx;
     mesh_node_service_fill_local_uid(runtime_config.local_uid);
@@ -344,4 +338,13 @@ struct mesh_node_runtime *mesh_node_service_runtime(void)
     }
 
     return &g_mesh_node_service.runtime;
+}
+
+int mesh_node_service_learn_addr_port(uint8_t mesh_addr, uint8_t port_id)
+{
+    if (!g_mesh_node_service_initialized) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    return mesh_node_service_learn_addr_port_ctx(&g_mesh_node_service, mesh_addr, port_id);
 }

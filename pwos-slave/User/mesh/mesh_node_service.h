@@ -29,7 +29,6 @@ extern "C" {
 
 struct mesh_node_service_port_config {
     bool enabled;
-    uint8_t neighbor_addr;
     struct mesh_uart_transport_config uart_config;
 };
 
@@ -51,6 +50,8 @@ int mesh_node_service_notify_link_up(void);
 int mesh_node_service_poll_once(void);
 
 struct mesh_node_runtime *mesh_node_service_runtime(void);
+
+int mesh_node_service_learn_addr_port(uint8_t mesh_addr, uint8_t port_id);
 
 #ifdef __cplusplus
 }

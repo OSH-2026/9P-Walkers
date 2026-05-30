@@ -33,6 +33,8 @@ struct mesh_node_runtime_config {
     mesh_processer_send_frame_fn send_frame; /**< 原始链路发帧函数，不可为 NULL。 */
     mesh_processer_receive_frame_fn receive_frame; /**< 原始链路收帧函数，不可为 NULL。 */
     void *transport_ctx; /**< 原样传给 send/receive 的链路上下文。 */
+    int (*learn_peer_port)(void *ctx, uint8_t mesh_addr, uint8_t port_id); /**< 动态学习 addr->UART port。 */
+    void *learn_peer_port_ctx; /**< learn_peer_port 上下文。 */
     mesh_processer_mini9p_server_handler_fn mini9p_server_handler; /**< 本地 mini9P server 处理器。 */
     void *mini9p_server_ctx; /**< 本地 mini9P server 上下文。 */
     uint8_t local_uid[MESH_UID_LEN]; /**< 当前链路上对外通告的稳定硬件 UID。 */

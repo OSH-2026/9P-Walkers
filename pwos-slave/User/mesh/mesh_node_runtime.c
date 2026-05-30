@@ -31,13 +31,14 @@ static uint8_t mesh_node_runtime_default_hop(const struct mesh_node_runtime *run
  * 点对点 UART 场景下，只要某个对端曾经在这条链路上给我发过帧，
  * 就说明它当前可以通过“本链路直达”。
  *
- * 因此这里把 src 直接写成一条 dst->dst 的 direct-table 路由。
- * send_frame 具体是否真的使用 next_hop，由底层 transport 决定；
- * 但 cluster 至少需要知道“这个地址可以从当前链路发出去”。
+ * 因此这里把 src 直接写成一条 dst->dst 的 direct-table 路由，保持
+ * cluster 的 next_hop 语义仍是 mesh addr。实际 addr->UART port 的映射由
+ * service 在 learn_peer_port 回调里维护。
  */
 static int mesh_node_runtime_refresh_direct_peer(
     struct mesh_node_runtime *runtime,
-    uint8_t mesh_addr)
+    uint8_t mesh_addr,
+    uint8_t ingress_port)
 {
     int rc;
 
@@ -50,7 +51,20 @@ static int mesh_node_runtime_refresh_direct_peer(
         return rc;
     }
 
-    return cluster_add_route(&runtime->cluster, mesh_addr, mesh_addr, 1u);
+    rc = cluster_add_route(&runtime->cluster, mesh_addr, mesh_addr, 1u);
+    if (rc != 0) {
+        return rc;
+    }
+
+    if (runtime->config.learn_peer_port != NULL &&
+        ingress_port != MESH_PROCESSER_INGRESS_PORT_NONE) {
+        return runtime->config.learn_peer_port(
+            runtime->config.learn_peer_port_ctx,
+            mesh_addr,
+            ingress_port);
+    }
+
+    return 0;
 }
 
 /*
@@ -253,7 +267,7 @@ int mesh_node_runtime_process_frame_from_port(
         return -(int)MESH_ERR_BAD_FRAME;
     }
 
-    rc = mesh_node_runtime_refresh_direct_peer(runtime, frame.src);
+    rc = mesh_node_runtime_refresh_direct_peer(runtime, frame.src, ingress_port);
     if (rc != 0) {
         return rc;
     }
