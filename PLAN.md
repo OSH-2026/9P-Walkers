@@ -46,9 +46,11 @@
    - 从 `pwos-slave/User/mesh/mesh_node_service.h/.c` 移除从机侧 `neighbor_addr` 配置字段、重复 neighbor 校验、按静态 neighbor 查 port 的逻辑。
    - 保留多 UART port enable/transport 初始化/round-robin receive。
 
-2. 明确从机 send selector 语义：
-   - `mesh_node_service_send_frame(ctx, next_hop, frame, len)` 中，将 `next_hop` 解释为运行时 selector/port id。
-   - `MESH_NODE_SERVICE_NEIGHBOR_ANY` 仅作为 broadcast/all-ports selector，用于初始 REGISTER 或需要泛洪到所有已启用 UART 的场景。
+2. 明确从机 send port-id 语义：
+   - `mesh_node_service_send_frame(ctx, next_hop, frame, len)` 中，`next_hop` 直接解释为 UART port id。
+   - 合法 port id 范围是 `[0, port_count)`，且对应 port 必须 initialized。
+   - `MESH_NODE_SERVICE_NEIGHBOR_ANY == 0xff` 仅作为保留广播值，用于初始 REGISTER 或明确需要发所有已启用 UART 的场景。
+   - 不新增 selector 抽象，不引入额外映射层。
 
 3. 从机 direct-table 路由语义调整：
    - runtime 学到下游地址后写 `cluster_add_route(dst=node_addr, next_hop=ingress_port, metric=1)`。
@@ -57,7 +59,7 @@
 验收：
 
 - 从机 service config 不再要求或暴露静态 `neighbor_addr`。
-- 多端口发送由 runtime 学到的 port selector 决定。
+- 多端口发送由 runtime 学到的 UART port id 决定。
 
 ## Phase 3: slave relay pending REGISTER and ASSIGN turnback
 
@@ -76,14 +78,14 @@
 3. 记录本机上游 control-plane port：
    - 本机收到命中自己 UID 的 ASSIGN 后，更新本机 mesh addr。
    - 同时记录 ASSIGN 的 ingress port 为 upstream/control-plane port。
-   - 后续本机 REGISTER/LINK_STATE 上报优先发往该 upstream port；未分配前仍可按现有 bootstrap selector 发送。
+   - 后续本机 REGISTER/LINK_STATE 上报优先发往该 upstream port；未分配前仍可按现有 bootstrap 广播值发送。
 
 4. 处理主机 ASSIGN 回转：
    - 收到 `MESH_TYPE_ASSIGN` 时 parse ASSIGN。
    - 如果 ASSIGN UID 命中 pending 表：
      - 原始 ASSIGN 转发回 pending 的下游 ingress port。
      - 学习 `payload.node_addr -> pending.ingress_port`。
-     - 在本地 direct route 写 `dst=payload.node_addr, next_hop/selector=pending.ingress_port`。
+     - 在本地 direct route 写 `dst=payload.node_addr, next_hop=pending.ingress_port`。
      - 构造并向主机上报 `LINK_STATE(src=本机, dst=host, neighbor=payload.node_addr, local_port=ingress_port)`。
      - 清理 pending。
    - 如果 ASSIGN UID 命中本机 UID，走本机 ASSIGN 逻辑，不误转发给下游。
