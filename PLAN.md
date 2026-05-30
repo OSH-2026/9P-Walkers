@@ -46,20 +46,21 @@
    - 从 `pwos-slave/User/mesh/mesh_node_service.h/.c` 移除从机侧 `neighbor_addr` 配置字段、重复 neighbor 校验、按静态 neighbor 查 port 的逻辑。
    - 保留多 UART port enable/transport 初始化/round-robin receive。
 
-2. 明确从机 send port-id 语义：
-   - `mesh_node_service_send_frame(ctx, next_hop, frame, len)` 中，`next_hop` 直接解释为 UART port id。
-   - 合法 port id 范围是 `[0, port_count)`，且对应 port 必须 initialized。
+2. 明确从机 send next-hop 语义：
+   - `mesh_node_service_send_frame(ctx, next_hop, frame, len)` 中，`next_hop` 保持 mesh addr 语义，不解释为 UART port id。
+   - service 负责维护动态 `addr -> port` 表，并通过该表把 next-hop addr 查到实际 UART port。
    - `MESH_NODE_SERVICE_NEIGHBOR_ANY == 0xff` 仅作为保留广播值，用于初始 REGISTER 或明确需要发所有已启用 UART 的场景。
-   - 不新增 selector 抽象，不引入额外映射层。
+   - 不新增 selector 抽象，不把 port id 写入 route table 的 next_hop 字段。
 
 3. 从机 direct-table 路由语义调整：
-   - runtime 学到下游地址后写 `cluster_add_route(dst=node_addr, next_hop=ingress_port, metric=1)`。
+   - runtime 学到下游地址后写 `cluster_add_route(dst=node_addr, next_hop=node_addr, metric=1)`，保持 next_hop 为 mesh addr。
+   - 同时通知 service 记录动态映射 `node_addr -> ingress_port`，供 send_frame 查端口。
    - 不再写 `dst -> dst` 作为多端口从机上的默认直连路由。
 
 验收：
 
 - 从机 service config 不再要求或暴露静态 `neighbor_addr`。
-- 多端口发送由 runtime 学到的 UART port id 决定。
+- 多端口发送由 service 动态 `next_hop addr -> UART port` 查表决定。
 
 ## Phase 3: slave relay pending REGISTER and ASSIGN turnback
 
@@ -84,8 +85,8 @@
    - 收到 `MESH_TYPE_ASSIGN` 时 parse ASSIGN。
    - 如果 ASSIGN UID 命中 pending 表：
      - 原始 ASSIGN 转发回 pending 的下游 ingress port。
-     - 学习 `payload.node_addr -> pending.ingress_port`。
-     - 在本地 direct route 写 `dst=payload.node_addr, next_hop=pending.ingress_port`。
+     - 通知 service 学习 `payload.node_addr -> pending.ingress_port`。
+     - 在本地 direct route 写 `dst=payload.node_addr, next_hop=payload.node_addr`。
      - 构造并向主机上报 `LINK_STATE(src=本机, dst=host, neighbor=payload.node_addr, local_port=ingress_port)`。
      - 清理 pending。
    - 如果 ASSIGN UID 命中本机 UID，走本机 ASSIGN 逻辑，不误转发给下游。
