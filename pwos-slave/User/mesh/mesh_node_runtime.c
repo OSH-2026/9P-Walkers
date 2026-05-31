@@ -756,6 +756,14 @@ int mesh_node_runtime_process_frame_from_port(
             ingress_port);
     }
 
+    if (frame.type == MESH_TYPE_REGISTER &&
+        frame.src != MESH_ADDR_UNASSIGNED &&
+        frame.dst == MESH_ADDR_UNASSIGNED &&
+        frame.src != runtime->processor.config.local_addr &&
+        runtime->upstream_port != MESH_PROCESSER_INGRESS_PORT_NONE) {
+        return mesh_node_runtime_send_raw_to_upstream(runtime, frame_data, frame_len);
+    }
+
     if (frame.type == MESH_TYPE_ASSIGN) {
         struct mesh_assign_payload payload;
 

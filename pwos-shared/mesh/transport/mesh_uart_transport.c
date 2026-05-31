@@ -81,6 +81,12 @@ bool mesh_uart_transport_rx_pending(const struct mesh_uart_transport *transport)
     return true;
 }
 
+int mesh_uart_transport_flush_input(struct mesh_uart_transport *transport)
+{
+    (void)transport;
+    return 0;
+}
+
 #elif defined(MESH_UART_TRANSPORT_USE_STM32_HAL)
 
 static uint32_t transport_timeout_ms(const struct mesh_uart_transport *transport)
@@ -253,6 +259,15 @@ bool mesh_uart_transport_rx_pending(const struct mesh_uart_transport *transport)
     }
 
     return __HAL_UART_GET_FLAG(transport->config.uart, UART_FLAG_RXNE) != RESET;
+}
+
+int mesh_uart_transport_flush_input(struct mesh_uart_transport *transport)
+{
+    if (transport == NULL || !transport->initialized || transport->config.uart == NULL) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    return drain_rx_fifo(transport);
 }
 
 #else
@@ -567,6 +582,15 @@ bool mesh_uart_transport_rx_pending(const struct mesh_uart_transport *transport)
     }
 
     return buffered > 0u;
+}
+
+int mesh_uart_transport_flush_input(struct mesh_uart_transport *transport)
+{
+    if (transport == NULL || !transport->initialized) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    return flush_input(transport);
 }
 
 #endif

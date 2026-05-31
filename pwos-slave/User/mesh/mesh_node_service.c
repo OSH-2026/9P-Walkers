@@ -255,6 +255,12 @@ static int mesh_node_service_receive_frame(
             soft_error = rc;
             continue;
         }
+        if (rc == -(int)MESH_ERR_BAD_FRAME) {
+            (void)mesh_uart_transport_flush_input(&service->ports[index].transport);
+            mesh_diag_recv_frame((uint8_t)index, 0u, rc);
+            soft_error = -(int)MESH_ERR_BUSY;
+            continue;
+        }
 
         mesh_diag_recv_frame((uint8_t)index, 0u, rc);
         return rc;

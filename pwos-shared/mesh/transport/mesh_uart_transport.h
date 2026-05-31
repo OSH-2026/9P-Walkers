@@ -73,6 +73,8 @@ int mesh_uart_transport_receive_frame(
 
 bool mesh_uart_transport_rx_pending(const struct mesh_uart_transport *transport);
 
+int mesh_uart_transport_flush_input(struct mesh_uart_transport *transport);
+
 int mesh_uart_transport_init_default(void);
 
 struct mesh_uart_transport *mesh_uart_transport_default(void);
