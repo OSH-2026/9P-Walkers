@@ -570,7 +570,7 @@ out:
     return rc;
 }
 
-static int mesh_host_runtime_sync_registered_node(
+int mesh_host_runtime_register_assigned_node(
     struct mesh_host_runtime *runtime,
     uint8_t mesh_addr,
     const uint8_t uid[MESH_UID_LEN])
@@ -657,7 +657,7 @@ static int mesh_host_runtime_control_handler(
             return -(int)MESH_ERR_BAD_FRAME;
         }
 
-        return mesh_host_runtime_sync_registered_node(runtime, frame->src, payload.uid);
+        return mesh_host_runtime_register_assigned_node(runtime, frame->src, payload.uid);
     }
 
     case MESH_TYPE_LINK_STATE: {

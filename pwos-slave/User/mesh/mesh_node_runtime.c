@@ -12,10 +12,6 @@ static int mesh_node_runtime_send_register(
     struct mesh_node_runtime *runtime,
     uint8_t next_hop);
 
-static int mesh_node_runtime_send_register_to_port(
-    struct mesh_node_runtime *runtime,
-    uint8_t port_id);
-
 static int mesh_node_runtime_send_neighbor_probe(
     struct mesh_node_runtime *runtime,
     uint8_t next_hop);
@@ -227,27 +223,6 @@ static struct mesh_node_runtime_bootstrap_pending *mesh_node_runtime_find_pendin
     return NULL;
 }
 
-static struct mesh_node_runtime_bootstrap_pending *mesh_node_runtime_find_pending_by_addr(
-    struct mesh_node_runtime *runtime,
-    uint8_t addr)
-{
-    size_t i;
-
-    if (runtime == NULL || addr == MESH_ADDR_UNASSIGNED) {
-        return NULL;
-    }
-
-    for (i = 0u; i < MESH_NODE_RUNTIME_MAX_BOOTSTRAP_PENDING; ++i) {
-        struct mesh_node_runtime_bootstrap_pending *entry = &runtime->pending_bootstrap[i];
-
-        if (entry->used && entry->assign_forwarded && entry->assigned_addr == addr) {
-            return entry;
-        }
-    }
-
-    return NULL;
-}
-
 static struct mesh_node_runtime_bootstrap_pending *mesh_node_runtime_alloc_pending(
     struct mesh_node_runtime *runtime)
 {
@@ -385,8 +360,7 @@ static int mesh_node_runtime_handle_pending_assign(
         return rc;
     }
 
-    pending->assigned_addr = payload.node_addr;
-    pending->assign_forwarded = true;
+    memset(pending, 0, sizeof(*pending));
     return 0;
 }
 
@@ -397,7 +371,6 @@ static int mesh_node_runtime_handle_pending_assign(
  * 本机命中 ASSIGN 后：
  * - 记录 upstream_port（上游 control-plane port）
  * - 更新本机地址
- * - 向上游重发确认 REGISTER
  * - 对所有端口发起 NEIGHBOR_PROBE_REQUEST
  */
 static int mesh_node_runtime_control_handler(
@@ -444,17 +417,6 @@ static int mesh_node_runtime_control_handler(
         runtime->upstream_port = runtime->last_ingress_port;
         runtime->control_plane_addr = frame->src;
 
-        if (runtime->upstream_port != MESH_PROCESSER_INGRESS_PORT_NONE &&
-            runtime->config.send_frame_to_port != NULL) {
-            rc = mesh_node_runtime_send_register_to_port(runtime, runtime->upstream_port);
-        } else {
-            rc = mesh_node_runtime_send_register(runtime, frame->src);
-        }
-        mesh_diag_kv_u32("assign confirm rc", (uint32_t)(int32_t)rc);
-        if (rc != 0) {
-            return rc;
-        }
-
         rc = mesh_node_runtime_probe_all_ports(runtime);
         mesh_diag_kv_u32("assign probe rc", (uint32_t)(int32_t)rc);
         if (rc != 0) {
@@ -500,44 +462,6 @@ static int mesh_node_runtime_send_register(
     return runtime->config.send_frame(
         runtime->config.transport_ctx,
         next_hop,
-        frame,
-        frame_len);
-}
-
-static int mesh_node_runtime_send_register_to_port(
-    struct mesh_node_runtime *runtime,
-    uint8_t port_id)
-{
-    struct mesh_register_payload payload;
-    uint8_t frame[MESH_PROCESSER_FRAME_CAP];
-    size_t frame_len = 0u;
-
-    if (runtime == NULL || !runtime->initialized ||
-        runtime->config.send_frame_to_port == NULL ||
-        port_id == MESH_PROCESSER_INGRESS_PORT_NONE) {
-        return -(int)MESH_ERR_INVALID_STATE;
-    }
-
-    memset(&payload, 0, sizeof(payload));
-    memcpy(payload.uid, runtime->config.local_uid, sizeof(payload.uid));
-    payload.boot_nonce = runtime->config.boot_nonce;
-    payload.capability_bits = runtime->config.capability_bits;
-    payload.port_bitmap = runtime->config.port_bitmap;
-
-    if (!mesh_build_register(
-            runtime->processor.config.local_addr,
-            mesh_node_runtime_take_seq(runtime),
-            mesh_node_runtime_default_hop(runtime),
-            &payload,
-            frame,
-            sizeof(frame),
-            &frame_len)) {
-        return -(int)MESH_ERR_BAD_FRAME;
-    }
-
-    return runtime->config.send_frame_to_port(
-        runtime->config.transport_ctx,
-        port_id,
         frame,
         frame_len);
 }
@@ -923,25 +847,6 @@ int mesh_node_runtime_process_frame_from_port(
             frame_data,
             frame_len,
             ingress_port);
-    }
-
-    if (frame.type == MESH_TYPE_REGISTER &&
-        frame.src != MESH_ADDR_UNASSIGNED &&
-        frame.dst == MESH_ADDR_UNASSIGNED &&
-        frame.src != runtime->processor.config.local_addr &&
-        runtime->upstream_port != MESH_PROCESSER_INGRESS_PORT_NONE) {
-        struct mesh_node_runtime_bootstrap_pending *pending;
-
-        pending = mesh_node_runtime_find_pending_by_addr(runtime, frame.src);
-        if (pending != NULL && pending->assign_forwarded) {
-            int rc = mesh_node_runtime_send_neighbor_probe_to_port(runtime, pending->ingress_port);
-
-            memset(pending, 0, sizeof(*pending));
-            if (rc != 0) {
-                return rc;
-            }
-        }
-        return mesh_node_runtime_send_raw_to_upstream(runtime, frame_data, frame_len);
     }
 
     if (frame.type == MESH_TYPE_LINK_STATE &&

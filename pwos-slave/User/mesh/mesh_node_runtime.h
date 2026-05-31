@@ -73,8 +73,6 @@ struct mesh_node_runtime_bootstrap_pending {
     uint8_t uid[MESH_UID_LEN];
     uint32_t boot_nonce;
     uint8_t ingress_port;
-    uint8_t assigned_addr;
-    bool assign_forwarded;
 };
 
 /**

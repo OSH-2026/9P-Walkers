@@ -217,7 +217,6 @@ static void test_assign_updates_local_addr_and_allows_server_reply(void)
     struct fake_server_ctx server_ctx;
     struct mesh_assign_payload assign_payload;
     struct mesh_frame_view view;
-    struct mesh_register_payload register_payload;
     struct m9p_frame_view mini9p_view;
     uint8_t assign_frame[160];
     uint8_t probe_response_frame[64];
@@ -229,7 +228,6 @@ static void test_assign_updates_local_addr_and_allows_server_reply(void)
     size_t mesh_len = 0u;
     uint8_t next_hop = 0u;
     bool is_local = false;
-    size_t register_tx_index;
     size_t mini9p_tx_index;
     size_t tx_count_before_request;
     const uint8_t uid[MESH_UID_LEN] = {0xA1u, 0xA2u, 0xA3u, 0xA4u, 0xA5u, 0xA6u, 0xA7u, 0xA8u};
@@ -259,18 +257,7 @@ static void test_assign_updates_local_addr_and_allows_server_reply(void)
     assert(mesh_node_runtime_poll_once(&runtime) == 0);
     assert(runtime.cluster.config.local_addr == 0x24u);
     assert(runtime.processor.config.local_addr == 0x24u);
-    register_tx_index = find_tx_frame_type(&transport, MESH_TYPE_REGISTER);
-    assert(register_tx_index < transport.tx_count);
-    assert(transport.tx_next_hop[register_tx_index] == 0x00u);
-    assert(mesh_decode_frame(
-        transport.tx_queue[register_tx_index].data,
-        transport.tx_queue[register_tx_index].len,
-        &view));
-    assert(view.type == MESH_TYPE_REGISTER);
-    assert(view.src == 0x24u);
-    assert(view.dst == MESH_ADDR_UNASSIGNED);
-    assert(mesh_parse_register(&view, &register_payload));
-    assert(memcmp(register_payload.uid, uid, sizeof(uid)) == 0);
+    assert(find_tx_frame_type(&transport, MESH_TYPE_REGISTER) == transport.tx_count);
     assert(find_tx_frame_type(&transport, MESH_TYPE_NEIGHBOR_PROBE_REQUEST) < transport.tx_count);
 
     assert(mesh_build_neighbor_probe_response(

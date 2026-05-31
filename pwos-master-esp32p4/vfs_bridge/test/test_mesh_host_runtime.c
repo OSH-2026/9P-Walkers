@@ -372,13 +372,14 @@ static void process_register(struct mesh_host_runtime *runtime, uint8_t src, uin
 }
 
 /*
- * bootstrap REGISTER 的 src 仍是 0xFF，host 此时只应继续控制面流程，
- * 不能把节点提前暴露给上层 VFS。
+ * bootstrap REGISTER 的 src 仍是 0xFF，host 此时不能把节点暴露给上层 VFS。
+ * ASSIGN 成功后由调用方显式注册 UID/addr，二次 REGISTER 不再是必要条件。
  */
-static void test_unassigned_register_waits_for_confirmed_register(void)
+static void test_unassigned_register_waits_for_assigned_registration(void)
 {
     struct mesh_host_runtime runtime;
     struct fake_mesh_io io;
+    uint8_t uid[MESH_UID_LEN];
     bool online = true;
 
     init_runtime(&runtime, &io);
@@ -389,8 +390,9 @@ static void test_unassigned_register_waits_for_confirmed_register(void)
                cluster_get_node_online(cluster_config_mesh_cluster(), MESH_ADDR_UNASSIGNED, &online),
                -(int)MESH_ERR_NO_ROUTE);
 
-    process_register(&runtime, 0x11u, 0x05u);
-    expect_int("confirmed register visible", cluster_vfs_attach("mcu1"), -(int)M9P_ERR_EAGAIN);
+    fill_uid(uid, 0x05u);
+    expect_int("assign registers node", mesh_host_runtime_register_assigned_node(&runtime, 0x11u, uid), 0);
+    expect_int("assigned node visible", cluster_vfs_attach("mcu1"), -(int)M9P_ERR_EAGAIN);
 }
 
 static void process_link_state(
@@ -759,8 +761,8 @@ int main(void)
 {
     printf("mesh_host_runtime test runner start\n");
 
-    run_test("test_unassigned_register_waits_for_confirmed_register",
-             test_unassigned_register_waits_for_confirmed_register);
+    run_test("test_unassigned_register_waits_for_assigned_registration",
+             test_unassigned_register_waits_for_assigned_registration);
     run_test("test_register_broadcast_updates_vfs_without_direct_link",
              test_register_broadcast_updates_vfs_without_direct_link);
     run_test("test_neighbor_probe_request_gets_host_response_without_topology",

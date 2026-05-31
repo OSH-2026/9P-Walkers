@@ -11,7 +11,7 @@
  * 2. 初始化 mesh_host_runtime（将串口 fd 作为 transport_ctx 传入）
  * 3. 轮询 mesh_host_runtime_poll_once()，接收从机的 REGISTER 帧
  * 4. 收到第一次 REGISTER（src=dst=UNASSIGNED）时回送 ASSIGN，给节点分配地址
- * 5. 节点收到 ASSIGN 后会发送第二次 REGISTER（src=分配地址），确认上线
+ * 5. ASSIGN 成功发出后主机立即注册节点；旧固件的二次 REGISTER 仅作幂等刷新
  * 6. 从机通过 LINK_STATE 上报真实邻居边后，host runtime 下发 ROUTE_UPDATE
  * 7. cluster_vfs_attach("mcuN") 挂载节点，然后 cluster_vfs_read_path 读文件
  *
@@ -98,7 +98,6 @@
  */
 struct pc_master_node_slot {
     bool used;                  /**< 是否已分配给某个 UID */
-    bool confirmed;             /**< 是否收到带正式 src 地址的确认 REGISTER */
     uint8_t uid[MESH_UID_LEN];  /**< REGISTER 中的硬件 UID */
     uint8_t mesh_addr;          /**< 本次运行分配的 mesh 地址 */
     char name[MESH_MAX_NODE_NAME + 1u]; /**< 本次运行分配的节点名，如 mcu1 */
@@ -115,6 +114,7 @@ struct pc_mesh_transport {
     uint16_t next_seq;                       /**< 下一个待发送帧的序列号（用于 Mesh 帧头） */
     size_t target_node_count;                /**< 本次 smoke test 期望的节点数量 */
     size_t assigned_node_count;              /**< 已分配过槽位的节点数量 */
+    struct mesh_host_runtime *runtime;       /**< host runtime，用于 ASSIGN 后立即注册节点 */
     struct pc_master_node_slot nodes[PC_MASTER_MAX_TARGET_NODES]; /**< 节点分配表 */
 };
 
@@ -634,7 +634,7 @@ static bool pc_master_target_routes_ready(struct pc_mesh_transport *transport, c
         return false;
     }
     slot = pc_master_find_node_by_name(transport, target);
-    if (slot == NULL || !slot->confirmed) {
+    if (slot == NULL || !slot->used) {
         return false;
     }
     if (cluster_can_reach(mesh_cluster, slot->mesh_addr, &reachable) != 0 || !reachable) {
@@ -668,7 +668,6 @@ static struct pc_master_node_slot *pc_master_allocate_node(
     slot = &transport->nodes[index];
     memset(slot, 0, sizeof(*slot));
     slot->used = true;
-    slot->confirmed = false;
     memcpy(slot->uid, uid, MESH_UID_LEN);
     slot->mesh_addr = pc_master_node_addr_for_index(index);
     (void)snprintf(slot->name, sizeof(slot->name), PC_MASTER_NODE_NAME_FMT, index + 1u);
@@ -698,8 +697,8 @@ static void pc_master_print_uid(const uint8_t uid[MESH_UID_LEN])
  * @param[in] register_frame 已解码的 REGISTER 帧视图
  * @return 0 = 成功；负数错误码（-MESH_ERR_BAD_FRAME 表示帧解析失败）
  *
- * @note ASSIGN 发送后节点地址尚未最终确认，实际在线状态要等节点
- *       收到 ASSIGN 后发送第二次 REGISTER（带分配到的地址）才算正式完成。
+ * @note ASSIGN 成功发出后，PC 主控立即把该 UID/地址注册进 host runtime；
+ *       后续二次 REGISTER 只作为旧固件的幂等刷新。
  */
 static int pc_mesh_assign_bootstrap_node(
     struct pc_mesh_transport *transport,
@@ -710,6 +709,7 @@ static int pc_mesh_assign_bootstrap_node(
     struct pc_master_node_slot *slot;
     uint8_t assign_frame[PC_MASTER_FRAME_CAP];
     size_t assign_len = 0u;
+    int rc;
 
     if (!mesh_parse_register(register_frame, &register_payload)) {
         return -(int)MESH_ERR_BAD_FRAME;
@@ -746,16 +746,27 @@ static int pc_mesh_assign_bootstrap_node(
     printf("[PC→mesh] ASSIGN %s addr=0x%02x uid=", slot->name, assign_payload.node_addr);
     pc_master_print_uid(slot->uid);
     printf(" (%zu bytes)\n", assign_len);
-    return write_all(transport->fd, assign_frame, assign_len);
+    rc = write_all(transport->fd, assign_frame, assign_len);
+    if (rc != 0) {
+        return rc;
+    }
+
+    if (transport->runtime != NULL) {
+        rc = mesh_host_runtime_register_assigned_node(
+            transport->runtime,
+            slot->mesh_addr,
+            slot->uid);
+        if (rc != 0) {
+            return rc;
+        }
+    }
+    return 0;
 }
 
 /**
- * @brief 确认已分配地址的从节点正式上线
+ * @brief 兼容旧固件的二次 REGISTER 刷新
  *
- * 当收到第二次 REGISTER（src=已分配地址，dst=UNASSIGNED）时调用。
- * 这里只确认节点已经完成地址分配，不注入 host->node 直连边。
- * 拓扑边必须来自从机实际上报的 LINK_STATE，避免把中继后面的 child
- * 错误建模为 host 直连节点。
+ * 新协议不依赖二次 REGISTER；若旧固件仍发送，刷新 runtime/VFS 绑定即可。
  *
  * @param[in] transport  指向 pc_mesh_transport 的指针
  * @param[in] mesh_addr  从节点被分配的 Mesh 地址（MESH_ADDR_UNASSIGNED 为非法）
@@ -783,9 +794,17 @@ static int pc_mesh_confirm_assigned_node(struct pc_mesh_transport *transport, ui
     if (rc != 0) {
         return rc;
     }
+    if (transport->runtime != NULL) {
+        rc = mesh_host_runtime_register_assigned_node(
+            transport->runtime,
+            slot->mesh_addr,
+            slot->uid);
+        if (rc != 0) {
+            return rc;
+        }
+    }
 
-    slot->confirmed = true;
-    printf("[mesh→PC] confirmed %s addr=0x%02x; waiting for LINK_STATE topology\n",
+    printf("[mesh→PC] refreshed %s addr=0x%02x from legacy REGISTER\n",
            slot->name,
            slot->mesh_addr);
     return 0;
@@ -795,10 +814,10 @@ static int pc_mesh_confirm_assigned_node(struct pc_mesh_transport *transport, ui
  * @brief 接收并处理一个 Mesh 帧（transport receive_frame 实现）
  *
  * 从串口读取一个完整的 Mesh 帧，解码帧头并打印诊断信息。
- * 对两次 REGISTER 有不同处理：
+ * 对 REGISTER 有不同处理：
  * - 第一次（src=dst=UNASSIGNED）：分配地址并回送 ASSIGN，返回 -MESH_ERR_BUSY
  *   告知调用方本帧已被消费无需进一步处理。
- * - 第二次（src≠UNASSIGNED, dst=UNASSIGNED）：确认节点上线，正常返回。
+ * - 旧固件二次 REGISTER（src≠UNASSIGNED, dst=UNASSIGNED）：幂等刷新，正常返回。
  *
  * @param[in]  transport_ctx 指向 pc_mesh_transport 的指针
  * @param[out] rx_data      接收缓冲区
@@ -898,8 +917,11 @@ static int init_runtime(struct mesh_host_runtime *runtime, struct pc_mesh_transp
     rc = mesh_host_runtime_init(runtime, &config);
     if (rc != 0) {
         fprintf(stderr, "mesh_host_runtime_init failed: %d\n", rc);
+        return rc;
     }
-    return rc;
+
+    transport->runtime = runtime;
+    return 0;
 }
 
 /**
