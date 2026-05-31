@@ -201,24 +201,32 @@
 
 目标：用 PC 单测覆盖最小闭环，避免依赖旧分支 diff。
 
-1. 更新 shared processor tests：
-   - receive callback 输出 ingress port。
-   - `poll_once()` 将 ingress port 传到新的 `_from_port()` 路径。
-
-2. 更新 node runtime PC tests：
+1. node runtime PC tests（需要补/确认）：
    - `NEIGHBOR_PROBE_REQUEST` 不转发，接收端从同一 ingress port 直接回 `NEIGHBOR_PROBE_RESPONSE`。
    - 只有 `NEIGHBOR_PROBE_RESPONSE` 会建立 direct neighbor `addr -> port`。
-   - 本机 ASSIGN 从某个 ingress port 到达后，runtime 记录 upstream port。
+   - 本机 ASSIGN 从某个 ingress port 到达后，runtime 记录 upstream/control-plane，并广播 `NEIGHBOR_PROBE_REQUEST`。
+   - 收到 `NEIGHBOR_PROBE_RESPONSE` 后学习 `neighbor_addr -> ingress_port`，并在 upstream/control-plane 已知时上报 `LINK_STATE(src=本机, neighbor=neighbor_addr)`。
    - 下游 REGISTER 从 port N 到达后，pending 表记录 `uid + boot_nonce -> N`。
    - 主机 ASSIGN 到达后，原始 ASSIGN 从 port N 发出。
    - 学习 `payload.node_addr -> port N`，mini9P/后续转发使用 service 的动态 addr->port 查表。
-   - 上报 LINK_STATE 到 upstream port。
+   - pending ASSIGN 回转后向 upstream port 上报 `LINK_STATE(src=relay, neighbor=child)`。
 
-3. 更新 host runtime/service tests：
-   - LINK_STATE from relay about child 后，topology/connectivity/route sync 行为符合现有 controller 模型。
-   - 若新增 route sync，下发帧是主机生成的 ROUTE_UPDATE，不是节点间邻居传播。
+2. host runtime/service tests（已补，保留验收）：
+   - LINK_STATE from relay about child 后，topology/connectivity/route sync 行为符合 controller 模型。
+   - 主机生成 `ROUTE_UPDATE`，不是节点间邻居传播。
+   - route sync 使用有向 topology：只输入 `A -> B` 时不得生成 `B -> A` 路由；补充 `B -> A` 后才允许生成反向路径。
+   - 三跳 topology 下，主机向不同 source 下发各自视角的 `ROUTE_UPDATE(dst,next_hop)`。
 
-4. 测试断言风格：
+3. shared processor ingress-port tests（可选，不作为当前闭环阻塞项）：
+   - 当前相关构建已覆盖 5 参数 receive callback 编译兼容。
+   - 若后续补 shared processor 单测，只需验证 `poll_once()` 将 receive callback 的 ingress port 传入 `_from_port()`；不再重复覆盖 bootstrap 业务。
+
+4. 不需要新增的测试：
+   - 不新增 Wi-Fi、`mesh_wifi`、`wifi_supported`、虚拟 Wi-Fi port 相关测试。
+   - 不新增静态 `neighbor_addr` 配置测试。
+   - 不测试 service `addr_ports` 枚举接口，因为该接口已从计划中删除。
+
+5. 测试断言风格：
    - 不依赖旧 `tx_count` 固定下标来表达主行为。
    - 通过解析发出的 mesh frame type/src/dst/payload 和 service 学到的 addr->port 映射来断言。
 
