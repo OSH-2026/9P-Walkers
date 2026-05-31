@@ -9,7 +9,7 @@
 #include "mesh_host_runtime.h"
 
 #define TEST_FRAME_CAP (MESH_FRAME_OVERHEAD + MESH_MAX_PAYLOAD_LEN)
-#define TEST_QUEUE_CAP 32u
+#define TEST_QUEUE_CAP 64u
 
 static int g_failures;
 
@@ -405,6 +405,49 @@ static void decode_last_tx(
     }
 }
 
+static bool tx_has_route_update(
+    struct fake_mesh_io *io,
+    uint8_t owner,
+    uint8_t route_dst,
+    uint8_t route_next_hop)
+{
+    size_t i;
+
+    for (i = 0u; i < io->tx_count; ++i) {
+        struct mesh_frame_view frame;
+        struct mesh_route_update_payload payload;
+
+        if (!mesh_decode_frame(io->tx_frames[i], io->tx_lens[i], &frame)) {
+            continue;
+        }
+        if (frame.type != MESH_TYPE_ROUTE_UPDATE || frame.dst != owner) {
+            continue;
+        }
+        if (!mesh_parse_route_update(&frame, &payload)) {
+            continue;
+        }
+        if (payload.dst == route_dst &&
+            payload.next_hop == route_next_hop &&
+            payload.action == MESH_ROUTE_SET) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void expect_route_update(
+    const char *label,
+    struct fake_mesh_io *io,
+    uint8_t owner,
+    uint8_t route_dst,
+    uint8_t route_next_hop)
+{
+    if (!tx_has_route_update(io, owner, route_dst, route_next_hop)) {
+        failf(label, "route update not found");
+    }
+}
+
 /*
  * REGISTER 必须能在 runtime 中自动落到 VFS，
  * 但这里还不应该凭空伪造一条 host <-> node 直连边。
@@ -453,8 +496,7 @@ static void test_link_state_to_host_enables_attach_over_mesh_client(void)
 
     queue_rattach(&io, 0x11u, 1u);
     expect_int("attach over mesh", cluster_vfs_attach("mcu1"), 0);
-    expect_int("attach tx count", (int)io.tx_count, 1);
-    expect_int("attach next hop", io.tx_next_hops[0], 0x11u);
+    expect_int("attach next hop", io.tx_next_hops[io.tx_count - 1u], 0x11u);
 
     decode_last_tx(&io, &mesh_view, &m9p_view);
     expect_int("attach mesh type", mesh_view.type, MESH_TYPE_MINI9P);
@@ -500,9 +542,39 @@ static void test_routed_read_path_uses_cluster_next_hop(void)
     expect_int("route read_path", cluster_vfs_read_path("/mcu2/dev/temp", buf, &len), 0);
     expect_u16("route read len", len, (uint16_t)sizeof(expected));
     expect_mem("route read data", buf, expected, sizeof(expected));
-    expect_int("route tx count", (int)io.tx_count, 5);
-    expect_int("route attach next hop", io.tx_next_hops[0], 0x11u);
-    expect_int("route walk next hop", io.tx_next_hops[1], 0x11u);
+    expect_int("route attach next hop", io.tx_next_hops[io.tx_count - 5u], 0x11u);
+    expect_int("route walk next hop", io.tx_next_hops[io.tx_count - 4u], 0x11u);
+}
+
+static void test_link_state_triggers_all_pairs_route_updates(void)
+{
+    struct mesh_host_runtime runtime;
+    struct fake_mesh_io io;
+    struct cluster *cluster;
+    size_t baseline_tx_count;
+
+    init_runtime(&runtime, &io);
+    process_register(&runtime, 0x11u, 0x31u);
+    process_register(&runtime, 0x22u, 0x32u);
+    process_register(&runtime, 0x33u, 0x33u);
+
+    cluster = cluster_config_mesh_cluster();
+    expect_int("add host a", cluster_add_link(cluster, 0x00u, 0x11u, 1u, true), 0);
+    expect_int("add a b", cluster_add_link(cluster, 0x11u, 0x22u, 1u, true), 0);
+
+    baseline_tx_count = io.tx_count;
+    process_link_state(&runtime, 0x22u, 0x33u, 1u);
+
+    expect_int("route sync emitted", io.tx_count > baseline_tx_count, 1);
+    expect_route_update("A to host", &io, 0x11u, 0x00u, 0x00u);
+    expect_route_update("A to B", &io, 0x11u, 0x22u, 0x22u);
+    expect_route_update("A to C", &io, 0x11u, 0x33u, 0x22u);
+    expect_route_update("B to host", &io, 0x22u, 0x00u, 0x11u);
+    expect_route_update("B to A", &io, 0x22u, 0x11u, 0x11u);
+    expect_route_update("B to C", &io, 0x22u, 0x33u, 0x33u);
+    expect_route_update("C to host", &io, 0x33u, 0x00u, 0x22u);
+    expect_route_update("C to A", &io, 0x33u, 0x11u, 0x22u);
+    expect_route_update("C to B", &io, 0x33u, 0x22u, 0x22u);
 }
 
 /*
@@ -578,6 +650,8 @@ int main(void)
              test_link_state_to_host_enables_attach_over_mesh_client);
     run_test("test_routed_read_path_uses_cluster_next_hop",
              test_routed_read_path_uses_cluster_next_hop);
+    run_test("test_link_state_triggers_all_pairs_route_updates",
+             test_link_state_triggers_all_pairs_route_updates);
     run_test("test_request_loop_processes_register_before_response",
              test_request_loop_processes_register_before_response);
     run_test("test_link_loss_marks_downstream_node_offline",

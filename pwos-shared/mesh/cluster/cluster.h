@@ -194,6 +194,19 @@ int cluster_lookup_next_hop(
     bool *out_is_local);
 
 /*
+ * 只读计算：从 topology 视角计算任意 source 到 dst 的下一跳。
+ *
+ * 该接口不写入 cluster->routes，也不改变 routes_dirty；适合主机 controller
+ * 即算即发 ROUTE_UPDATE 给从机。仅 CLUSTER_MODE_TOPOLOGY 有意义。
+ */
+int cluster_compute_next_hop_from(
+    const struct cluster *cluster,
+    uint8_t source,
+    uint8_t dst,
+    uint8_t *out_next_hop,
+    uint8_t *out_metric);
+
+/*
  * 查询某个目标地址当前是否仍然可达。
  *
  * 该接口是 cluster_lookup_next_hop() 的布尔封装，便于上层在节点离线、
