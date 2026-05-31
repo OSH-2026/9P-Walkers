@@ -628,11 +628,23 @@ int mesh_node_runtime_process_frame_from_port(
 
     /* NEIGHBOR_PROBE_RESPONSE: 唯一能建立直连邻居的帧类型。 */
     if (frame.type == MESH_TYPE_NEIGHBOR_PROBE_RESPONSE) {
+        int rc;
+
         if (frame.src == MESH_ADDR_UNASSIGNED ||
             ingress_port == MESH_PROCESSER_INGRESS_PORT_NONE) {
             return 0;
         }
-        return mesh_node_runtime_refresh_direct_peer(runtime, frame.src, ingress_port);
+        rc = mesh_node_runtime_refresh_direct_peer(runtime, frame.src, ingress_port);
+        if (rc != 0) {
+            return rc;
+        }
+        if (runtime->processor.config.local_addr == MESH_ADDR_UNASSIGNED ||
+            runtime->control_plane_addr == MESH_ADDR_UNASSIGNED ||
+            runtime->upstream_port == MESH_PROCESSER_INGRESS_PORT_NONE ||
+            runtime->config.send_frame_to_port == NULL) {
+            return 0;
+        }
+        return mesh_node_runtime_send_link_state_to_upstream(runtime, frame.src);
     }
 
     if (frame.type == MESH_TYPE_REGISTER &&
