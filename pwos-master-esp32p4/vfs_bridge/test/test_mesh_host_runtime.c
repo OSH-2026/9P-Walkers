@@ -602,6 +602,18 @@ static void test_link_state_to_host_enables_attach_over_mesh_client(void)
     expect_u16("attach mini9p tag", m9p_view.tag, 1u);
 }
 
+static void test_attach_timeout_maps_mesh_busy_to_m9p_eagain(void)
+{
+    struct mesh_host_runtime runtime;
+    struct fake_mesh_io io;
+
+    init_runtime(&runtime, &io);
+    process_register(&runtime, 0x11u, 0x21u);
+    process_link_state(&runtime, 0x11u, 0x00u, 1u);
+
+    expect_int("attach timeout", cluster_vfs_attach("mcu1"), -(int)M9P_ERR_EAGAIN);
+}
+
 /*
  * 这条测试覆盖真正的多跳访问主路径：
  * host -> mcu1 -> mcu2。
@@ -759,6 +771,8 @@ int main(void)
              test_neighbor_probe_response_is_consumed_by_host);
     run_test("test_link_state_to_host_enables_attach_over_mesh_client",
              test_link_state_to_host_enables_attach_over_mesh_client);
+    run_test("test_attach_timeout_maps_mesh_busy_to_m9p_eagain",
+             test_attach_timeout_maps_mesh_busy_to_m9p_eagain);
     run_test("test_routed_read_path_uses_cluster_next_hop",
              test_routed_read_path_uses_cluster_next_hop);
     run_test("test_link_state_triggers_all_pairs_route_updates",

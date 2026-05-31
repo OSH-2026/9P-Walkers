@@ -413,6 +413,25 @@ static int mesh_host_runtime_handle_neighbor_probe(
         response_len);
 }
 
+static int mesh_host_runtime_map_transport_error_to_m9p(int rc)
+{
+    if (rc == -(int)MESH_ERR_BUSY) {
+        return -(int)M9P_ERR_EAGAIN;
+    }
+    if (rc == -(int)MESH_ERR_NO_ROUTE) {
+        return -(int)M9P_ERR_EAGAIN;
+    }
+    if (rc == -(int)MESH_ERR_BAD_FRAME) {
+        return -(int)M9P_ERR_EIO;
+    }
+    if (rc == -(int)MESH_ERR_UNSUPPORTED_TYPE ||
+        rc == -(int)MESH_ERR_NOT_AUTHORIZED ||
+        rc == -(int)MESH_ERR_INVALID_STATE) {
+        return -(int)M9P_ERR_EIO;
+    }
+    return rc;
+}
+
 static int mesh_host_runtime_client_request(
     void *transport_ctx,
     const uint8_t *tx_data,
@@ -512,6 +531,7 @@ static int mesh_host_runtime_client_request(
             rx_len,
             &ingress_port);
         if (rc != 0) {
+            rc = mesh_host_runtime_map_transport_error_to_m9p(rc);
             goto out;
         }
 
@@ -540,6 +560,7 @@ static int mesh_host_runtime_client_request(
 
         rc = mesh_host_runtime_process_frame(runtime, runtime->processor.rx_buffer, *rx_len);
         if (rc != 0) {
+            rc = mesh_host_runtime_map_transport_error_to_m9p(rc);
             goto out;
         }
     }
