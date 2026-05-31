@@ -242,7 +242,7 @@ static void test_assign_updates_local_addr_and_allows_server_reply(void)
     memcpy(assign_payload.node_name, "mcu1", 5u);
 
     assert(mesh_build_assign(
-        0x01u,
+        0x00u,
         MESH_ADDR_UNASSIGNED,
         0x1001u,
         6u,
@@ -256,7 +256,7 @@ static void test_assign_updates_local_addr_and_allows_server_reply(void)
     assert(runtime.processor.config.local_addr == 0x24u);
     register_tx_index = find_tx_frame_type(&transport, MESH_TYPE_REGISTER);
     assert(register_tx_index < transport.tx_count);
-    assert(transport.tx_next_hop[register_tx_index] == 0x01u);
+    assert(transport.tx_next_hop[register_tx_index] == 0x00u);
     assert(mesh_decode_frame(
         transport.tx_queue[register_tx_index].data,
         transport.tx_queue[register_tx_index].len,
@@ -281,6 +281,9 @@ static void test_assign_updates_local_addr_and_allows_server_reply(void)
     assert(cluster_lookup_next_hop(&runtime.cluster, 0x01u, &next_hop, &is_local) == 0);
     assert(!is_local);
     assert(next_hop == 0x01u);
+    assert(cluster_lookup_next_hop(&runtime.cluster, 0x00u, &next_hop, &is_local) == 0);
+    assert(!is_local);
+    assert(next_hop == 0x01u);
     assert(transport.learned_count == 1u);
     assert(transport.learned_addr[0] == 0x01u);
     assert(transport.learned_port[0] == 2u);
@@ -288,7 +291,7 @@ static void test_assign_updates_local_addr_and_allows_server_reply(void)
 
     assert(m9p_build_tclunk(0x3344u, 9u, request_frame, sizeof(request_frame), &request_len));
     assert(mesh_build_mini9p_frame(
-        0x01u,
+        0x00u,
         0x24u,
         0x1002u,
         6u,
@@ -313,7 +316,7 @@ static void test_assign_updates_local_addr_and_allows_server_reply(void)
         &view));
     assert(view.type == MESH_TYPE_MINI9P);
     assert(view.src == 0x24u);
-    assert(view.dst == 0x01u);
+    assert(view.dst == 0x00u);
     assert(m9p_decode_frame(view.payload, view.payload_len, &mini9p_view));
     assert((mini9p_view.type & 0x80u) != 0u);
     assert(mini9p_view.tag == 0x3344u);

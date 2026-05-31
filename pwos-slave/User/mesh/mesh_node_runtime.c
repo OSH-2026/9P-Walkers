@@ -116,6 +116,36 @@ static bool mesh_node_runtime_has_direct_peer(
         next_hop == mesh_addr;
 }
 
+static int mesh_node_runtime_ensure_upstream_control_route(struct mesh_node_runtime *runtime)
+{
+    uint8_t next_hop = 0u;
+    bool is_local = false;
+    int rc;
+
+    if (runtime == NULL ||
+        runtime->processor.config.local_addr == MESH_ADDR_UNASSIGNED ||
+        runtime->control_plane_addr == MESH_ADDR_UNASSIGNED ||
+        runtime->upstream_peer_addr == MESH_ADDR_UNASSIGNED ||
+        runtime->control_plane_addr == runtime->processor.config.local_addr) {
+        return 0;
+    }
+
+    rc = cluster_lookup_next_hop(
+        &runtime->cluster,
+        runtime->control_plane_addr,
+        &next_hop,
+        &is_local);
+    if (rc == 0 || rc != -(int)MESH_ERR_NO_ROUTE) {
+        return rc;
+    }
+
+    return cluster_add_route(
+        &runtime->cluster,
+        runtime->control_plane_addr,
+        runtime->upstream_peer_addr,
+        1u);
+}
+
 /*
  * 收到 NEIGHBOR_PROBE_REQUEST 后，若本机已有正式地址，立即从同一
  * ingress port 回 NEIGHBOR_PROBE_RESPONSE，不使用普通转发路径。
@@ -704,6 +734,7 @@ int mesh_node_runtime_init(
     runtime->last_ingress_port = MESH_PROCESSER_INGRESS_PORT_NONE;
     runtime->upstream_port = MESH_PROCESSER_INGRESS_PORT_NONE;
     runtime->control_plane_addr = MESH_ADDR_UNASSIGNED;
+    runtime->upstream_peer_addr = MESH_ADDR_UNASSIGNED;
 
     if (runtime->config.auto_register_on_init) {
         rc = mesh_node_runtime_send_register(runtime, runtime->config.bootstrap_next_hop);
@@ -799,7 +830,12 @@ int mesh_node_runtime_process_frame_from_port(
             return rc;
         }
         if (ingress_port == runtime->upstream_port) {
+            runtime->upstream_peer_addr = frame.src;
             runtime->neighbor_probe_retries_left = 0u;
+            rc = mesh_node_runtime_ensure_upstream_control_route(runtime);
+            if (rc != 0) {
+                return rc;
+            }
         }
         if (already_known) {
             return 0;

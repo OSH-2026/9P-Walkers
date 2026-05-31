@@ -95,6 +95,8 @@ struct mesh_node_runtime {
     uint8_t upstream_port;
     /** 上游 control-plane mesh 地址，用于构造早期 LINK_STATE dst。 */
     uint8_t control_plane_addr;
+    /** 上游物理口直连邻居地址；由 upstream_port 上收到的 PROBE_RESPONSE 学到。 */
+    uint8_t upstream_peer_addr;
     /** ASSIGN 后邻居探测剩余重试次数。 */
     uint8_t neighbor_probe_retries_left;
     /** 下一次邻居探测重试的时间戳。 */
