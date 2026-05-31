@@ -89,6 +89,8 @@
 | MESH_TYPE_TIME_SYNC | 0x14 | 控制面 | 四时间戳时钟同步 |
 | MESH_TYPE_ROUTE_UPDATE | 0x15 | 控制面 | 路由项更新 |
 | MESH_TYPE_LINK_STATE | 0x16 | 控制面 | 邻居链路状态上报 |
+| MESH_TYPE_NEIGHBOR_PROBE_REQUEST | 0x17 | 控制面 | 单链路邻居地址探测请求 |
+| MESH_TYPE_NEIGHBOR_PROBE_RESPONSE | 0x18 | 控制面 | 单链路邻居地址探测响应 |
 | MESH_TYPE_ERROR | 0x7F | 控制面 | 错误上报/响应 |
 
 ## 7. 控制面负载定义（v1）
@@ -164,7 +166,34 @@
 | link_up | 1 | 0=down，非0=up |
 | quality | 1 | 链路质量指标 |
 
-### 7.7 ERROR（固定 4 字节）
+语义约束：
+
+- `LINK_STATE(src=A, neighbor=B)` 表示节点 A 上报自己看到的直连邻居事实 `A -> B`。
+- 主机 topology 应按已上报方向记录该边；收到 `A -> B` 时不得自动补成 `B -> A`。
+- 若需要反向路径，必须另行收到 `LINK_STATE(src=B, neighbor=A)`。
+- 当前最小闭环中，`quality` 保持 metric 语义，通常使用 `1`；不复用该字段承载 UART ingress port。
+
+### 7.7 NEIGHBOR_PROBE_REQUEST（固定 0 字节）
+
+无 payload。
+
+行为约束：
+
+- 这是单链路本地请求，不进入普通多跳转发路径。
+- 接收端若已有正式地址，应从同一物理 ingress port 直接回复 `NEIGHBOR_PROBE_RESPONSE(src=本机地址)`。
+- 接收端若仍为未分配地址，可不回复，等待后续重试收敛。
+
+### 7.8 NEIGHBOR_PROBE_RESPONSE（固定 0 字节）
+
+无 payload。
+
+行为约束：
+
+- 这是单链路本地响应，不进入普通多跳转发路径。
+- 发起方收到后，可将 `response.src -> ingress_port` 作为 direct neighbor 学习结果。
+- 当前最小闭环中，节点在学习 direct neighbor 后，若已经知道上游 control-plane，则应向主机上报 `LINK_STATE(src=本机, neighbor=response.src)`。
+
+### 7.9 ERROR（固定 4 字节）
 
 | 字段 | 长度 | 说明 |
 |---|---:|---|
@@ -178,7 +207,8 @@
 3. 中继仅基于 envelope 头进行转发。
 4. 主机识别 UID，分配或恢复节点名，分配短地址。
 5. 主机发送 ASSIGN。
-6. 节点切换为正式地址并进入在线状态。
+6. 节点切换为正式地址并向上游确认 REGISTER。
+7. 节点随后通过 `NEIGHBOR_PROBE_REQUEST/RESPONSE` 学习直连邻居地址，并分别向主机上报各自看到的 `LINK_STATE`。
 
 重连建议：
 

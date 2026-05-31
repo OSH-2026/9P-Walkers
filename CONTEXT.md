@@ -53,7 +53,7 @@ _避免使用_：主机、未注册从机、全局路由控制器
 _避免使用_：用户路径中的子目录、mini9P fid 子节点
 
 **全局拓扑图**：
-主机维护的集群连接图，记录节点与端口之间的链路关系。
+主机维护的集群连接图，记录节点之间已上报的链路方向关系。
 _避免使用_：从机转发表、cluster_vfs 路由表
 
 **从机转发表**：
@@ -83,8 +83,10 @@ _避免使用_：全局拓扑图、从机转发表、节点事实表
 - **节点地址**不进入用户路径或业务 API，只在日志、诊断接口和路由调试信息中展示。
 - **bootstrap 地址**只用于注册阶段；主机下发正式**节点地址**后，从机不再用 bootstrap 地址发送普通控制帧或 mini9P payload。
 - **relay / 中继从机**必须先完成自身注册并获得正式**节点地址**，才能为 **child / 下游从机**转发 bootstrap `REGISTER`。
-- `LINK_STATE(src=relay, neighbor=child)` 表示“中继从机 relay 直连下游从机 child”，主机据此在**全局拓扑图**中记录 `relay -> child` 边。
+- `LINK_STATE(src=relay, neighbor=child)` 表示“中继从机 relay 上报自己直连下游从机 child”，主机据此在**全局拓扑图**中记录 `relay -> child` 这条已上报方向边。
+- 主机不会因为收到 `relay -> child` 就自动补 `child -> relay`；反向路径必须来自 `child` 自己上报的 `LINK_STATE(src=child, neighbor=relay)`。
 - 主机给中继从机下发到下游从机的路由时，`ROUTE_UPDATE(dst=child, next_hop=child)` 中的 `next_hop` 仍是**节点地址**，不是 UART 端口。
+- 主机 route sync 从**全局拓扑图**即时计算各从机视角的 `dst -> next_hop`，生成并下发 `ROUTE_UPDATE`；该计算结果暂不额外存档为独立控制器路由档案。
 - **peer link** 只处理同一条物理链路上的 mini9P 请求/响应分发，不决定帧要转发到哪个节点。
 - **mesh envelope** 位于 mini9P 外层，是**控制面**和多跳转发的唯一入口。
 - mini9P 作为 **mesh envelope** 的 payload 承载文件访问语义，不新增注册、命名、拓扑或路由语义。
