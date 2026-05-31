@@ -32,6 +32,7 @@ option(PWOS_LFS_BACKEND_RAM "Use RAM-backed littlefs for STM32F411 bring-up" ON)
 option(PWOS_ENABLE_MINI9P_SERIAL "Enable STM32F411 Mini9P mesh serial bring-up" ON)
 option(PWOS_ENABLE_LFS_SELFTEST "Populate littlefs debug fixtures on boot" ON)
 option(PWOS_SKIP_LFS_MOUNT "Skip lfs_vfs mount during Mini9P board bring-up" OFF)
+option(PWOS_ENABLE_MESH_DIAG "Enable blocking mesh diagnostic text output on USART1" OFF)
 
 # Enable CMake support for ASM, C and C++ languages
 enable_language(C CXX ASM)
@@ -71,6 +72,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${PWOS_SLAVE_USER_FS_DIR}/lfs_util.c
     ${PWOS_F411_USER_DIR}/drivers/storage/lfs_port.cpp
     ${PWOS_SLAVE_USER_APP_DIR}/fs_selftest.c
+    ${PWOS_SLAVE_USER_APP_DIR}/mesh_diag.c
     ${PWOS_F411_USER_DIR}/app/mesh_node_mini9p_init.c
     ${PWOS_SLAVE_USER_MESH_DIR}/mesh_node_service.c
     ${PWOS_SHARED_MESH_CLUSTER_DIR}/cluster.c
@@ -121,6 +123,9 @@ if(PWOS_ENABLE_LFS_SELFTEST)
 endif()
 if(PWOS_SKIP_LFS_MOUNT)
     target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE PWOS_SKIP_LFS_MOUNT)
+endif()
+if(PWOS_ENABLE_MESH_DIAG)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE PWOS_ENABLE_MESH_DIAG)
 endif()
 
 # Remove wrong libob.a library dependency when using cpp files

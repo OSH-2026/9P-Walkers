@@ -5,7 +5,9 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "usart.h"
+#include "main.h"
+
+extern UART_HandleTypeDef huart1;
 
 static void mesh_diag_write(const char *text)
 {
