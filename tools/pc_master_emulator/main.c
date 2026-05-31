@@ -597,6 +597,55 @@ static struct pc_master_node_slot *pc_master_find_node_by_addr(
     return NULL;
 }
 
+static struct pc_master_node_slot *pc_master_find_node_by_name(
+    struct pc_mesh_transport *transport,
+    const char *name)
+{
+    size_t i;
+
+    if (transport == NULL || name == NULL) {
+        return NULL;
+    }
+
+    for (i = 0u; i < transport->assigned_node_count; ++i) {
+        if (transport->nodes[i].used && strcmp(transport->nodes[i].name, name) == 0) {
+            return &transport->nodes[i];
+        }
+    }
+
+    return NULL;
+}
+
+static bool pc_master_target_routes_ready(struct pc_mesh_transport *transport, const char *target)
+{
+    struct cluster *mesh_cluster = cluster_config_mesh_cluster();
+    struct pc_master_node_slot *slot;
+    uint8_t next_hop = 0u;
+    uint8_t metric = 0u;
+    bool reachable = false;
+
+    if (mesh_cluster == NULL) {
+        return false;
+    }
+    slot = pc_master_find_node_by_name(transport, target);
+    if (slot == NULL || !slot->confirmed) {
+        return false;
+    }
+    if (cluster_can_reach(mesh_cluster, slot->mesh_addr, &reachable) != 0 || !reachable) {
+        return false;
+    }
+    if (cluster_compute_next_hop_from(
+            mesh_cluster,
+            slot->mesh_addr,
+            PC_MASTER_LOCAL_ADDR,
+            &next_hop,
+            &metric) != 0) {
+        return false;
+    }
+
+    return true;
+}
+
 static struct pc_master_node_slot *pc_master_allocate_node(
     struct pc_mesh_transport *transport,
     const uint8_t uid[MESH_UID_LEN])
@@ -865,13 +914,27 @@ static int init_runtime(struct mesh_host_runtime *runtime, struct pc_mesh_transp
  * @param[in] target 节点名称字符串（如 "mcu1"）
  * @return 0 = 挂载成功；负数错误码（ENOTTY/EAGAIN 等）
  */
-static int wait_for_target(struct mesh_host_runtime *runtime, const char *target)
+static int wait_for_target(
+    struct mesh_host_runtime *runtime,
+    struct pc_mesh_transport *transport,
+    const char *target)
 {
     int i;
 
     printf("mesh runtime: waiting for %s; reset the slave now if it already booted\n", target);
     for (i = 0; i < PC_MASTER_DISCOVERY_POLLS; ++i) {
-        int rc = cluster_vfs_attach(target);
+        int rc;
+
+        if (!pc_master_target_routes_ready(transport, target)) {
+            rc = mesh_host_runtime_poll_once(runtime);
+            if (rc != 0 && rc != -(int)MESH_ERR_BUSY && rc != -(int)M9P_ERR_EBUSY) {
+                fprintf(stderr, "mesh_host_runtime_poll_once failed: %d\n", rc);
+                return rc;
+            }
+            continue;
+        }
+
+        rc = cluster_vfs_attach(target);
 
         if (rc == 0) {
             printf("mesh runtime: %s attached\n", target);
@@ -938,7 +1001,10 @@ static int read_health_path(const char *target)
  * @param[in] target_node_count 本次要验证的目标节点数量
  * @return 0 = 测试通过；负数错误码
  */
-static int run_dynamic_sequence(struct mesh_host_runtime *runtime, size_t target_node_count)
+static int run_dynamic_sequence(
+    struct mesh_host_runtime *runtime,
+    struct pc_mesh_transport *transport,
+    size_t target_node_count)
 {
     size_t i;
 
@@ -951,7 +1017,7 @@ static int run_dynamic_sequence(struct mesh_host_runtime *runtime, size_t target
             return -(int)M9P_ERR_EINVAL;
         }
 
-        rc = wait_for_target(runtime, target);
+        rc = wait_for_target(runtime, transport, target);
         if (rc != 0) {
             return rc;
         }
@@ -1033,7 +1099,7 @@ int main(int argc, char **argv)
            node_count);
     rc = init_runtime(&runtime, &transport);
     if (rc == 0) {
-        rc = run_dynamic_sequence(&runtime, transport.target_node_count);
+        rc = run_dynamic_sequence(&runtime, &transport, transport.target_node_count);
         mesh_host_runtime_deinit(&runtime);
     }
 
