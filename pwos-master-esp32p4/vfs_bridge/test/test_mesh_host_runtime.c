@@ -448,6 +448,18 @@ static void expect_route_update(
     }
 }
 
+static void expect_no_route_update(
+    const char *label,
+    struct fake_mesh_io *io,
+    uint8_t owner,
+    uint8_t route_dst,
+    uint8_t route_next_hop)
+{
+    if (tx_has_route_update(io, owner, route_dst, route_next_hop)) {
+        failf(label, "unexpected route update found");
+    }
+}
+
 /*
  * REGISTER 必须能在 runtime 中自动落到 VFS，
  * 但这里还不应该凭空伪造一条 host <-> node 直连边。
@@ -572,6 +584,14 @@ static void test_link_state_triggers_all_pairs_route_updates(void)
     expect_route_update("B to host", &io, 0x22u, 0x00u, 0x11u);
     expect_route_update("B to A", &io, 0x22u, 0x11u, 0x11u);
     expect_route_update("B to C", &io, 0x22u, 0x33u, 0x33u);
+    expect_no_route_update("C no host before reverse", &io, 0x33u, 0x00u, 0x22u);
+    expect_no_route_update("C no A before reverse", &io, 0x33u, 0x11u, 0x22u);
+    expect_no_route_update("C no B before reverse", &io, 0x33u, 0x22u, 0x22u);
+
+    baseline_tx_count = io.tx_count;
+    process_link_state(&runtime, 0x33u, 0x22u, 1u);
+
+    expect_int("reverse route sync emitted", io.tx_count > baseline_tx_count, 1);
     expect_route_update("C to host", &io, 0x33u, 0x00u, 0x22u);
     expect_route_update("C to A", &io, 0x33u, 0x11u, 0x22u);
     expect_route_update("C to B", &io, 0x33u, 0x22u, 0x22u);
