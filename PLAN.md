@@ -96,6 +96,12 @@
 
 目标：实现 `pending REGISTER -> ASSIGN 回转 -> LINK_STATE 上报 -> 主机可下发路由`，复用 Phase 3 已建立的邻居发现能力。
 
+### 修正计划（当前）
+
+- 已撤销 host runtime 中“收到 `A -> B` 后自动补 `B -> A`”的反向补偿实现；topology 必须只反映实际收到的 LINK_STATE 事实。
+- Phase 4 当前必须补的漏项是：收到 `NEIGHBOR_PROBE_RESPONSE src=neighbor_addr` 后，在完成 direct peer 学习后，如果本机已有 `upstream_port/control_plane_addr`，立即向上游发送 `LINK_STATE(src=本机, dst=host, neighbor=neighbor_addr, link_up=1, quality=1)`。
+- 这样 `Host <-> A <-> B` 中，A 在 pending ASSIGN 回转时上报 `A -> B`，B 在自己 ASSIGN 后 probe 到 A 并上报 `B -> A`；主机收到双方事实后才能计算双向路径。
+
 1. 在 `mesh_node_runtime` 增加 relay bootstrap pending 状态：
    - pending 表项：`used, uid[MESH_UID_LEN], boot_nonce, ingress_port`；表上限同 `MESH_NODE_SERVICE_MAX_PORTS`。
 
@@ -110,7 +116,8 @@
    - 本机收到命中自己 UID 的 ASSIGN 后，更新本机 mesh addr。
    - 同时记录 ASSIGN 的 ingress port 为 upstream/control-plane port。
    - 后续本机 REGISTER/LINK_STATE 上报优先发往该 upstream port；未分配前仍可按现有 bootstrap 广播值发送。
-   - 本机 ASSIGN 完成后：a) 向上游发送确认 REGISTER；b) 对所有已启用 UART port 发起 `NEIGHBOR_PROBE_REQUEST`；c) 遍历 service `addr_ports` 表，对每个已用 entry 向上游发送 `LINK_STATE(src=本机, dst=host, neighbor=entry.mesh_addr)`。
+   - 本机 ASSIGN 完成后：a) 向上游发送确认 REGISTER；b) 对所有已启用 UART port 发起 `NEIGHBOR_PROBE_REQUEST`。
+   - 收到 `NEIGHBOR_PROBE_RESPONSE` 后学习 `neighbor_addr -> ingress_port`，并在上游控制面已知时立即上报 `LINK_STATE(src=本机, dst=host, neighbor=neighbor_addr)`。
 
 4. 处理主机 ASSIGN 回转：
    - 收到 `MESH_TYPE_ASSIGN` 时 parse ASSIGN。
@@ -135,7 +142,7 @@
 - 下游通过 relay 完成 ASSIGN 后，会主动向本地 UART 邻居发 `NEIGHBOR_PROBE_REQUEST`，并通过 `NEIGHBOR_PROBE_RESPONSE` 学习 `relay_addr -> port`。
 - 从机 relay 收下游 REGISTER 后不会把下游地址静态写死。
 - 主机 ASSIGN 能沿 pending ingress port 回到下游。
-- relay 学到下游地址对应端口，并向上游上报或重放 LINK_STATE。
+- relay 学到下游地址对应端口，并向上游上报 LINK_STATE。
 
 ## Phase 5: host controller route distribution check/minimal patch
 
@@ -147,6 +154,7 @@
 - `LINK_STATE` 后已调用 `cluster_config_refresh_all_nodes_connectivity(NULL)` 和 `mesh_host_runtime_sync_slots_from_cluster()`，VFS connectivity 更新路径已存在。
 - 现有代码没有 host controller 主动发送 `ROUTE_UPDATE` 的同步逻辑；只有 protocol builder/parser 和从机/cluster 落地 `ROUTE_UPDATE`。
 - host service 已能返回 ingress port；Phase 5 不复制从机静态 `neighbor_addr`，主机发帧仍走 host 现有 `cluster_lookup_next_hop(dst)->send_frame(next_hop)` 机制。
+- host runtime 的反向补偿已经撤销；收到单向 `LINK_STATE(src=A, neighbor=B)` 不会自动补 `B -> A`。
 
 需要补的最小实现：
 
@@ -161,7 +169,9 @@
    - 该接口不得写入或污染主机 `cluster->routes`；`cluster->routes` 继续只表示主机自身 `local_addr` 视角的查询缓存。
    - host runtime 在一次 sync 中枚举每个从机 `source` 和每个目标 `dst`，即时计算 `source -> dst` 的下一跳。
    - 若 `source != dst` 且存在路径，则向 `source` 下发 `ROUTE_UPDATE(dst=dst, next_hop=next_hop, metric=path_cost, action=SET)`。
+   - 计算只使用已收到的有向 topology 边；如果只有 `A -> B` 而没有 `B -> A`，则不得生成 `B` 视角经 `A` 的反向路由。
    - 示例：`Host <-> A <-> B <-> C` 时，全量下发应覆盖每个从机 `source` 到每个其他目标 `dst`：
+     - 前提：主机已经收到/建立 `Host -> A`、`A -> Host`、`A -> B`、`B -> A`、`B -> C`、`C -> B` 这些方向的 topology 事实。
      - 给 `A`:
        - `ROUTE_UPDATE(dst=Host, next_hop=Host)`
        - `ROUTE_UPDATE(dst=B, next_hop=B)`
@@ -176,7 +186,8 @@
        - `ROUTE_UPDATE(dst=B, next_hop=B)`
 
 3. 测试：
-   - 更新/新增 host runtime 测试：构造至少三跳 topology 后，观察主机向路径上不同节点下发各自视角的 `ROUTE_UPDATE`。
+   - 更新/新增 host runtime 测试：构造至少三跳有向 topology，显式输入双方 LINK_STATE 后，观察主机向路径上不同节点下发各自视角的 `ROUTE_UPDATE`。
+   - 增加负向测试：只输入 `A -> B` 时，主机不得自动生成 `B -> A` 方向可达性或反向 ROUTE_UPDATE。
    - 保留一跳中继用例：relay 上报 child 后，能观察到主机向 relay 发送 `ROUTE_UPDATE(dst=child,next_hop=child)`。
    - 断言该帧由 host 生成，不依赖节点间邻居传播。
 
@@ -184,6 +195,7 @@
 
 - LINK_STATE 后 cluster topology 可见 `relay -> child`。
 - 主机能给 relay/相关节点下发指定路由，relay 通过 service 动态 `next_hop addr -> UART port` 查表转发到 child。
+- 单向 LINK_STATE 不产生反向路径；双向路径必须由双方 LINK_STATE 共同建立。
 
 ## Phase 6: tests
 
