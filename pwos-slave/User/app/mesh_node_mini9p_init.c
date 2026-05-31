@@ -5,6 +5,8 @@
 #include "mini9p_server.h"
 #include "node_vfs.h"
 
+#include <string.h>
+
 extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart2;
 
@@ -13,8 +15,21 @@ static struct m9p_server g_mini9p_server;
 
 static int mesh_node_routes_text(void *ctx, char *out, size_t out_cap)
 {
+    size_t used;
+    int rc;
+
     (void)ctx;
-    return mesh_node_runtime_format_routes(mesh_node_service_runtime(), out, out_cap);
+    rc = mesh_node_runtime_format_routes(mesh_node_service_runtime(), out, out_cap);
+    if (rc != 0) {
+        return rc;
+    }
+
+    used = strlen(out);
+    if (used >= out_cap) {
+        return 0;
+    }
+
+    return mesh_node_service_format_addr_ports(out + used, out_cap - used);
 }
 
 int mesh_node_mini9p_init(void)

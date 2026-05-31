@@ -10,7 +10,7 @@
 #include <string.h>
 
 #define SYS_VFS_HEALTH_TEXT "ok\n"
-#define SYS_VFS_ROUTES_TEXT_CAP 128u
+#define SYS_VFS_ROUTES_TEXT_CAP 256u
 
 enum sys_vfs_node_kind {
     SYS_VFS_NODE_DIR = 0,

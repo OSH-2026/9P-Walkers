@@ -132,6 +132,18 @@ struct mesh_node_runtime *mesh_node_service_runtime(void);
  */
 int mesh_node_service_learn_addr_port(uint8_t mesh_addr, uint8_t port_id);
 
+/**
+ * @brief 将动态 mesh addr -> UART port 表格式化为文本。
+ *
+ * 输出用于 /sys/routes 调试文件。该表属于 service 层，runtime 路由表中的
+ * next_hop 仍保持 mesh 地址语义，实际发送前由本表解析到物理 UART 端口。
+ *
+ * @param[out] out 输出缓冲。
+ * @param[in] out_cap 输出缓冲容量。
+ * @return 0 表示成功；负的 MESH_ERR_* 表示失败。
+ */
+int mesh_node_service_format_addr_ports(char *out, size_t out_cap);
+
 #ifdef __cplusplus
 }
 #endif

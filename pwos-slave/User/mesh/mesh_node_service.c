@@ -7,6 +7,7 @@
 
 #include "../app/mesh_diag.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #define MESH_NODE_SERVICE_DEFAULT_LOCAL_ADDR MESH_ADDR_UNASSIGNED
@@ -406,4 +407,41 @@ int mesh_node_service_learn_addr_port(uint8_t mesh_addr, uint8_t port_id)
     }
 
     return mesh_node_service_learn_addr_port_ctx(&g_mesh_node_service, mesh_addr, port_id);
+}
+
+int mesh_node_service_format_addr_ports(char *out, size_t out_cap)
+{
+    size_t used = 0u;
+    size_t i;
+
+    if (!g_mesh_node_service_initialized || out == NULL || out_cap == 0u) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    for (i = 0u; i < MESH_NODE_SERVICE_MAX_PORTS && used < out_cap - 1u; ++i) {
+        const struct mesh_node_service_addr_port *entry = &g_mesh_node_service.addr_ports[i];
+        int written;
+
+        if (!entry->used) {
+            continue;
+        }
+
+        written = snprintf(
+            out + used,
+            out_cap - used,
+            "addr_port addr=0x%02x port=%u\n",
+            entry->mesh_addr,
+            (unsigned)entry->port_id);
+        if (written < 0) {
+            return -(int)MESH_ERR_BAD_FRAME;
+        }
+        if ((size_t)written >= out_cap - used) {
+            used = out_cap - 1u;
+            break;
+        }
+        used += (size_t)written;
+    }
+
+    out[used] = '\0';
+    return 0;
 }
