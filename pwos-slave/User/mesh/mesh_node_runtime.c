@@ -100,6 +100,22 @@ static int mesh_node_runtime_refresh_direct_peer(
     return 0;
 }
 
+static bool mesh_node_runtime_has_direct_peer(
+    struct mesh_node_runtime *runtime,
+    uint8_t mesh_addr)
+{
+    uint8_t next_hop = 0u;
+    bool is_local = false;
+
+    if (runtime == NULL || mesh_addr == MESH_ADDR_UNASSIGNED) {
+        return false;
+    }
+
+    return cluster_lookup_next_hop(&runtime->cluster, mesh_addr, &next_hop, &is_local) == 0 &&
+        !is_local &&
+        next_hop == mesh_addr;
+}
+
 /*
  * 收到 NEIGHBOR_PROBE_REQUEST 后，若本机已有正式地址，立即从同一
  * ingress port 回 NEIGHBOR_PROBE_RESPONSE，不使用普通转发路径。
@@ -763,11 +779,13 @@ int mesh_node_runtime_process_frame_from_port(
     if (frame.type == MESH_TYPE_NEIGHBOR_PROBE_RESPONSE) {
         int rc;
         char diag[96];
+        bool already_known;
 
         if (frame.src == MESH_ADDR_UNASSIGNED ||
             ingress_port == MESH_PROCESSER_INGRESS_PORT_NONE) {
             return 0;
         }
+        already_known = mesh_node_runtime_has_direct_peer(runtime, frame.src);
         (void)snprintf(
             diag,
             sizeof(diag),
@@ -779,6 +797,12 @@ int mesh_node_runtime_process_frame_from_port(
         if (rc != 0) {
             mesh_diag_kv_u32("probe resp learn rc", (uint32_t)(int32_t)rc);
             return rc;
+        }
+        if (ingress_port == runtime->upstream_port) {
+            runtime->neighbor_probe_retries_left = 0u;
+        }
+        if (already_known) {
+            return 0;
         }
         if (runtime->processor.config.local_addr == MESH_ADDR_UNASSIGNED ||
             runtime->control_plane_addr == MESH_ADDR_UNASSIGNED ||
