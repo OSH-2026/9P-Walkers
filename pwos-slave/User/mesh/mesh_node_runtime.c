@@ -263,6 +263,7 @@ int mesh_node_runtime_process_frame(
 int mesh_node_runtime_poll_once(struct mesh_node_runtime *runtime)
 {
     size_t rx_len = 0u;
+    uint8_t ingress_port = MESH_PROCESSER_INGRESS_PORT_NONE;
     int rc;
 
     if (runtime == NULL || !runtime->initialized) {
@@ -273,7 +274,8 @@ int mesh_node_runtime_poll_once(struct mesh_node_runtime *runtime)
         runtime->config.transport_ctx,
         runtime->processor.rx_buffer,
         sizeof(runtime->processor.rx_buffer),
-        &rx_len);
+        &rx_len,
+        &ingress_port);
     if (rc != 0) {
         return rc;
     }

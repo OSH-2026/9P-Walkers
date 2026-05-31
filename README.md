@@ -132,7 +132,7 @@ cmake --preset ZGT6Debug
 cmake --build --preset ZGT6Debug
 ```
 
-`ZGT6Debug` 会启用 `PWOS_BOARD_ZGT6` 和 `PWOS_ENABLE_MINI9P_SERIAL`。Mini9P 串口联调模式下，对应 USART 应只传输 Mini9P 二进制帧，不应混入 VOFA 或文本日志。
+`ZGT6Debug` 会启用 `PWOS_BOARD_ZGT6` 和 `PWOS_ENABLE_MINI9P_SERIAL`。当前 Mini9P 串口联调口为 `USART2`，`PA2=TX`、`PA3=RX`、`1000000` baud；该 USART 应只传输 Mini9P 二进制帧，不应混入 VOFA 或文本日志。
 
 ## 测试
 
@@ -174,7 +174,7 @@ pwos-slave-stm32f411/User/backend/test/build/local_vfs_test
 ```bash
 cmake -S tools/pc_master_emulator -B tools/pc_master_emulator/build
 cmake --build tools/pc_master_emulator/build
-tools/pc_master_emulator/build/pc_master_emulator /dev/ttyUSB0 115200
+tools/pc_master_emulator/build/pc_master_emulator /dev/ttyUSB0 1000000 1
 ```
 
 该工具会依次执行 `Tattach`、`Twalk /sys/health`、`Topen`、`Tread`、`Tclunk`，并检查 `/missing` 和 bad fid 的错误路径。成功时输出：

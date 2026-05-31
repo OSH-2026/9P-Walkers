@@ -182,17 +182,20 @@ static int mesh_node_service_receive_frame(
     void *transport_ctx,
     uint8_t *rx_data,
     size_t rx_cap,
-    size_t *rx_len)
+    size_t *rx_len,
+    uint8_t *out_ingress_port)
 {
     struct mesh_node_service *service = (struct mesh_node_service *)transport_ctx;
     int soft_error = -(int)MESH_ERR_BUSY;
     size_t checked;
 
-    if (service == NULL || !service->initialized || rx_data == NULL || rx_len == NULL) {
+    if (service == NULL || !service->initialized || rx_data == NULL || rx_len == NULL ||
+        out_ingress_port == NULL) {
         return -(int)MESH_ERR_INVALID_STATE;
     }
 
     *rx_len = 0u;
+    *out_ingress_port = MESH_PROCESSER_INGRESS_PORT_NONE;
     for (checked = 0u; checked < service->port_count; ++checked) {
         size_t index = (service->next_rx_index + checked) % service->port_count;
         int rc;
@@ -203,6 +206,7 @@ static int mesh_node_service_receive_frame(
 
         rc = mesh_uart_transport_receive_frame(&service->ports[index].transport, rx_data, rx_cap, rx_len);
         if (rc == 0) {
+            *out_ingress_port = (uint8_t)index;
             service->next_rx_index = (index + 1u) % service->port_count;
             return 0;
         }
