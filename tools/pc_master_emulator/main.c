@@ -12,7 +12,8 @@
  * 3. 轮询 mesh_host_runtime_poll_once()，接收从机的 REGISTER 帧
  * 4. 收到第一次 REGISTER（src=dst=UNASSIGNED）时回送 ASSIGN，给节点分配地址
  * 5. 节点收到 ASSIGN 后会发送第二次 REGISTER（src=分配地址），确认上线
- * 6. cluster_vfs_attach("mcuN") 挂载节点，然后 cluster_vfs_read_path 读文件
+ * 6. 从机通过 LINK_STATE 上报真实邻居边后，host runtime 下发 ROUTE_UPDATE
+ * 7. cluster_vfs_attach("mcuN") 挂载节点，然后 cluster_vfs_read_path 读文件
  *
  * ## 帧格式（Mesh over UART）
  *
@@ -453,10 +454,55 @@ static const char *mesh_type_name(uint8_t type)
         return "ROUTE_UPDATE";
     case MESH_TYPE_LINK_STATE:
         return "LINK_STATE";
+    case MESH_TYPE_NEIGHBOR_PROBE_REQUEST:
+        return "NEIGHBOR_PROBE_REQUEST";
+    case MESH_TYPE_NEIGHBOR_PROBE_RESPONSE:
+        return "NEIGHBOR_PROBE_RESPONSE";
     case MESH_TYPE_ERROR:
         return "ERROR";
     default:
         return "unknown";
+    }
+}
+
+static void pc_mesh_log_frame_details(const char *prefix, const struct mesh_frame_view *view)
+{
+    struct mesh_link_state_payload link_state;
+    struct mesh_route_update_payload route_update;
+
+    if (prefix == NULL || view == NULL) {
+        return;
+    }
+
+    switch (view->type) {
+    case MESH_TYPE_LINK_STATE:
+        if (mesh_parse_link_state(view, &link_state)) {
+            printf("%s LINK_STATE neighbor=0x%02x link_up=%u quality=%u\n",
+                   prefix,
+                   link_state.neighbor,
+                   link_state.link_up,
+                   link_state.quality);
+        }
+        break;
+    case MESH_TYPE_ROUTE_UPDATE:
+        if (mesh_parse_route_update(view, &route_update)) {
+            printf("%s ROUTE_UPDATE dst=0x%02x next_hop=0x%02x metric=%u version=%u action=%u\n",
+                   prefix,
+                   route_update.dst,
+                   route_update.next_hop,
+                   route_update.metric,
+                   route_update.route_version,
+                   route_update.action);
+        }
+        break;
+    case MESH_TYPE_NEIGHBOR_PROBE_REQUEST:
+        printf("%s NEIGHBOR_PROBE_REQUEST\n", prefix);
+        break;
+    case MESH_TYPE_NEIGHBOR_PROBE_RESPONSE:
+        printf("%s NEIGHBOR_PROBE_RESPONSE\n", prefix);
+        break;
+    default:
+        break;
     }
 }
 
@@ -475,12 +521,22 @@ static const char *mesh_type_name(uint8_t type)
 static int pc_mesh_send_frame(void *transport_ctx, uint8_t next_hop, const uint8_t *tx_data, size_t tx_len)
 {
     struct pc_mesh_transport *transport = (struct pc_mesh_transport *)transport_ctx;
+    struct mesh_frame_view view;
 
     if (transport == NULL || transport->fd < 0 || tx_data == NULL || tx_len == 0u) {
         return -(int)MESH_ERR_INVALID_STATE;
     }
 
     printf("[PC→mesh] next_hop=0x%02x %zu bytes\n", next_hop, tx_len);
+    if (mesh_decode_frame(tx_data, tx_len, &view)) {
+        printf("[PC→mesh] %s src=0x%02x dst=0x%02x seq=%u payload=%u\n",
+               mesh_type_name(view.type),
+               view.src,
+               view.dst,
+               view.seq,
+               view.payload_len);
+        pc_mesh_log_frame_details("[PC→mesh]", &view);
+    }
     return write_all(transport->fd, tx_data, tx_len);
 }
 
@@ -642,8 +698,9 @@ static int pc_mesh_assign_bootstrap_node(
  * @brief 确认已分配地址的从节点正式上线
  *
  * 当收到第二次 REGISTER（src=已分配地址，dst=UNASSIGNED）时调用。
- * 将节点标记为 ONLINE 并在本地节点与该从节点之间建立一条双向 link，
- * 表示集群拓扑中存在直接相连的邻居。
+ * 这里只确认节点已经完成地址分配，不注入 host->node 直连边。
+ * 拓扑边必须来自从机实际上报的 LINK_STATE，避免把中继后面的 child
+ * 错误建模为 host 直连节点。
  *
  * @param[in] transport  指向 pc_mesh_transport 的指针
  * @param[in] mesh_addr  从节点被分配的 Mesh 地址（MESH_ADDR_UNASSIGNED 为非法）
@@ -671,13 +728,11 @@ static int pc_mesh_confirm_assigned_node(struct pc_mesh_transport *transport, ui
     if (rc != 0) {
         return rc;
     }
-    rc = cluster_add_link(mesh_cluster, PC_MASTER_LOCAL_ADDR, mesh_addr, 1u, false);
-    if (rc != 0) {
-        return rc;
-    }
 
     slot->confirmed = true;
-    printf("[mesh→PC] confirmed %s addr=0x%02x\n", slot->name, slot->mesh_addr);
+    printf("[mesh→PC] confirmed %s addr=0x%02x; waiting for LINK_STATE topology\n",
+           slot->name,
+           slot->mesh_addr);
     return 0;
 }
 
@@ -729,6 +784,7 @@ static int pc_mesh_receive_frame(
            view.dst,
            view.seq,
            view.payload_len);
+    pc_mesh_log_frame_details("[mesh→PC]", &view);
 
     if (view.type == MESH_TYPE_REGISTER &&
         view.src == MESH_ADDR_UNASSIGNED &&
