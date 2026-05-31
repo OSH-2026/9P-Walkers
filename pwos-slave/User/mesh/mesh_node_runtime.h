@@ -24,6 +24,8 @@
 extern "C" {
 #endif
 
+#define MESH_NODE_RUNTIME_MAX_BOOTSTRAP_PENDING 4u
+
 /**
  * @brief mesh_node_runtime 初始化配置。
  */
@@ -62,6 +64,13 @@ struct mesh_node_runtime_config {
     bool auto_register_on_init;
 };
 
+struct mesh_node_runtime_bootstrap_pending {
+    bool used;
+    uint8_t uid[MESH_UID_LEN];
+    uint32_t boot_nonce;
+    uint8_t ingress_port;
+};
+
 /**
  * @brief mesh_node_runtime 实例状态。
  */
@@ -80,6 +89,10 @@ struct mesh_node_runtime {
     uint8_t last_ingress_port;
     /** 收到本机 ASSIGN 的端口，作为路由表收敛前的上游 control-plane 临时端口。 */
     uint8_t upstream_port;
+    /** 上游 control-plane mesh 地址，用于构造早期 LINK_STATE dst。 */
+    uint8_t control_plane_addr;
+    /** 下游 bootstrap REGISTER 等待 ASSIGN 回转的临时表。 */
+    struct mesh_node_runtime_bootstrap_pending pending_bootstrap[MESH_NODE_RUNTIME_MAX_BOOTSTRAP_PENDING];
 };
 
 /**

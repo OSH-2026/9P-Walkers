@@ -14,6 +14,10 @@ static int mesh_node_runtime_send_neighbor_probe(
     struct mesh_node_runtime *runtime,
     uint8_t next_hop);
 
+static int mesh_node_runtime_send_link_state_to_upstream(
+    struct mesh_node_runtime *runtime,
+    uint8_t neighbor_addr);
+
 static uint16_t mesh_node_runtime_take_seq(struct mesh_node_runtime *runtime)
 {
     uint16_t seq;
@@ -114,6 +118,168 @@ static int mesh_node_runtime_handle_probe_request(
         frame_len);
 }
 
+static struct mesh_node_runtime_bootstrap_pending *mesh_node_runtime_find_pending_by_uid(
+    struct mesh_node_runtime *runtime,
+    const uint8_t uid[MESH_UID_LEN])
+{
+    size_t i;
+
+    if (runtime == NULL || uid == NULL) {
+        return NULL;
+    }
+
+    for (i = 0u; i < MESH_NODE_RUNTIME_MAX_BOOTSTRAP_PENDING; ++i) {
+        struct mesh_node_runtime_bootstrap_pending *entry = &runtime->pending_bootstrap[i];
+
+        if (entry->used && memcmp(entry->uid, uid, MESH_UID_LEN) == 0) {
+            return entry;
+        }
+    }
+
+    return NULL;
+}
+
+static struct mesh_node_runtime_bootstrap_pending *mesh_node_runtime_alloc_pending(
+    struct mesh_node_runtime *runtime)
+{
+    size_t i;
+
+    if (runtime == NULL) {
+        return NULL;
+    }
+
+    for (i = 0u; i < MESH_NODE_RUNTIME_MAX_BOOTSTRAP_PENDING; ++i) {
+        if (!runtime->pending_bootstrap[i].used) {
+            return &runtime->pending_bootstrap[i];
+        }
+    }
+
+    return NULL;
+}
+
+static int mesh_node_runtime_remember_pending_register(
+    struct mesh_node_runtime *runtime,
+    const struct mesh_register_payload *payload,
+    uint8_t ingress_port)
+{
+    struct mesh_node_runtime_bootstrap_pending *entry;
+
+    if (runtime == NULL || payload == NULL ||
+        ingress_port == MESH_PROCESSER_INGRESS_PORT_NONE) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    entry = mesh_node_runtime_find_pending_by_uid(runtime, payload->uid);
+    if (entry == NULL) {
+        entry = mesh_node_runtime_alloc_pending(runtime);
+    }
+    if (entry == NULL) {
+        return -(int)MESH_ERR_BUSY;
+    }
+
+    entry->used = true;
+    memcpy(entry->uid, payload->uid, sizeof(entry->uid));
+    entry->boot_nonce = payload->boot_nonce;
+    entry->ingress_port = ingress_port;
+    return 0;
+}
+
+static int mesh_node_runtime_send_raw_to_upstream(
+    struct mesh_node_runtime *runtime,
+    const uint8_t *frame_data,
+    size_t frame_len)
+{
+    if (runtime == NULL || frame_data == NULL || frame_len == 0u ||
+        runtime->upstream_port == MESH_PROCESSER_INGRESS_PORT_NONE ||
+        runtime->config.send_frame_to_port == NULL) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    return runtime->config.send_frame_to_port(
+        runtime->config.transport_ctx,
+        runtime->upstream_port,
+        frame_data,
+        frame_len);
+}
+
+static int mesh_node_runtime_handle_downstream_register(
+    struct mesh_node_runtime *runtime,
+    const struct mesh_frame_view *frame,
+    const uint8_t *frame_data,
+    size_t frame_len,
+    uint8_t ingress_port)
+{
+    struct mesh_register_payload payload;
+    int rc;
+
+    if (runtime == NULL || frame == NULL || frame_data == NULL) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+    if (runtime->processor.config.local_addr == MESH_ADDR_UNASSIGNED ||
+        ingress_port == MESH_PROCESSER_INGRESS_PORT_NONE ||
+        runtime->upstream_port == MESH_PROCESSER_INGRESS_PORT_NONE) {
+        return 0;
+    }
+    if (!mesh_parse_register(frame, &payload)) {
+        return -(int)MESH_ERR_BAD_FRAME;
+    }
+
+    rc = mesh_node_runtime_remember_pending_register(runtime, &payload, ingress_port);
+    if (rc != 0) {
+        return rc;
+    }
+
+    return mesh_node_runtime_send_raw_to_upstream(runtime, frame_data, frame_len);
+}
+
+static int mesh_node_runtime_handle_pending_assign(
+    struct mesh_node_runtime *runtime,
+    const struct mesh_frame_view *frame,
+    const uint8_t *frame_data,
+    size_t frame_len)
+{
+    struct mesh_node_runtime_bootstrap_pending *pending;
+    struct mesh_assign_payload payload;
+    int rc;
+
+    if (runtime == NULL || frame == NULL || frame_data == NULL) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+    if (!mesh_parse_assign(frame, &payload)) {
+        return -(int)MESH_ERR_BAD_FRAME;
+    }
+
+    pending = mesh_node_runtime_find_pending_by_uid(runtime, payload.uid);
+    if (pending == NULL) {
+        return -(int)MESH_ERR_NO_ROUTE;
+    }
+    if (runtime->config.send_frame_to_port == NULL) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    rc = runtime->config.send_frame_to_port(
+        runtime->config.transport_ctx,
+        pending->ingress_port,
+        frame_data,
+        frame_len);
+    if (rc != 0) {
+        return rc;
+    }
+
+    rc = mesh_node_runtime_refresh_direct_peer(runtime, payload.node_addr, pending->ingress_port);
+    if (rc != 0) {
+        return rc;
+    }
+
+    rc = mesh_node_runtime_send_link_state_to_upstream(runtime, payload.node_addr);
+    if (rc != 0) {
+        return rc;
+    }
+
+    memset(pending, 0, sizeof(*pending));
+    return 0;
+}
+
 /*
  * 节点在 bootstrap 阶段 local_addr 仍是 0xFF。
  * 如果不按 UID 再过滤一次，任何发到 0xFF 的 ASSIGN 都会被误接收。
@@ -164,6 +330,7 @@ static int mesh_node_runtime_control_handler(
     if (assign_hits_local) {
         runtime->processor.config.local_addr = assign_payload.node_addr;
         runtime->upstream_port = runtime->last_ingress_port;
+        runtime->control_plane_addr = frame->src;
 
         if (runtime->upstream_port != MESH_PROCESSER_INGRESS_PORT_NONE &&
             runtime->config.send_frame_to_port != NULL) {
@@ -255,6 +422,46 @@ static int mesh_node_runtime_send_register_to_port(
     return runtime->config.send_frame_to_port(
         runtime->config.transport_ctx,
         port_id,
+        frame,
+        frame_len);
+}
+
+static int mesh_node_runtime_send_link_state_to_upstream(
+    struct mesh_node_runtime *runtime,
+    uint8_t neighbor_addr)
+{
+    struct mesh_link_state_payload payload;
+    uint8_t frame[MESH_PROCESSER_FRAME_CAP];
+    size_t frame_len = 0u;
+
+    if (runtime == NULL || !runtime->initialized ||
+        runtime->processor.config.local_addr == MESH_ADDR_UNASSIGNED ||
+        runtime->control_plane_addr == MESH_ADDR_UNASSIGNED ||
+        runtime->upstream_port == MESH_PROCESSER_INGRESS_PORT_NONE ||
+        runtime->config.send_frame_to_port == NULL ||
+        neighbor_addr == MESH_ADDR_UNASSIGNED) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    payload.neighbor = neighbor_addr;
+    payload.link_up = 1u;
+    payload.quality = 1u;
+
+    if (!mesh_build_link_state(
+            runtime->processor.config.local_addr,
+            runtime->control_plane_addr,
+            mesh_node_runtime_take_seq(runtime),
+            mesh_node_runtime_default_hop(runtime),
+            &payload,
+            frame,
+            sizeof(frame),
+            &frame_len)) {
+        return -(int)MESH_ERR_BAD_FRAME;
+    }
+
+    return runtime->config.send_frame_to_port(
+        runtime->config.transport_ctx,
+        runtime->upstream_port,
         frame,
         frame_len);
 }
@@ -360,6 +567,7 @@ int mesh_node_runtime_init(
     runtime->initialized = true;
     runtime->last_ingress_port = MESH_PROCESSER_INGRESS_PORT_NONE;
     runtime->upstream_port = MESH_PROCESSER_INGRESS_PORT_NONE;
+    runtime->control_plane_addr = MESH_ADDR_UNASSIGNED;
 
     if (runtime->config.auto_register_on_init) {
         rc = mesh_node_runtime_send_register(runtime, runtime->config.bootstrap_next_hop);
@@ -425,6 +633,28 @@ int mesh_node_runtime_process_frame_from_port(
             return 0;
         }
         return mesh_node_runtime_refresh_direct_peer(runtime, frame.src, ingress_port);
+    }
+
+    if (frame.type == MESH_TYPE_REGISTER &&
+        frame.src == MESH_ADDR_UNASSIGNED &&
+        frame.dst == MESH_ADDR_UNASSIGNED) {
+        return mesh_node_runtime_handle_downstream_register(
+            runtime,
+            &frame,
+            frame_data,
+            frame_len,
+            ingress_port);
+    }
+
+    if (frame.type == MESH_TYPE_ASSIGN) {
+        struct mesh_assign_payload payload;
+
+        if (!mesh_parse_assign(&frame, &payload)) {
+            return -(int)MESH_ERR_BAD_FRAME;
+        }
+        if (mesh_node_runtime_find_pending_by_uid(runtime, payload.uid) != NULL) {
+            return mesh_node_runtime_handle_pending_assign(runtime, &frame, frame_data, frame_len);
+        }
     }
 
     /*
