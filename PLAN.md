@@ -141,22 +141,44 @@
 
 目标：保持主机侧“控制器下发指定路由”，不实现邻居传播路由模型。
 
-1. 核对现有主机 LINK_STATE 处理：
-   - `mesh_host_runtime_control_handler()` 是否已把 `src -> neighbor` 写入 topology。
-   - `cluster_config_refresh_all_nodes_connectivity()` 是否足够触发 VFS 可达性更新。
-   - 是否存在现成 route sync/ROUTE_UPDATE 下发逻辑。
+现状核对：
 
-2. 如果已有 route sync：
-   - 只确保从机上报的 LINK_STATE 能进入 topology 并触发现有 route sync。
-   - 不新增邻居传播协议。
+- `mesh_host_runtime_control_handler()` 已先调用 shared `cluster_processor_control_handler()`；`LINK_STATE(src=relay, neighbor=child)` 已能通过 `cluster_add_link(relay, child, quality, false)` 写入主机 topology。
+- `LINK_STATE` 后已调用 `cluster_config_refresh_all_nodes_connectivity(NULL)` 和 `mesh_host_runtime_sync_slots_from_cluster()`，VFS connectivity 更新路径已存在。
+- 现有代码没有 host controller 主动发送 `ROUTE_UPDATE` 的同步逻辑；只有 protocol builder/parser 和从机/cluster 落地 `ROUTE_UPDATE`。
+- host service 已能返回 ingress port；Phase 5 不复制从机静态 `neighbor_addr`，主机发帧仍走 host 现有 `cluster_lookup_next_hop(dst)->send_frame(next_hop)` 机制。
 
-3. 如果没有 route sync：
-   - 补最小 controller-side 路由同步：host 从 cluster topology 计算到各节点 next hop。
-   - 对每个已知从机下发指定 `ROUTE_UPDATE(dst, next_hop, metric, version)`。
-   - 只由主机下发，relay/node 只落地 ROUTE_UPDATE，不互相传播路由。
+需要补的最小实现：
 
-4. 明确 host service ingress port：
-   - 主机 service 已能返回 ingress port；如 route sync 需要主机侧端口选择，保持主机现有机制或最小映射，不把静态 `neighbor_addr` 机制复制到从机。
+1. 在 host runtime 增加 controller route sync：
+   - 在 `LINK_STATE` 处理完成并刷新 host topology 后，从主机 cluster 读取/计算当前路由。
+   - 对每个需要转发的节点发送主机生成的 `ROUTE_UPDATE`。
+   - 下发语义保持 next_hop 为 mesh addr，不携带端口；从机 service 继续通过本地动态 `addr -> port` 表解析端口。
+   - route sync 计算结果即算即用：只用于本轮生成并发送 `ROUTE_UPDATE`，暂不在主机 runtime 另建 route-sync 档案。
+
+2. route sync 必须按 topology 算路径并逐节点下发：
+   - 新增/暴露一个只读计算接口，从 topology 对任意 `source` 计算到任意 `dst` 的 `next_hop` 和 metric。
+   - 该接口不得写入或污染主机 `cluster->routes`；`cluster->routes` 继续只表示主机自身 `local_addr` 视角的查询缓存。
+   - host runtime 在一次 sync 中枚举每个从机 `source` 和每个目标 `dst`，即时计算 `source -> dst` 的下一跳。
+   - 若 `source != dst` 且存在路径，则向 `source` 下发 `ROUTE_UPDATE(dst=dst, next_hop=next_hop, metric=path_cost, action=SET)`。
+   - 示例：`Host <-> A <-> B <-> C` 时，全量下发应覆盖每个从机 `source` 到每个其他目标 `dst`：
+     - 给 `A`:
+       - `ROUTE_UPDATE(dst=Host, next_hop=Host)`
+       - `ROUTE_UPDATE(dst=B, next_hop=B)`
+       - `ROUTE_UPDATE(dst=C, next_hop=B)`
+     - 给 `B`:
+       - `ROUTE_UPDATE(dst=Host, next_hop=A)`
+       - `ROUTE_UPDATE(dst=A, next_hop=A)`
+       - `ROUTE_UPDATE(dst=C, next_hop=C)`
+     - 给 `C`:
+       - `ROUTE_UPDATE(dst=Host, next_hop=B)`
+       - `ROUTE_UPDATE(dst=A, next_hop=B)`
+       - `ROUTE_UPDATE(dst=B, next_hop=B)`
+
+3. 测试：
+   - 更新/新增 host runtime 测试：构造至少三跳 topology 后，观察主机向路径上不同节点下发各自视角的 `ROUTE_UPDATE`。
+   - 保留一跳中继用例：relay 上报 child 后，能观察到主机向 relay 发送 `ROUTE_UPDATE(dst=child,next_hop=child)`。
+   - 断言该帧由 host 生成，不依赖节点间邻居传播。
 
 验收：
 
