@@ -32,6 +32,7 @@ option(PWOS_ENABLE_MINI9P_SERIAL "Use USART2 for Mini9P slave serial bring-up" O
 option(PWOS_BOARD_ZGT6 "Board has PF9 green LED (ZGT6)" OFF)
 option(PWOS_ENABLE_LFS_SELFTEST "Populate littlefs debug fixtures on boot" ON)
 option(PWOS_SKIP_LFS_MOUNT "Skip lfs_vfs mount during Mini9P board bring-up" OFF)
+option(PWOS_ENABLE_MESH_DIAG "Enable blocking mesh diagnostic text output on USART1" OFF)
 
 # Enable CMake support for ASM and C languages
 enable_language(C CXX ASM)
@@ -61,6 +62,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${PWOS_USER_DIR}/drivers/storage/sd_blockdev.cpp
     ${PWOS_USER_DIR}/drivers/storage/lfs_port.cpp
     ${PWOS_USER_DIR}/app/fs_selftest.c
+    ${PWOS_USER_DIR}/app/mesh_diag.c
     ${PWOS_USER_DIR}/app/mesh_node_mini9p_init.c
     ${PWOS_USER_DIR}/app/vofa_firewater.c
     ${PWOS_USER_DIR}/backend/dev_vfs.c
@@ -108,6 +110,9 @@ if(PWOS_ENABLE_LFS_SELFTEST)
 endif()
 if(PWOS_SKIP_LFS_MOUNT)
     target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE PWOS_SKIP_LFS_MOUNT)
+endif()
+if(PWOS_ENABLE_MESH_DIAG)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE PWOS_ENABLE_MESH_DIAG)
 endif()
 
 # Remove wrong libob.a library dependency when using cpp files

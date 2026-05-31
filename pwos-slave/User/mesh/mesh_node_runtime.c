@@ -1,5 +1,8 @@
 #include "mesh_node_runtime.h"
 
+#include "../app/mesh_diag.h"
+
+#include <stdio.h>
 #include <string.h>
 
 static int mesh_node_runtime_send_register(
@@ -13,6 +16,10 @@ static int mesh_node_runtime_send_register_to_port(
 static int mesh_node_runtime_send_neighbor_probe(
     struct mesh_node_runtime *runtime,
     uint8_t next_hop);
+
+static int mesh_node_runtime_send_neighbor_probe_to_port(
+    struct mesh_node_runtime *runtime,
+    uint8_t port_id);
 
 static int mesh_node_runtime_send_link_state_to_upstream(
     struct mesh_node_runtime *runtime,
@@ -311,9 +318,11 @@ static int mesh_node_runtime_control_handler(
             return -(int)MESH_ERR_BAD_FRAME;
         }
         if (memcmp(assign_payload.uid, runtime->config.local_uid, MESH_UID_LEN) != 0) {
+            mesh_diag_text("assign foreign uid");
             *out_reply_len = 0u;
             return 0;
         }
+        mesh_diag_text("assign local hit");
         assign_hits_local = true;
     }
 
@@ -338,12 +347,39 @@ static int mesh_node_runtime_control_handler(
         } else {
             rc = mesh_node_runtime_send_register(runtime, frame->src);
         }
+        mesh_diag_kv_u32("assign confirm rc", (uint32_t)(int32_t)rc);
         if (rc != 0) {
             return rc;
         }
 
-        /* 对所有端口广播 NEIGHBOR_PROBE_REQUEST，主动发现直连邻居。 */
-        rc = mesh_node_runtime_send_neighbor_probe(runtime, runtime->config.bootstrap_next_hop);
+        /*
+         * 先探测非上游端口，最后再探测上游端口。
+         * 否则 host 很快回 PROBE_RESPONSE 时，本机还在同步向其他 UART 发包，
+         * 可能错过上游链路上的返回帧。
+         */
+        rc = 0;
+        if (runtime->config.send_frame_to_port != NULL) {
+            uint8_t port_id;
+
+            for (port_id = 0u; port_id < 8u; ++port_id) {
+                if ((runtime->config.port_bitmap & (uint8_t)(1u << port_id)) == 0u ||
+                    port_id == runtime->upstream_port) {
+                    continue;
+                }
+                rc = mesh_node_runtime_send_neighbor_probe_to_port(runtime, port_id);
+                if (rc != 0) {
+                    break;
+                }
+            }
+            if (rc == 0 &&
+                runtime->upstream_port != MESH_PROCESSER_INGRESS_PORT_NONE &&
+                (runtime->config.port_bitmap & (uint8_t)(1u << runtime->upstream_port)) != 0u) {
+                rc = mesh_node_runtime_send_neighbor_probe_to_port(runtime, runtime->upstream_port);
+            }
+        } else {
+            rc = mesh_node_runtime_send_neighbor_probe(runtime, runtime->config.bootstrap_next_hop);
+        }
+        mesh_diag_kv_u32("assign probe rc", (uint32_t)(int32_t)rc);
         if (rc != 0) {
             return rc;
         }
@@ -501,6 +537,36 @@ static int mesh_node_runtime_send_neighbor_probe(
         frame_len);
 }
 
+static int mesh_node_runtime_send_neighbor_probe_to_port(
+    struct mesh_node_runtime *runtime,
+    uint8_t port_id)
+{
+    uint8_t frame[MESH_PROCESSER_FRAME_CAP];
+    size_t frame_len = 0u;
+
+    if (runtime == NULL || !runtime->initialized ||
+        runtime->config.send_frame_to_port == NULL ||
+        runtime->processor.config.local_addr == MESH_ADDR_UNASSIGNED) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    if (!mesh_build_neighbor_probe_request(
+            runtime->processor.config.local_addr,
+            mesh_node_runtime_take_seq(runtime),
+            mesh_node_runtime_default_hop(runtime),
+            frame,
+            sizeof(frame),
+            &frame_len)) {
+        return -(int)MESH_ERR_BAD_FRAME;
+    }
+
+    return runtime->config.send_frame_to_port(
+        runtime->config.transport_ctx,
+        port_id,
+        frame,
+        frame_len);
+}
+
 void mesh_node_runtime_get_default_config(struct mesh_node_runtime_config *out_config)
 {
     if (out_config == NULL) {
@@ -616,6 +682,19 @@ int mesh_node_runtime_process_frame_from_port(
     }
 
     runtime->last_ingress_port = ingress_port;
+    if (frame.type == MESH_TYPE_ASSIGN || frame.type == MESH_TYPE_NEIGHBOR_PROBE_RESPONSE) {
+        char diag[96];
+
+        (void)snprintf(
+            diag,
+            sizeof(diag),
+            "frame type=0x%02x src=0x%02x dst=0x%02x port=%u",
+            frame.type,
+            frame.src,
+            frame.dst,
+            (unsigned)ingress_port);
+        mesh_diag_text(diag);
+    }
 
     /* NEIGHBOR_PROBE_REQUEST: 只做本地应答，绝不转发。 */
     if (frame.type == MESH_TYPE_NEIGHBOR_PROBE_REQUEST) {
@@ -629,22 +708,41 @@ int mesh_node_runtime_process_frame_from_port(
     /* NEIGHBOR_PROBE_RESPONSE: 唯一能建立直连邻居的帧类型。 */
     if (frame.type == MESH_TYPE_NEIGHBOR_PROBE_RESPONSE) {
         int rc;
+        char diag[96];
 
         if (frame.src == MESH_ADDR_UNASSIGNED ||
             ingress_port == MESH_PROCESSER_INGRESS_PORT_NONE) {
             return 0;
         }
+        (void)snprintf(
+            diag,
+            sizeof(diag),
+            "probe resp src=0x%02x port=%u",
+            frame.src,
+            (unsigned)ingress_port);
+        mesh_diag_text(diag);
         rc = mesh_node_runtime_refresh_direct_peer(runtime, frame.src, ingress_port);
         if (rc != 0) {
+            mesh_diag_kv_u32("probe resp learn rc", (uint32_t)(int32_t)rc);
             return rc;
         }
         if (runtime->processor.config.local_addr == MESH_ADDR_UNASSIGNED ||
             runtime->control_plane_addr == MESH_ADDR_UNASSIGNED ||
             runtime->upstream_port == MESH_PROCESSER_INGRESS_PORT_NONE ||
             runtime->config.send_frame_to_port == NULL) {
+            mesh_diag_text("probe resp skip link_state");
             return 0;
         }
-        return mesh_node_runtime_send_link_state_to_upstream(runtime, frame.src);
+        rc = mesh_node_runtime_send_link_state_to_upstream(runtime, frame.src);
+        (void)snprintf(
+            diag,
+            sizeof(diag),
+            "link_state rc=%d up=%u ctrl=0x%02x",
+            rc,
+            (unsigned)runtime->upstream_port,
+            runtime->control_plane_addr);
+        mesh_diag_text(diag);
+        return rc;
     }
 
     if (frame.type == MESH_TYPE_REGISTER &&

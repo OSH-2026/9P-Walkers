@@ -71,6 +71,8 @@ int mesh_uart_transport_receive_frame(
     size_t rx_cap,
     size_t *rx_len);
 
+bool mesh_uart_transport_rx_pending(const struct mesh_uart_transport *transport);
+
 int mesh_uart_transport_init_default(void);
 
 struct mesh_uart_transport *mesh_uart_transport_default(void);

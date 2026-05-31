@@ -5,6 +5,8 @@
 
 #include "mesh_node_service.h"
 
+#include "../app/mesh_diag.h"
+
 #include <string.h>
 
 #define MESH_NODE_SERVICE_DEFAULT_LOCAL_ADDR MESH_ADDR_UNASSIGNED
@@ -162,6 +164,7 @@ static int mesh_node_service_send_frame(
             }
             rc = mesh_uart_transport_send_frame(&service->ports[i].transport, tx_data, tx_len);
             if (rc != 0 && first_error == 0) {
+                mesh_diag_send_frame((uint8_t)i, next_hop, tx_len, rc);
                 first_error = rc;
             }
         }
@@ -170,10 +173,18 @@ static int mesh_node_service_send_frame(
 
     port_index = mesh_node_service_find_port_for_next_hop(service, next_hop);
     if (port_index < 0) {
+        mesh_diag_send_frame(MESH_PROCESSER_INGRESS_PORT_NONE, next_hop, tx_len, -(int)MESH_ERR_NO_ROUTE);
         return -(int)MESH_ERR_NO_ROUTE;
     }
 
-    return mesh_uart_transport_send_frame(&service->ports[port_index].transport, tx_data, tx_len);
+    {
+        int rc = mesh_uart_transport_send_frame(&service->ports[port_index].transport, tx_data, tx_len);
+
+        if (rc != 0) {
+            mesh_diag_send_frame((uint8_t)port_index, next_hop, tx_len, rc);
+        }
+        return rc;
+    }
 }
 
 /*
@@ -195,7 +206,14 @@ static int mesh_node_service_send_frame_to_port(
         return -(int)MESH_ERR_INVALID_STATE;
     }
 
-    return mesh_uart_transport_send_frame(&service->ports[port_id].transport, tx_data, tx_len);
+    {
+        int rc = mesh_uart_transport_send_frame(&service->ports[port_id].transport, tx_data, tx_len);
+
+        if (rc != 0) {
+            mesh_diag_send_frame(port_id, port_id, tx_len, rc);
+        }
+        return rc;
+    }
 }
 
 static int mesh_node_service_receive_frame(
@@ -223,6 +241,9 @@ static int mesh_node_service_receive_frame(
         if (!service->ports[index].initialized) {
             continue;
         }
+        if (!mesh_uart_transport_rx_pending(&service->ports[index].transport)) {
+            continue;
+        }
 
         rc = mesh_uart_transport_receive_frame(&service->ports[index].transport, rx_data, rx_cap, rx_len);
         if (rc == 0) {
@@ -235,6 +256,7 @@ static int mesh_node_service_receive_frame(
             continue;
         }
 
+        mesh_diag_recv_frame((uint8_t)index, 0u, rc);
         return rc;
     }
 

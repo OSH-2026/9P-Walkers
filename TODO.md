@@ -9,7 +9,23 @@
 - 后续可把 `uart` 从 `mesh_node_service_backend` 拆到 `mesh_node_service_config`，让 backend 注入和 transport 配置职责分离。
 
 
-# 目前从机主循环的uart还是轮询！
+## STM32 多 UART RX 异步化
+
+- 当前 `rx_pending + poll_once` 是短期止血方案：它避免从机在空 UART 上阻塞读 200ms，已经足够支撑低流量 `PC <-> A <-> B` 上板联调。
+- 后续需要把 STM32 mesh UART RX 改成异步接收，推荐方向是 `HAL_UARTEx_ReceiveToIdle_DMA()` 或 circular DMA + IDLE IRQ。
+- TX 先保留当前阻塞发送；RX 稳定后再评估是否需要 TX DMA。
+- DMA/IRQ callback 只负责把收到的字节推进每个 UART port 的 ring buffer 或 frame queue，不解析 mesh frame，不调用 `mesh_node_runtime_*()`。
+- `mesh_node_service_poll_once()` / `mesh_node_runtime_poll_once()` 保留；它们后续从内存 ring/frame queue 消费完整帧，而不是直接对 HAL UART 做阻塞读。
+- `mesh_uart_transport_rx_pending()` 保留为 transport 抽象；DMA 化后语义改成“ring buffer 或完整帧队列是否有待处理数据”。
+- 需要改动的区域：
+  - F407/F411 板级 USART DMA/NVIC 配置。
+  - `mesh_uart_transport` 增加 per-port RX ring buffer、IDLE/DMA 事件接入和完整帧解析。
+  - `mesh_node_service_receive_frame()` 消费完整帧并继续返回真实 ingress port。
+  - PC/stub 测试覆盖“没有完整帧时返回 `-MESH_ERR_BUSY`”。
+- 验收场景：
+  - 单板 `PC <-> F407` 注册、probe、LINK_STATE、attach 成功。
+  - 串联 `PC <-> A <-> B` 完成 B 注册、ASSIGN 回转、双方 LINK_STATE、ROUTE_UPDATE、小 mini9P 请求。
+  - A 同时从上游和下游收到短控制帧时不丢 probe response。
 
 
 ## 备选：邻居传播路由模型
