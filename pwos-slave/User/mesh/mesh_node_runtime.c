@@ -5,6 +5,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#define MESH_NODE_RUNTIME_NEIGHBOR_PROBE_RETRIES 5u
+#define MESH_NODE_RUNTIME_NEIGHBOR_PROBE_RETRY_MS 200u
+
 static int mesh_node_runtime_send_register(
     struct mesh_node_runtime *runtime,
     uint8_t next_hop);
@@ -25,6 +28,8 @@ static int mesh_node_runtime_send_link_state_to_upstream(
     struct mesh_node_runtime *runtime,
     uint8_t neighbor_addr);
 
+static int mesh_node_runtime_probe_all_ports(struct mesh_node_runtime *runtime);
+
 static uint16_t mesh_node_runtime_take_seq(struct mesh_node_runtime *runtime)
 {
     uint16_t seq;
@@ -44,6 +49,15 @@ static uint8_t mesh_node_runtime_default_hop(const struct mesh_node_runtime *run
     }
 
     return runtime->config.default_hop;
+}
+
+static uint32_t mesh_node_runtime_time_ms(struct mesh_node_runtime *runtime)
+{
+    if (runtime != NULL && runtime->config.time_ms != NULL) {
+        return runtime->config.time_ms(runtime->config.time_ctx);
+    }
+
+    return 0u;
 }
 
 /*
@@ -352,37 +366,14 @@ static int mesh_node_runtime_control_handler(
             return rc;
         }
 
-        /*
-         * 先探测非上游端口，最后再探测上游端口。
-         * 否则 host 很快回 PROBE_RESPONSE 时，本机还在同步向其他 UART 发包，
-         * 可能错过上游链路上的返回帧。
-         */
-        rc = 0;
-        if (runtime->config.send_frame_to_port != NULL) {
-            uint8_t port_id;
-
-            for (port_id = 0u; port_id < 8u; ++port_id) {
-                if ((runtime->config.port_bitmap & (uint8_t)(1u << port_id)) == 0u ||
-                    port_id == runtime->upstream_port) {
-                    continue;
-                }
-                rc = mesh_node_runtime_send_neighbor_probe_to_port(runtime, port_id);
-                if (rc != 0) {
-                    break;
-                }
-            }
-            if (rc == 0 &&
-                runtime->upstream_port != MESH_PROCESSER_INGRESS_PORT_NONE &&
-                (runtime->config.port_bitmap & (uint8_t)(1u << runtime->upstream_port)) != 0u) {
-                rc = mesh_node_runtime_send_neighbor_probe_to_port(runtime, runtime->upstream_port);
-            }
-        } else {
-            rc = mesh_node_runtime_send_neighbor_probe(runtime, runtime->config.bootstrap_next_hop);
-        }
+        rc = mesh_node_runtime_probe_all_ports(runtime);
         mesh_diag_kv_u32("assign probe rc", (uint32_t)(int32_t)rc);
         if (rc != 0) {
             return rc;
         }
+        runtime->neighbor_probe_retries_left = MESH_NODE_RUNTIME_NEIGHBOR_PROBE_RETRIES;
+        runtime->next_neighbor_probe_ms =
+            mesh_node_runtime_time_ms(runtime) + MESH_NODE_RUNTIME_NEIGHBOR_PROBE_RETRY_MS;
     }
 
     return 0;
@@ -565,6 +556,69 @@ static int mesh_node_runtime_send_neighbor_probe_to_port(
         port_id,
         frame,
         frame_len);
+}
+
+static int mesh_node_runtime_probe_all_ports(struct mesh_node_runtime *runtime)
+{
+    int rc = 0;
+
+    if (runtime == NULL || !runtime->initialized) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    /*
+     * 先探测非上游端口，最后再探测上游端口。
+     * 否则 host 很快回 PROBE_RESPONSE 时，本机还在同步向其他 UART 发包，
+     * 可能错过上游链路上的返回帧。
+     */
+    if (runtime->config.send_frame_to_port != NULL) {
+        uint8_t port_id;
+
+        for (port_id = 0u; port_id < 8u; ++port_id) {
+            if ((runtime->config.port_bitmap & (uint8_t)(1u << port_id)) == 0u ||
+                port_id == runtime->upstream_port) {
+                continue;
+            }
+            rc = mesh_node_runtime_send_neighbor_probe_to_port(runtime, port_id);
+            if (rc != 0) {
+                return rc;
+            }
+        }
+        if (runtime->upstream_port != MESH_PROCESSER_INGRESS_PORT_NONE &&
+            (runtime->config.port_bitmap & (uint8_t)(1u << runtime->upstream_port)) != 0u) {
+            rc = mesh_node_runtime_send_neighbor_probe_to_port(runtime, runtime->upstream_port);
+        }
+        return rc;
+    }
+
+    return mesh_node_runtime_send_neighbor_probe(runtime, runtime->config.bootstrap_next_hop);
+}
+
+static int mesh_node_runtime_poll_neighbor_probe_retry(struct mesh_node_runtime *runtime)
+{
+    uint32_t now;
+    int rc;
+
+    if (runtime == NULL || !runtime->initialized ||
+        runtime->neighbor_probe_retries_left == 0u ||
+        runtime->config.time_ms == NULL) {
+        return -(int)MESH_ERR_BUSY;
+    }
+    if (runtime->processor.config.local_addr == MESH_ADDR_UNASSIGNED) {
+        return -(int)MESH_ERR_BUSY;
+    }
+
+    now = mesh_node_runtime_time_ms(runtime);
+    if ((int32_t)(now - runtime->next_neighbor_probe_ms) < 0) {
+        return -(int)MESH_ERR_BUSY;
+    }
+
+    rc = mesh_node_runtime_probe_all_ports(runtime);
+    if (rc == 0) {
+        --runtime->neighbor_probe_retries_left;
+        runtime->next_neighbor_probe_ms = now + MESH_NODE_RUNTIME_NEIGHBOR_PROBE_RETRY_MS;
+    }
+    return rc;
 }
 
 void mesh_node_runtime_get_default_config(struct mesh_node_runtime_config *out_config)
@@ -764,6 +818,13 @@ int mesh_node_runtime_process_frame_from_port(
         return mesh_node_runtime_send_raw_to_upstream(runtime, frame_data, frame_len);
     }
 
+    if (frame.type == MESH_TYPE_LINK_STATE &&
+        frame.src != runtime->processor.config.local_addr &&
+        frame.dst == runtime->control_plane_addr &&
+        runtime->upstream_port != MESH_PROCESSER_INGRESS_PORT_NONE) {
+        return mesh_node_runtime_send_raw_to_upstream(runtime, frame_data, frame_len);
+    }
+
     if (frame.type == MESH_TYPE_ASSIGN) {
         struct mesh_assign_payload payload;
 
@@ -816,6 +877,13 @@ int mesh_node_runtime_poll_once(struct mesh_node_runtime *runtime)
         &rx_len,
         &ingress_port);
     if (rc != 0) {
+        if (rc == -(int)MESH_ERR_BUSY) {
+            int retry_rc = mesh_node_runtime_poll_neighbor_probe_retry(runtime);
+
+            if (retry_rc == 0) {
+                return 0;
+            }
+        }
         return rc;
     }
 

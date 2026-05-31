@@ -140,6 +140,12 @@ static uint32_t mesh_node_service_make_boot_nonce(void)
     return HAL_GetUIDw2() ^ HAL_GetTick();
 }
 
+static uint32_t mesh_node_service_time_ms(void *ctx)
+{
+    (void)ctx;
+    return HAL_GetTick();
+}
+
 static int mesh_node_service_send_frame(
     void *transport_ctx,
     uint8_t next_hop,
@@ -329,6 +335,8 @@ int mesh_node_service_init(const struct mesh_node_service_config *config)
     runtime_config.transport_ctx = &g_mesh_node_service;
     runtime_config.learn_peer_port = mesh_node_service_learn_addr_port_ctx;
     runtime_config.learn_peer_port_ctx = &g_mesh_node_service;
+    runtime_config.time_ms = mesh_node_service_time_ms;
+    runtime_config.time_ctx = &g_mesh_node_service;
     runtime_config.mini9p_server_handler = config->mini9p_server_handler;
     runtime_config.mini9p_server_ctx = config->mini9p_server_ctx;
     mesh_node_service_fill_local_uid(runtime_config.local_uid);

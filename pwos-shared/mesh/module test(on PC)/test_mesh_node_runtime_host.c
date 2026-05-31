@@ -133,6 +133,22 @@ static int fake_mini9p_server_handler(
                : -(int)MESH_ERR_BAD_FRAME;
 }
 
+static size_t find_tx_frame_type(const struct fake_transport *transport, uint8_t type)
+{
+    size_t i;
+
+    for (i = 0u; i < transport->tx_count; ++i) {
+        struct mesh_frame_view view;
+
+        if (mesh_decode_frame(transport->tx_queue[i].data, transport->tx_queue[i].len, &view) &&
+            view.type == type) {
+            return i;
+        }
+    }
+
+    return transport->tx_count;
+}
+
 static void init_runtime(
     struct mesh_node_runtime *runtime,
     struct fake_transport *transport,
@@ -199,13 +215,18 @@ static void test_assign_updates_local_addr_and_allows_server_reply(void)
     struct mesh_register_payload register_payload;
     struct m9p_frame_view mini9p_view;
     uint8_t assign_frame[160];
+    uint8_t probe_response_frame[64];
     uint8_t request_frame[96];
     uint8_t mesh_frame[TEST_FRAME_CAP];
     size_t assign_len = 0u;
+    size_t probe_response_len = 0u;
     size_t request_len = 0u;
     size_t mesh_len = 0u;
     uint8_t next_hop = 0u;
     bool is_local = false;
+    size_t register_tx_index;
+    size_t mini9p_tx_index;
+    size_t tx_count_before_request;
     const uint8_t uid[MESH_UID_LEN] = {0xA1u, 0xA2u, 0xA3u, 0xA4u, 0xA5u, 0xA6u, 0xA7u, 0xA8u};
 
     memset(&server_ctx, 0, sizeof(server_ctx));
@@ -233,20 +254,37 @@ static void test_assign_updates_local_addr_and_allows_server_reply(void)
     assert(mesh_node_runtime_poll_once(&runtime) == 0);
     assert(runtime.cluster.config.local_addr == 0x24u);
     assert(runtime.processor.config.local_addr == 0x24u);
-    assert(transport.tx_count == 1u);
-    assert(transport.tx_next_hop[0] == 0x01u);
-    assert(mesh_decode_frame(transport.tx_queue[0].data, transport.tx_queue[0].len, &view));
+    register_tx_index = find_tx_frame_type(&transport, MESH_TYPE_REGISTER);
+    assert(register_tx_index < transport.tx_count);
+    assert(transport.tx_next_hop[register_tx_index] == 0x01u);
+    assert(mesh_decode_frame(
+        transport.tx_queue[register_tx_index].data,
+        transport.tx_queue[register_tx_index].len,
+        &view));
     assert(view.type == MESH_TYPE_REGISTER);
     assert(view.src == 0x24u);
     assert(view.dst == MESH_ADDR_UNASSIGNED);
     assert(mesh_parse_register(&view, &register_payload));
     assert(memcmp(register_payload.uid, uid, sizeof(uid)) == 0);
+    assert(find_tx_frame_type(&transport, MESH_TYPE_NEIGHBOR_PROBE_REQUEST) < transport.tx_count);
+
+    assert(mesh_build_neighbor_probe_response(
+        0x01u,
+        MESH_ADDR_UNASSIGNED,
+        0x1002u,
+        6u,
+        probe_response_frame,
+        sizeof(probe_response_frame),
+        &probe_response_len));
+    fake_transport_queue_rx_on_port(&transport, probe_response_frame, probe_response_len, 2u);
+    assert(mesh_node_runtime_poll_once(&runtime) == 0);
     assert(cluster_lookup_next_hop(&runtime.cluster, 0x01u, &next_hop, &is_local) == 0);
     assert(!is_local);
     assert(next_hop == 0x01u);
     assert(transport.learned_count == 1u);
     assert(transport.learned_addr[0] == 0x01u);
     assert(transport.learned_port[0] == 2u);
+    tx_count_before_request = transport.tx_count;
 
     assert(m9p_build_tclunk(0x3344u, 9u, request_frame, sizeof(request_frame), &request_len));
     assert(mesh_build_mini9p_frame(
@@ -265,12 +303,14 @@ static void test_assign_updates_local_addr_and_allows_server_reply(void)
     assert(mesh_node_runtime_poll_once(&runtime) == 0);
     assert(server_ctx.call_count == 1u);
     assert(server_ctx.last_tag == 0x3344u);
-    assert(transport.tx_count == 2u);
-    assert(transport.tx_next_hop[1] == 0x01u);
-    assert(transport.learned_count == 2u);
-    assert(transport.learned_addr[1] == 0x01u);
-    assert(transport.learned_port[1] == 2u);
-    assert(mesh_decode_frame(transport.tx_queue[1].data, transport.tx_queue[1].len, &view));
+    assert(transport.tx_count == tx_count_before_request + 1u);
+    mini9p_tx_index = transport.tx_count - 1u;
+    assert(transport.tx_next_hop[mini9p_tx_index] == 0x01u);
+    assert(transport.learned_count == 1u);
+    assert(mesh_decode_frame(
+        transport.tx_queue[mini9p_tx_index].data,
+        transport.tx_queue[mini9p_tx_index].len,
+        &view));
     assert(view.type == MESH_TYPE_MINI9P);
     assert(view.src == 0x24u);
     assert(view.dst == 0x01u);

@@ -42,6 +42,10 @@ struct mesh_node_runtime_config {
     int (*learn_peer_port)(void *ctx, uint8_t mesh_addr, uint8_t port_id);
     /** 原样传给 learn_peer_port 的上下文。 */
     void *learn_peer_port_ctx;
+    /** 可选毫秒时钟；用于 ASSIGN 后邻居探测重试。 */
+    uint32_t (*time_ms)(void *ctx);
+    /** 原样传给 time_ms 的上下文。 */
+    void *time_ctx;
     /** 本地 Mini9P server 帧处理器；不需要数据面服务时可为 NULL。 */
     mesh_processer_mini9p_server_handler_fn mini9p_server_handler;
     /** 原样传给 mini9p_server_handler 的上下文。 */
@@ -91,6 +95,10 @@ struct mesh_node_runtime {
     uint8_t upstream_port;
     /** 上游 control-plane mesh 地址，用于构造早期 LINK_STATE dst。 */
     uint8_t control_plane_addr;
+    /** ASSIGN 后邻居探测剩余重试次数。 */
+    uint8_t neighbor_probe_retries_left;
+    /** 下一次邻居探测重试的时间戳。 */
+    uint32_t next_neighbor_probe_ms;
     /** 下游 bootstrap REGISTER 等待 ASSIGN 回转的临时表。 */
     struct mesh_node_runtime_bootstrap_pending pending_bootstrap[MESH_NODE_RUNTIME_MAX_BOOTSTRAP_PENDING];
 };
