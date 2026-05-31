@@ -52,7 +52,7 @@
 #include <termios.h>
 #include <unistd.h>
 
-/** 默认波特率：1 Mbps（STM32F411 USART1 默认值） */
+/** 默认波特率：1 Mbps（当前 STM32 Mini9P UART 默认值） */
 #define PC_MASTER_DEFAULT_BAUD 1000000u
 
 /** poll/recv 超时时间（毫秒） */
@@ -766,6 +766,7 @@ static int pc_mesh_receive_frame(
     if (transport == NULL || transport->fd < 0 || out_ingress_port == NULL) {
         return -(int)MESH_ERR_INVALID_STATE;
     }
+    *out_ingress_port = MESH_PROCESSER_INGRESS_PORT_NONE;
 
     *out_ingress_port = MESH_PROCESSER_INGRESS_PORT_NONE;
     rc = pc_receive_mesh_frame(transport->fd, rx_data, rx_cap, rx_len);

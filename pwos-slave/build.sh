@@ -4,6 +4,7 @@ set -euo pipefail
 ACTION="${1:-build}"
 PC_SERIAL_DEV="${PC_SERIAL_DEV:-/dev/ttyUSB0}"
 PC_SERIAL_BAUD="${PC_SERIAL_BAUD:-1000000}"
+PC_NODE_COUNT="${PC_NODE_COUNT:-1}"
 PRESET="${PRESET:-ZGT6Debug}"
 OPENOCD_INTERFACE="${OPENOCD_INTERFACE:-interface/stlink.cfg}"
 OPENOCD_TARGET="${OPENOCD_TARGET:-target/stm32f4x.cfg}"
@@ -21,6 +22,7 @@ env:
   OPENOCD_TARGET     OpenOCD target config, default: target/stm32f4x.cfg
   PC_SERIAL_DEV      serial device for pc_master_emulator, default: /dev/ttyUSB0
   PC_SERIAL_BAUD     serial baud for pc_master_emulator, default: 1000000
+  PC_NODE_COUNT      number of nodes to wait for, default: 1
 EOF
 }
 
@@ -46,7 +48,7 @@ flash_firmware() {
 run_pc_master_emulator() {
     cmake -S "$REPO_ROOT/tools/pc_master_emulator" -B "$REPO_ROOT/tools/pc_master_emulator/build"
     cmake --build "$REPO_ROOT/tools/pc_master_emulator/build"
-    "$REPO_ROOT/tools/pc_master_emulator/build/pc_master_emulator" "$PC_SERIAL_DEV" "$PC_SERIAL_BAUD"
+    "$REPO_ROOT/tools/pc_master_emulator/build/pc_master_emulator" "$PC_SERIAL_DEV" "$PC_SERIAL_BAUD" "$PC_NODE_COUNT"
 }
 
 case "$ACTION" in

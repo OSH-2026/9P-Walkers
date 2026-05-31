@@ -65,7 +65,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${PWOS_SLAVE_USER_DIR}/fs/lfs_util.c
     ${PWOS_F411_USER_DIR}/drivers/storage/lfs_port.cpp
     ${PWOS_SLAVE_USER_DIR}/app/fs_selftest.c
-    ${PWOS_SLAVE_USER_DIR}/app/mesh_node_mini9p_service.c
+    ${PWOS_SLAVE_USER_DIR}/app/mesh_node_mini9p_init.c
     ${PWOS_SLAVE_USER_MESH_DIR}/mesh_node_service.c
     ${PWOS_SHARED_MESH_CLUSTER_DIR}/cluster.c
     ${PWOS_SHARED_MESH_ENVELOPE_DIR}/mesh_protocal.c

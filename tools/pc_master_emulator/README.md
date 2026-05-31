@@ -28,14 +28,13 @@ tools/pc_master_emulator/build/pc_master_emulator <serial-dev> [baud] [node-coun
 示例：
 
 ```bash
-tools/pc_master_emulator/build/pc_master_emulator /dev/ttyUSB0 115200 2
+tools/pc_master_emulator/build/pc_master_emulator /dev/ttyUSB0 1000000 1
 ```
 
-如果省略波特率，工具默认使用 `1000000`。当前 `pwos-slave-stm32f411`
-工程的 USART1 配置为 `115200`，运行时需要显式传入 `115200`，或者同步修改
-固件里的 `huart1.Init.BaudRate`。
+如果省略波特率，工具默认使用 `1000000`。当前 `pwos-slave` 与
+`pwos-slave-stm32f411` 的 Mini9P 串口联调口均配置为 `1000000`。
 
-如果省略 `node-count`，工具默认等待 2 个节点。节点按本次运行内的注册顺序分配：
+单板 smoke test 传 `1`。如果省略 `node-count`，工具默认等待 2 个节点。节点按本次运行内的注册顺序分配：
 
 - 第 1 个新 UID：`mcu1`，地址 `0x11`
 - 第 2 个新 UID：`mcu2`，地址 `0x22`
@@ -60,10 +59,8 @@ pc_master_emulator: ok
 
 ## 连接约定
 
-直连 smoke test：
-
-- USB-TTL TX -> STM32 USART1 RX，通常为 `PA10`
-- USB-TTL RX -> STM32 USART1 TX，通常为 `PA9`
+- USB-TTL TX -> STM32 Mini9P UART RX；当前 F407/F411 联调口为 `USART2 RX = PA3`
+- USB-TTL RX -> STM32 Mini9P UART TX；当前 F407/F411 联调口为 `USART2 TX = PA2`
 - GND -> GND
 - 使用 3.3V TTL 电平
 

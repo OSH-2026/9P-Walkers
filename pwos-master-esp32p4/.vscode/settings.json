@@ -15,5 +15,6 @@
     },
     "cmake.environment": {
         "IDF_TARGET": "esp32p4"
-    }
+    },
+    "idf.currentSetup": "/home/hb/.espressif/v6.0/esp-idf"
 }
