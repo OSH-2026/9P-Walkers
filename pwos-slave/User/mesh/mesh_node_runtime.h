@@ -78,7 +78,8 @@ struct mesh_node_runtime {
     uint16_t next_mesh_seq;
     /** 最近到达帧的入口端口，供 control_handler 回调读取。 */
     uint8_t last_ingress_port;
-    /** 收到本机 ASSIGN 的端口（上游 control-plane port）。 */
+    /** 收到本机 ASSIGN 的端口，作为路由表收敛前的上游 control-plane 临时端口。 */
+    uint8_t upstream_port;
 };
 
 /**

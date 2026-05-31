@@ -6,6 +6,10 @@ static int mesh_node_runtime_send_register(
     struct mesh_node_runtime *runtime,
     uint8_t next_hop);
 
+static int mesh_node_runtime_send_register_to_port(
+    struct mesh_node_runtime *runtime,
+    uint8_t port_id);
+
 static int mesh_node_runtime_send_neighbor_probe(
     struct mesh_node_runtime *runtime,
     uint8_t next_hop);
@@ -159,10 +163,14 @@ static int mesh_node_runtime_control_handler(
 
     if (assign_hits_local) {
         runtime->processor.config.local_addr = assign_payload.node_addr;
-        /* 记录 ASSIGN 入口端口为 upstream/control-plane port。 */
+        runtime->upstream_port = runtime->last_ingress_port;
 
-
-        rc = mesh_node_runtime_send_register(runtime, frame->src);
+        if (runtime->upstream_port != MESH_PROCESSER_INGRESS_PORT_NONE &&
+            runtime->config.send_frame_to_port != NULL) {
+            rc = mesh_node_runtime_send_register_to_port(runtime, runtime->upstream_port);
+        } else {
+            rc = mesh_node_runtime_send_register(runtime, frame->src);
+        }
         if (rc != 0) {
             return rc;
         }
@@ -209,6 +217,44 @@ static int mesh_node_runtime_send_register(
     return runtime->config.send_frame(
         runtime->config.transport_ctx,
         next_hop,
+        frame,
+        frame_len);
+}
+
+static int mesh_node_runtime_send_register_to_port(
+    struct mesh_node_runtime *runtime,
+    uint8_t port_id)
+{
+    struct mesh_register_payload payload;
+    uint8_t frame[MESH_PROCESSER_FRAME_CAP];
+    size_t frame_len = 0u;
+
+    if (runtime == NULL || !runtime->initialized ||
+        runtime->config.send_frame_to_port == NULL ||
+        port_id == MESH_PROCESSER_INGRESS_PORT_NONE) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    memset(&payload, 0, sizeof(payload));
+    memcpy(payload.uid, runtime->config.local_uid, sizeof(payload.uid));
+    payload.boot_nonce = runtime->config.boot_nonce;
+    payload.capability_bits = runtime->config.capability_bits;
+    payload.port_bitmap = runtime->config.port_bitmap;
+
+    if (!mesh_build_register(
+            runtime->processor.config.local_addr,
+            mesh_node_runtime_take_seq(runtime),
+            mesh_node_runtime_default_hop(runtime),
+            &payload,
+            frame,
+            sizeof(frame),
+            &frame_len)) {
+        return -(int)MESH_ERR_BAD_FRAME;
+    }
+
+    return runtime->config.send_frame_to_port(
+        runtime->config.transport_ctx,
+        port_id,
         frame,
         frame_len);
 }
@@ -313,6 +359,7 @@ int mesh_node_runtime_init(
     runtime->next_mesh_seq = 1u;
     runtime->initialized = true;
     runtime->last_ingress_port = MESH_PROCESSER_INGRESS_PORT_NONE;
+    runtime->upstream_port = MESH_PROCESSER_INGRESS_PORT_NONE;
 
     if (runtime->config.auto_register_on_init) {
         rc = mesh_node_runtime_send_register(runtime, runtime->config.bootstrap_next_hop);
