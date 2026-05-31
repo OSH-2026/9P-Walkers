@@ -134,6 +134,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
 #ifdef PWOS_BOARD_ZGT6
   MX_GPIO_PF9_LED_Init();
+  MX_GPIO_PF10_LED_Init();
 #ifdef PWOS_ENABLE_MINI9P_SERIAL
   HAL_GPIO_WritePin(GPIOF, GPIO_PIN_9, GPIO_PIN_SET);
 #endif
