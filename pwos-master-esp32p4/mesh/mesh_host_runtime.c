@@ -377,6 +377,42 @@ static int mesh_host_runtime_sync_controller_routes(struct mesh_host_runtime *ru
     return 0;
 }
 
+static int mesh_host_runtime_handle_neighbor_probe(
+    struct mesh_host_runtime *runtime,
+    const struct mesh_frame_view *frame)
+{
+    uint8_t response[MESH_PROCESSER_FRAME_CAP];
+    size_t response_len = 0u;
+
+    if (runtime == NULL || frame == NULL) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    if (frame->type == MESH_TYPE_NEIGHBOR_PROBE_RESPONSE) {
+        return 0;
+    }
+    if (frame->type != MESH_TYPE_NEIGHBOR_PROBE_REQUEST) {
+        return -(int)MESH_ERR_UNSUPPORTED_TYPE;
+    }
+
+    if (!mesh_build_neighbor_probe_response(
+            runtime->config.local_addr,
+            MESH_ADDR_UNASSIGNED,
+            mesh_host_runtime_next_seq(runtime),
+            runtime->config.default_hop,
+            response,
+            sizeof(response),
+            &response_len)) {
+        return -(int)MESH_ERR_BAD_FRAME;
+    }
+
+    return runtime->config.send_frame(
+        runtime->config.transport_ctx,
+        frame->src,
+        response,
+        response_len);
+}
+
 static int mesh_host_runtime_client_request(
     void *transport_ctx,
     const uint8_t *tx_data,
@@ -734,8 +770,17 @@ int mesh_host_runtime_process_frame(
     const uint8_t *frame_data,
     size_t frame_len)
 {
+    struct mesh_frame_view frame;
+
     if (runtime == NULL || !runtime->initialized) {
         return -(int)MESH_ERR_INVALID_STATE;
+    }
+    if (frame_data == NULL || !mesh_decode_frame(frame_data, frame_len, &frame)) {
+        return -(int)MESH_ERR_BAD_FRAME;
+    }
+    if (frame.type == MESH_TYPE_NEIGHBOR_PROBE_REQUEST ||
+        frame.type == MESH_TYPE_NEIGHBOR_PROBE_RESPONSE) {
+        return mesh_host_runtime_handle_neighbor_probe(runtime, &frame);
     }
 
     return mesh_processer_process_frame(&runtime->processor, frame_data, frame_len);
@@ -743,6 +788,8 @@ int mesh_host_runtime_process_frame(
 
 int mesh_host_runtime_poll_once(struct mesh_host_runtime *runtime)
 {
+    size_t rx_len = 0u;
+    uint8_t ingress_port = MESH_PROCESSER_INGRESS_PORT_NONE;
     int rc;
 
     if (runtime == NULL || !runtime->initialized) {
@@ -754,7 +801,16 @@ int mesh_host_runtime_poll_once(struct mesh_host_runtime *runtime)
         return rc;
     }
 
-    rc = mesh_processer_poll_once(&runtime->processor);
+    rc = runtime->config.receive_frame(
+        runtime->config.transport_ctx,
+        runtime->processor.rx_buffer,
+        sizeof(runtime->processor.rx_buffer),
+        &rx_len,
+        &ingress_port);
+    if (rc == 0) {
+        (void)ingress_port;
+        rc = mesh_host_runtime_process_frame(runtime, runtime->processor.rx_buffer, rx_len);
+    }
     mesh_host_runtime_release_dispatch(runtime);
     return rc;
 }

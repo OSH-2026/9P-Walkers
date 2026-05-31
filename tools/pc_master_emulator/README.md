@@ -25,16 +25,22 @@ cmake --build tools/pc_master_emulator/build
 tools/pc_master_emulator/build/pc_master_emulator <serial-dev> [baud] [node-count]
 ```
 
-示例：
+单板 smoke test：
 
 ```bash
 tools/pc_master_emulator/build/pc_master_emulator /dev/ttyUSB0 1000000 1
 ```
 
-如果省略波特率，工具默认使用 `1000000`。当前 `pwos-slave` 与
-`pwos-slave-stm32f411` 的 Mini9P 串口联调口均配置为 `1000000`。
+两从机串联联调：
 
-单板 smoke test 传 `1`。如果省略 `node-count`，工具默认等待 2 个节点。节点按本次运行内的注册顺序分配：
+```bash
+tools/pc_master_emulator/build/pc_master_emulator /dev/ttyUSB0 1000000 2
+```
+
+如果省略波特率，工具默认使用 `1000000`。当前 `pwos-slave` 与
+`pwos-slave-stm32f411` 的 UART 初始化均配置为 `1000000`。
+
+如果省略 `node-count`，工具默认等待 2 个节点。节点按本次运行内的注册顺序分配：
 
 - 第 1 个新 UID：`mcu1`，地址 `0x11`
 - 第 2 个新 UID：`mcu2`，地址 `0x22`
@@ -59,6 +65,16 @@ pc_master_emulator: ok
 
 ## 连接约定
 
+当前默认从机集成：
+
+- `pwos-slave/User/app/mesh_node_mini9p_init.c` 默认只把 `huart2` 加入 `mesh_node_service`。
+- 当前 F407/F411 的 `USART2` 均为 `1000000 8N1`。
+- `USART2 TX = PA2`，`USART2 RX = PA3`。
+
+因此单板直连可以直接使用默认固件；两从机串联时，slave A 必须先改成多端口 mesh 配置，把第二个 UART 也加入 `mesh_config.ports[]`，否则 A 没有下游端口可以接 slave B。
+
+直连 smoke test：
+
 - USB-TTL TX -> STM32 Mini9P UART RX；当前 F407/F411 联调口为 `USART2 RX = PA3`
 - USB-TTL RX -> STM32 Mini9P UART TX；当前 F407/F411 联调口为 `USART2 TX = PA2`
 - GND -> GND
@@ -66,8 +82,8 @@ pc_master_emulator: ok
 
 两从机串联联调：
 
-- PC USB-TTL 接 slave A 的上游 UART。
-- slave A 的另一个已启用 UART 接 slave B 的上游 UART。
+- PC USB-TTL 接 slave A 的上游 mesh UART，默认可用 `USART2 PA2/PA3`。
+- slave A 的另一个已启用 mesh UART 接 slave B 的上游 mesh UART。
 - slave A/B 固件需要启用多 UART mesh node service。
 - slave A/B 负责完成邻居 probe、动态 `addr -> port` 学习和 `LINK_STATE` 上报；PC emulator 只作为 host/controller。
 

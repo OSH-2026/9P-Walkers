@@ -210,6 +210,25 @@ static void build_link_state_frame(
     }
 }
 
+static void build_neighbor_probe_frame(
+    uint8_t type,
+    uint8_t src,
+    uint8_t dst,
+    uint8_t *out_frame,
+    size_t *out_len)
+{
+    bool ok;
+
+    if (type == MESH_TYPE_NEIGHBOR_PROBE_REQUEST) {
+        ok = mesh_build_neighbor_probe_request(src, 0x3000u, 6u, out_frame, TEST_FRAME_CAP, out_len);
+    } else {
+        ok = mesh_build_neighbor_probe_response(src, dst, 0x3000u, 6u, out_frame, TEST_FRAME_CAP, out_len);
+    }
+    if (!ok) {
+        failf("build_neighbor_probe_frame", "mesh_build_neighbor_probe failed");
+    }
+}
+
 static void build_mini9p_response_mesh_frame(
     uint8_t src,
     uint8_t *mini9p_frame,
@@ -460,6 +479,72 @@ static void expect_no_route_update(
     }
 }
 
+static void test_neighbor_probe_request_gets_host_response_without_topology(void)
+{
+    struct mesh_host_runtime runtime;
+    struct fake_mesh_io io;
+    struct mesh_frame_view response;
+    uint8_t frame[TEST_FRAME_CAP];
+    size_t frame_len = 0u;
+    bool reachable = true;
+
+    init_runtime(&runtime, &io);
+    build_neighbor_probe_frame(MESH_TYPE_NEIGHBOR_PROBE_REQUEST, 0x11u, MESH_ADDR_UNASSIGNED, frame, &frame_len);
+
+    expect_int("probe request", mesh_host_runtime_process_frame(&runtime, frame, frame_len), 0);
+    expect_int("probe response tx count", (int)io.tx_count, 1);
+    expect_int("probe response next hop", io.tx_next_hops[0], 0x11u);
+    if (!mesh_decode_frame(io.tx_frames[0], io.tx_lens[0], &response)) {
+        failf("probe response decode", "mesh_decode_frame failed");
+        return;
+    }
+    expect_int("probe response type", response.type, MESH_TYPE_NEIGHBOR_PROBE_RESPONSE);
+    expect_int("probe response src", response.src, MESH_ADDR_HOST);
+    expect_int("probe response dst", response.dst, MESH_ADDR_UNASSIGNED);
+    expect_int("probe no topology rc", cluster_can_reach(cluster_config_mesh_cluster(), 0x11u, &reachable), 0);
+    expect_int("probe no topology", reachable, 0);
+}
+
+static void test_neighbor_probe_request_poll_path_gets_host_response(void)
+{
+    struct mesh_host_runtime runtime;
+    struct fake_mesh_io io;
+    struct mesh_frame_view response;
+    uint8_t frame[TEST_FRAME_CAP];
+    size_t frame_len = 0u;
+
+    init_runtime(&runtime, &io);
+    build_neighbor_probe_frame(MESH_TYPE_NEIGHBOR_PROBE_REQUEST, 0x11u, MESH_ADDR_UNASSIGNED, frame, &frame_len);
+    push_rx_frame(&io, frame, frame_len);
+
+    expect_int("probe request poll", mesh_host_runtime_poll_once(&runtime), 0);
+    expect_int("probe poll tx count", (int)io.tx_count, 1);
+    if (!mesh_decode_frame(io.tx_frames[0], io.tx_lens[0], &response)) {
+        failf("probe poll response decode", "mesh_decode_frame failed");
+        return;
+    }
+    expect_int("probe poll response type", response.type, MESH_TYPE_NEIGHBOR_PROBE_RESPONSE);
+    expect_int("probe poll response src", response.src, MESH_ADDR_HOST);
+    expect_int("probe poll response dst", response.dst, MESH_ADDR_UNASSIGNED);
+}
+
+static void test_neighbor_probe_response_is_consumed_by_host(void)
+{
+    struct mesh_host_runtime runtime;
+    struct fake_mesh_io io;
+    uint8_t frame[TEST_FRAME_CAP];
+    size_t frame_len = 0u;
+    bool reachable = true;
+
+    init_runtime(&runtime, &io);
+    build_neighbor_probe_frame(MESH_TYPE_NEIGHBOR_PROBE_RESPONSE, 0x11u, MESH_ADDR_UNASSIGNED, frame, &frame_len);
+
+    expect_int("probe response consume", mesh_host_runtime_process_frame(&runtime, frame, frame_len), 0);
+    expect_int("probe response consume tx count", (int)io.tx_count, 0);
+    expect_int("probe response no topology rc", cluster_can_reach(cluster_config_mesh_cluster(), 0x11u, &reachable), 0);
+    expect_int("probe response no topology", reachable, 0);
+}
+
 /*
  * REGISTER 必须能在 runtime 中自动落到 VFS，
  * 但这里还不应该凭空伪造一条 host <-> node 直连边。
@@ -666,6 +751,12 @@ int main(void)
              test_unassigned_register_waits_for_confirmed_register);
     run_test("test_register_broadcast_updates_vfs_without_direct_link",
              test_register_broadcast_updates_vfs_without_direct_link);
+    run_test("test_neighbor_probe_request_gets_host_response_without_topology",
+             test_neighbor_probe_request_gets_host_response_without_topology);
+    run_test("test_neighbor_probe_request_poll_path_gets_host_response",
+             test_neighbor_probe_request_poll_path_gets_host_response);
+    run_test("test_neighbor_probe_response_is_consumed_by_host",
+             test_neighbor_probe_response_is_consumed_by_host);
     run_test("test_link_state_to_host_enables_attach_over_mesh_client",
              test_link_state_to_host_enables_attach_over_mesh_client);
     run_test("test_routed_read_path_uses_cluster_next_hop",
