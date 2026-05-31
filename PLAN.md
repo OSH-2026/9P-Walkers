@@ -119,15 +119,16 @@
      - 通知 service 学习 `payload.node_addr -> pending.ingress_port`。
      - 在本地 direct route 写 `dst=payload.node_addr, next_hop=payload.node_addr`。
      - service `addr_ports` 记录 `payload.node_addr -> pending.ingress_port`（通过 `learn_peer_port` 回调）。
-     - 构造并向主机上报 `LINK_STATE(src=本机, dst=host, neighbor=payload.node_addr, local_port=ingress_port)`。
+     - 构造并向主机上报 `LINK_STATE(src=本机, dst=host, neighbor=payload.node_addr, link_up=1, quality=1)`。
      - 清理 pending。
    - 如果 ASSIGN UID 命中本机 UID，走本机 ASSIGN 逻辑，不误转发给下游。
 
-5. LINK_STATE payload 字段核对：
+5. LINK_STATE payload 字段约束：
    - 当前 `mesh_link_state_payload` 是固定 3 字节，现有字段包含 neighbor/link_up/quality。
-   - 如果没有 `local_port` 字段，最小闭环先按“neighbor=下游地址，quality=ingress_port 或既有字段承载策略”实现，并同步更新协议注释/测试。
-   - 如果决定扩展 payload，必须同步 `mesh_build_link_state()`、`mesh_parse_link_state()`、协议测试、host runtime 解析和兼容策略。
-   - LINK_STATE 只作为从机向主机报告直连邻居事实，不在从机之间传播路由。
+   - Phase 4 不扩展协议、不新增 `local_port` 字段，也不把 ingress port 塞进 `quality`。
+   - `quality` 继续保持链路 metric 语义，最小闭环使用 `quality=1`。
+   - 主机只需要知道 topology 边：`src=relay_addr -> neighbor=child_addr`；relay 本地物理端口只保存在 service 动态 `addr -> port` 表。
+   - LINK_STATE 只作为从机向主机报告直连邻居事实，不在从机之间传播路由，不携带 relay 本地 UART port。
 
 验收：
 
