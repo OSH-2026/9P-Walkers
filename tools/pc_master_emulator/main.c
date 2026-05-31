@@ -841,8 +841,6 @@ static int pc_mesh_receive_frame(
         return -(int)MESH_ERR_INVALID_STATE;
     }
     *out_ingress_port = MESH_PROCESSER_INGRESS_PORT_NONE;
-
-    *out_ingress_port = MESH_PROCESSER_INGRESS_PORT_NONE;
     rc = pc_receive_mesh_frame(transport->fd, rx_data, rx_cap, rx_len);
     if (rc != 0) {
         return rc;

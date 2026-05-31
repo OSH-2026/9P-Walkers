@@ -115,8 +115,9 @@
 3. 记录本机上游 control-plane port：
    - 本机收到命中自己 UID 的 ASSIGN 后，更新本机 mesh addr。
    - 同时记录 ASSIGN 的 ingress port 为 upstream/control-plane port。
-   - 后续本机 REGISTER/LINK_STATE 上报优先发往该 upstream port；未分配前仍可按现有 bootstrap 广播值发送。
-   - 本机 ASSIGN 完成后：a) 向上游发送确认 REGISTER；b) 对所有已启用 UART port 发起 `NEIGHBOR_PROBE_REQUEST`。
+   - 后续本机 LINK_STATE 上报优先发往该 upstream port；未分配前 bootstrap REGISTER 仍按现有广播值发送。
+   - 本机 ASSIGN 完成后不再发送二次确认 REGISTER；主机在 ASSIGN 成功发出后即注册该 UID/addr。
+   - 本机 ASSIGN 完成后，对所有已启用 UART port 发起 `NEIGHBOR_PROBE_REQUEST`。
    - 收到 `NEIGHBOR_PROBE_RESPONSE` 后学习 `neighbor_addr -> ingress_port`，并在上游控制面已知时立即上报 `LINK_STATE(src=本机, dst=host, neighbor=neighbor_addr)`。
 
 4. 处理主机 ASSIGN 回转：

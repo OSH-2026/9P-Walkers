@@ -578,6 +578,9 @@ int mesh_host_runtime_register_assigned_node(
     struct m9p_client *client = NULL;
     int rc;
 
+    if (runtime == NULL || uid == NULL || !runtime->initialized) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
     if (mesh_addr == MESH_ADDR_UNASSIGNED) {
         return 0;
     }

@@ -190,7 +190,7 @@ pc_master_emulator / mesh_host_runtime
 **从机侧流程**：
 
 - 上电 → broadcast REGISTER(src=0xFF)
-- 收到 ASSIGN → 更新本机地址，记录 upstream_port，向上游确认 REGISTER
+- 收到 ASSIGN → 更新本机地址，记录 upstream_port；主机在 ASSIGN 成功发出后即注册该 UID/addr
 - ASSIGN 后 → 向所有端口广播 NEIGHBOR_PROBE_REQUEST
 - 收到 NEIGHBOR_PROBE_RESPONSE → 学到 `src → ingress_port`，若已知上游 control-plane 则上报 LINK_STATE
 

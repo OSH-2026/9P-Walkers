@@ -207,7 +207,7 @@
 3. 中继仅基于 envelope 头进行转发。
 4. 主机识别 UID，分配或恢复节点名，分配短地址。
 5. 主机发送 ASSIGN。
-6. 节点切换为正式地址并向上游确认 REGISTER。
+6. 节点切换为正式地址；主机在 ASSIGN 成功发出后即注册该 UID/addr，不依赖节点二次 REGISTER。
 7. 节点随后通过 `NEIGHBOR_PROBE_REQUEST/RESPONSE` 学习直连邻居地址，并分别向主机上报各自看到的 `LINK_STATE`。
 
 重连建议：

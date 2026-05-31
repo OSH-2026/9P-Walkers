@@ -23,7 +23,7 @@
 2. 板级代码调用 `mesh_node_service_get_default_config()`，填入 UART handle、Mini9P handler/context 后调用 `mesh_node_service_init()`。
 3. service 初始化 UART transport 和 runtime，并默认广播一帧 REGISTER。
 4. 主机下发 ASSIGN 后，runtime 校验 UID，只接受命中本机 UID 的 ASSIGN。
-5. ASSIGN 命中后，runtime 同步 `cluster.config.local_addr` 和 `processor.config.local_addr`，记录上游 control-plane port，然后向上游确认 REGISTER。
+5. ASSIGN 命中后，runtime 同步 `cluster.config.local_addr` 和 `processor.config.local_addr`，记录上游 control-plane port；不再向上游发送二次确认 REGISTER。
 6. 本机 ASSIGN 完成后，runtime 向所有已启用 UART 端口广播 `NEIGHBOR_PROBE_REQUEST`，用端口级探测学习直连邻居的 `mesh_addr -> ingress_port`。
 7. 若本机作为 relay 收到下游 bootstrap `REGISTER(src=0xff,dst=0xff)`，runtime 记录 pending `uid + boot_nonce -> ingress_port`，并把原始 REGISTER 转发到上游 control-plane port。主机 ASSIGN 到来后，runtime 会把原始 ASSIGN 回转到对应下游 ingress port，并学习 `child_addr -> port`。
 
