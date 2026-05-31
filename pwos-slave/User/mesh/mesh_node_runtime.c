@@ -146,6 +146,27 @@ static int mesh_node_runtime_ensure_upstream_control_route(struct mesh_node_runt
         1u);
 }
 
+static int mesh_node_runtime_report_new_direct_peer(
+    struct mesh_node_runtime *runtime,
+    uint8_t peer_addr,
+    bool already_known)
+{
+    if (already_known) {
+        return 0;
+    }
+    if (runtime == NULL ||
+        runtime->processor.config.local_addr == MESH_ADDR_UNASSIGNED ||
+        runtime->control_plane_addr == MESH_ADDR_UNASSIGNED ||
+        runtime->upstream_port == MESH_PROCESSER_INGRESS_PORT_NONE ||
+        runtime->config.send_frame_to_port == NULL ||
+        peer_addr == MESH_ADDR_UNASSIGNED) {
+        mesh_diag_text("direct peer skip link_state");
+        return 0;
+    }
+
+    return mesh_node_runtime_send_link_state_to_upstream(runtime, peer_addr);
+}
+
 /*
  * 收到 NEIGHBOR_PROBE_REQUEST 后，若本机已有正式地址，立即从同一
  * ingress port 回 NEIGHBOR_PROBE_RESPONSE，不使用普通转发路径。
@@ -199,6 +220,27 @@ static struct mesh_node_runtime_bootstrap_pending *mesh_node_runtime_find_pendin
         struct mesh_node_runtime_bootstrap_pending *entry = &runtime->pending_bootstrap[i];
 
         if (entry->used && memcmp(entry->uid, uid, MESH_UID_LEN) == 0) {
+            return entry;
+        }
+    }
+
+    return NULL;
+}
+
+static struct mesh_node_runtime_bootstrap_pending *mesh_node_runtime_find_pending_by_addr(
+    struct mesh_node_runtime *runtime,
+    uint8_t addr)
+{
+    size_t i;
+
+    if (runtime == NULL || addr == MESH_ADDR_UNASSIGNED) {
+        return NULL;
+    }
+
+    for (i = 0u; i < MESH_NODE_RUNTIME_MAX_BOOTSTRAP_PENDING; ++i) {
+        struct mesh_node_runtime_bootstrap_pending *entry = &runtime->pending_bootstrap[i];
+
+        if (entry->used && entry->assign_forwarded && entry->assigned_addr == addr) {
             return entry;
         }
     }
@@ -343,7 +385,8 @@ static int mesh_node_runtime_handle_pending_assign(
         return rc;
     }
 
-    memset(pending, 0, sizeof(*pending));
+    pending->assigned_addr = payload.node_addr;
+    pending->assign_forwarded = true;
     return 0;
 }
 
@@ -799,9 +842,31 @@ int mesh_node_runtime_process_frame_from_port(
 
     /* NEIGHBOR_PROBE_REQUEST: 只做本地应答，绝不转发。 */
     if (frame.type == MESH_TYPE_NEIGHBOR_PROBE_REQUEST) {
+        int rc;
+        bool already_known;
+
         if (runtime->processor.config.local_addr == MESH_ADDR_UNASSIGNED ||
             ingress_port == MESH_PROCESSER_INGRESS_PORT_NONE) {
             return 0;
+        }
+        already_known = mesh_node_runtime_has_direct_peer(runtime, frame.src);
+        if (frame.src != MESH_ADDR_UNASSIGNED) {
+            rc = mesh_node_runtime_refresh_direct_peer(runtime, frame.src, ingress_port);
+            if (rc != 0) {
+                return rc;
+            }
+            if (ingress_port == runtime->upstream_port) {
+                runtime->upstream_peer_addr = frame.src;
+                runtime->neighbor_probe_retries_left = 0u;
+                rc = mesh_node_runtime_ensure_upstream_control_route(runtime);
+                if (rc != 0) {
+                    return rc;
+                }
+            }
+            rc = mesh_node_runtime_report_new_direct_peer(runtime, frame.src, already_known);
+            if (rc != 0) {
+                return rc;
+            }
         }
         return mesh_node_runtime_handle_probe_request(runtime, ingress_port);
     }
@@ -837,17 +902,7 @@ int mesh_node_runtime_process_frame_from_port(
                 return rc;
             }
         }
-        if (already_known) {
-            return 0;
-        }
-        if (runtime->processor.config.local_addr == MESH_ADDR_UNASSIGNED ||
-            runtime->control_plane_addr == MESH_ADDR_UNASSIGNED ||
-            runtime->upstream_port == MESH_PROCESSER_INGRESS_PORT_NONE ||
-            runtime->config.send_frame_to_port == NULL) {
-            mesh_diag_text("probe resp skip link_state");
-            return 0;
-        }
-        rc = mesh_node_runtime_send_link_state_to_upstream(runtime, frame.src);
+        rc = mesh_node_runtime_report_new_direct_peer(runtime, frame.src, already_known);
         (void)snprintf(
             diag,
             sizeof(diag),
@@ -875,6 +930,17 @@ int mesh_node_runtime_process_frame_from_port(
         frame.dst == MESH_ADDR_UNASSIGNED &&
         frame.src != runtime->processor.config.local_addr &&
         runtime->upstream_port != MESH_PROCESSER_INGRESS_PORT_NONE) {
+        struct mesh_node_runtime_bootstrap_pending *pending;
+
+        pending = mesh_node_runtime_find_pending_by_addr(runtime, frame.src);
+        if (pending != NULL && pending->assign_forwarded) {
+            int rc = mesh_node_runtime_send_neighbor_probe_to_port(runtime, pending->ingress_port);
+
+            memset(pending, 0, sizeof(*pending));
+            if (rc != 0) {
+                return rc;
+            }
+        }
         return mesh_node_runtime_send_raw_to_upstream(runtime, frame_data, frame_len);
     }
 
@@ -952,4 +1018,59 @@ int mesh_node_runtime_poll_once(struct mesh_node_runtime *runtime)
         runtime->processor.rx_buffer,
         rx_len,
         ingress_port);
+}
+
+int mesh_node_runtime_format_routes(
+    struct mesh_node_runtime *runtime,
+    char *out,
+    size_t out_cap)
+{
+    size_t used = 0u;
+    size_t i;
+    int written;
+
+    if (runtime == NULL || out == NULL || out_cap == 0u) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    written = snprintf(
+        out,
+        out_cap,
+        "local=0x%02x control=0x%02x upstream_port=%u upstream_peer=0x%02x\n",
+        runtime->processor.config.local_addr,
+        runtime->control_plane_addr,
+        (unsigned)runtime->upstream_port,
+        runtime->upstream_peer_addr);
+    if (written < 0) {
+        return -(int)MESH_ERR_BAD_FRAME;
+    }
+    used = (size_t)written < out_cap ? (size_t)written : out_cap - 1u;
+
+    for (i = 0u; i < CLUSTER_MAX_ROUTES && used < out_cap - 1u; ++i) {
+        const struct cluster_route *route = &runtime->cluster.routes[i];
+
+        if (!route->valid) {
+            continue;
+        }
+
+        written = snprintf(
+            out + used,
+            out_cap - used,
+            "route dst=0x%02x next=0x%02x metric=%u local=%u\n",
+            route->dst,
+            route->next_hop,
+            route->metric,
+            route->local ? 1u : 0u);
+        if (written < 0) {
+            return -(int)MESH_ERR_BAD_FRAME;
+        }
+        if ((size_t)written >= out_cap - used) {
+            used = out_cap - 1u;
+            break;
+        }
+        used += (size_t)written;
+    }
+
+    out[used] = '\0';
+    return 0;
 }

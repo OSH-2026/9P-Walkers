@@ -6,6 +6,7 @@
 #ifndef SYS_VFS_H
 #define SYS_VFS_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "mini9p_server.h"
@@ -18,11 +19,15 @@ extern "C" {
 
 struct sys_vfs_config {
     const char *info_text;
+    int (*routes_text_fn)(void *ctx, char *out, size_t out_cap);
+    void *routes_text_ctx;
     uint16_t iounit;
 };
 
 struct sys_vfs {
     const char *info_text;
+    int (*routes_text_fn)(void *ctx, char *out, size_t out_cap);
+    void *routes_text_ctx;
     uint16_t iounit;
 };
 

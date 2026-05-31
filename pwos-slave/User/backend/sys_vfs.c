@@ -10,11 +10,13 @@
 #include <string.h>
 
 #define SYS_VFS_HEALTH_TEXT "ok\n"
+#define SYS_VFS_ROUTES_TEXT_CAP 128u
 
 enum sys_vfs_node_kind {
     SYS_VFS_NODE_DIR = 0,
     SYS_VFS_NODE_HEALTH,
     SYS_VFS_NODE_INFO,
+    SYS_VFS_NODE_ROUTES,
 };
 
 struct sys_vfs_node {
@@ -31,6 +33,7 @@ static const struct sys_vfs_node k_sys_nodes[] = {
     {"/sys", "sys", SYS_VFS_NODE_DIR, M9P_QID_DIR | M9P_QID_VIRTUAL, M9P_STAT_DIR | M9P_STAT_VIRTUAL, M9P_SERVER_PERM_READ, 0x100u},
     {"/sys/health", "health", SYS_VFS_NODE_HEALTH, M9P_QID_VIRTUAL | M9P_QID_READONLY, M9P_STAT_VIRTUAL, M9P_SERVER_PERM_READ, 0x101u},
     {"/sys/info", "info", SYS_VFS_NODE_INFO, M9P_QID_VIRTUAL | M9P_QID_READONLY, M9P_STAT_VIRTUAL, M9P_SERVER_PERM_READ, 0x102u},
+    {"/sys/routes", "routes", SYS_VFS_NODE_ROUTES, M9P_QID_VIRTUAL | M9P_QID_READONLY, M9P_STAT_VIRTUAL, M9P_SERVER_PERM_READ, 0x103u},
 };
 
 static const struct sys_vfs_node *find_node(const char *path)
@@ -163,6 +166,26 @@ static int copy_text(const char *text,
     return 0;
 }
 
+static int build_routes_text(struct sys_vfs *vfs, char *out, size_t out_cap)
+{
+    int rc;
+
+    if (vfs == NULL || out == NULL || out_cap == 0u) {
+        return -(int)M9P_ERR_EINVAL;
+    }
+
+    if (vfs->routes_text_fn == NULL) {
+        (void)snprintf(out, out_cap, "routes unavailable\n");
+        return 0;
+    }
+
+    rc = vfs->routes_text_fn(vfs->routes_text_ctx, out, out_cap);
+    if (rc != 0) {
+        (void)snprintf(out, out_cap, "routes error=%d\n", rc);
+    }
+    return 0;
+}
+
 static int sys_stat_cb(void *ctx, const char *path, struct m9p_stat *out_stat)
 {
     struct sys_vfs *vfs = (struct sys_vfs *)ctx;
@@ -182,6 +205,8 @@ static int sys_stat_cb(void *ctx, const char *path, struct m9p_stat *out_stat)
         size = (uint32_t)strlen(SYS_VFS_HEALTH_TEXT);
     } else if (node->kind == SYS_VFS_NODE_INFO && vfs->info_text != NULL) {
         size = (uint32_t)strlen(vfs->info_text);
+    } else if (node->kind == SYS_VFS_NODE_ROUTES) {
+        size = vfs->iounit;
     }
 
     fill_stat(node, size, out_stat);
@@ -242,7 +267,18 @@ static int sys_read_cb(void *ctx,
     if (node->kind == SYS_VFS_NODE_HEALTH) {
         return copy_text(SYS_VFS_HEALTH_TEXT, offset, out_data, out_cap, out_count);
     }
-    return copy_text(vfs->info_text != NULL ? vfs->info_text : "", offset, out_data, out_cap, out_count);
+    if (node->kind == SYS_VFS_NODE_INFO) {
+        return copy_text(vfs->info_text != NULL ? vfs->info_text : "", offset, out_data, out_cap, out_count);
+    }
+    {
+        char routes[SYS_VFS_ROUTES_TEXT_CAP];
+        int rc = build_routes_text(vfs, routes, sizeof(routes));
+
+        if (rc != 0) {
+            return rc;
+        }
+        return copy_text(routes, offset, out_data, out_cap, out_count);
+    }
 }
 
 static int sys_write_cb(void *ctx,
@@ -290,6 +326,8 @@ int sys_vfs_init(struct sys_vfs *vfs, const struct sys_vfs_config *config)
     memset(vfs, 0, sizeof(*vfs));
     if (config != NULL) {
         vfs->info_text = config->info_text;
+        vfs->routes_text_fn = config->routes_text_fn;
+        vfs->routes_text_ctx = config->routes_text_ctx;
         vfs->iounit = config->iounit == 0u ? SYS_VFS_DEFAULT_IOUNIT : config->iounit;
     } else {
         vfs->iounit = SYS_VFS_DEFAULT_IOUNIT;

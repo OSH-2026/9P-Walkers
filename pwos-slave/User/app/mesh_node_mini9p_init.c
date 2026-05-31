@@ -11,6 +11,12 @@ extern UART_HandleTypeDef huart2;
 static struct node_vfs g_node_vfs;
 static struct m9p_server g_mini9p_server;
 
+static int mesh_node_routes_text(void *ctx, char *out, size_t out_cap)
+{
+    (void)ctx;
+    return mesh_node_runtime_format_routes(mesh_node_service_runtime(), out, out_cap);
+}
+
 int mesh_node_mini9p_init(void)
 {
     struct node_vfs_config node_config;
@@ -18,7 +24,9 @@ int mesh_node_mini9p_init(void)
     struct mesh_node_service_config mesh_config;
     int rc;
 
+    memset(&node_config, 0, sizeof(node_config));
     node_config.iounit = NODE_VFS_DEFAULT_IOUNIT;
+    node_config.routes_text_fn = mesh_node_routes_text;
     rc = node_vfs_init(&g_node_vfs, &node_config);
     if (rc != 0) {
         mesh_diag_kv_u32("mesh init node_vfs rc", (uint32_t)(int32_t)rc);

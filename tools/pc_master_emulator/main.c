@@ -73,11 +73,17 @@
 /** 健康检查路径格式，先 walk 再 open read。 */
 #define PC_MASTER_HEALTH_PATH_FMT "/%s/sys/health"
 
+/** 从机 mesh 路由诊断路径。 */
+#define PC_MASTER_ROUTES_PATH_FMT "/%s/sys/routes"
+
 /** 发现阶段最大轮询次数（60 × 1s = 60s 超时） */
 #define PC_MASTER_DISCOVERY_POLLS 60
 
 /** 健康检查响应最大字节数 */
 #define PC_MASTER_HEALTH_CAP 64u
+
+/** 路由诊断响应最大字节数 */
+#define PC_MASTER_ROUTES_CAP 512u
 
 /** 本机（PC 主控）在 Mesh 网络中的虚拟地址 */
 #define PC_MASTER_LOCAL_ADDR 0x00u
@@ -987,6 +993,58 @@ static int read_health_path(const char *target)
     return 0;
 }
 
+static int read_routes_path(const char *target)
+{
+    char routes_path[64];
+    uint8_t routes[PC_MASTER_ROUTES_CAP];
+    uint16_t fd = 0u;
+    uint16_t total = 0u;
+    int rc;
+
+    rc = snprintf(routes_path, sizeof(routes_path), PC_MASTER_ROUTES_PATH_FMT, target);
+    if (rc < 0 || (size_t)rc >= sizeof(routes_path)) {
+        fprintf(stderr, "routes path too long for %s\n", target);
+        return -(int)M9P_ERR_EINVAL;
+    }
+
+    rc = cluster_vfs_open(routes_path, M9P_OREAD, &fd);
+    if (rc != 0) {
+        fprintf(stderr, "cluster_vfs_open(%s) failed: %d\n", routes_path, rc);
+        return rc;
+    }
+
+    while (total < (uint16_t)(sizeof(routes) - 1u)) {
+        uint16_t chunk = (uint16_t)(sizeof(routes) - 1u - total);
+
+        if (chunk > 48u) {
+            chunk = 48u;
+        }
+
+        rc = cluster_vfs_read(fd, routes + total, &chunk);
+        if (rc != 0) {
+            int close_rc = cluster_vfs_close(fd);
+
+            (void)close_rc;
+            fprintf(stderr, "cluster_vfs_read(%s) failed: %d\n", routes_path, rc);
+            return rc;
+        }
+        if (chunk == 0u) {
+            break;
+        }
+        total = (uint16_t)(total + chunk);
+    }
+
+    rc = cluster_vfs_close(fd);
+    if (rc != 0) {
+        fprintf(stderr, "cluster_vfs_close(%s) failed: %d\n", routes_path, rc);
+        return rc;
+    }
+
+    routes[total] = '\0';
+    printf("read %s:\n%s", routes_path, (const char *)routes);
+    return 0;
+}
+
 /**
  * @brief 执行 smoke test：attach + walk + open + read + clunk
  *
@@ -1023,6 +1081,11 @@ static int run_dynamic_sequence(
         }
 
         rc = read_health_path(target);
+        if (rc != 0) {
+            return rc;
+        }
+
+        rc = read_routes_path(target);
         if (rc != 0) {
             return rc;
         }

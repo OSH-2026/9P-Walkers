@@ -73,6 +73,11 @@ static int fake_send_frame(void *transport_ctx, uint8_t next_hop, const uint8_t 
     return 0;
 }
 
+static int fake_send_frame_to_port(void *transport_ctx, uint8_t port_id, const uint8_t *tx_data, size_t tx_len)
+{
+    return fake_send_frame(transport_ctx, port_id, tx_data, tx_len);
+}
+
 static int fake_receive_frame(
     void *transport_ctx,
     uint8_t *rx_data,
@@ -365,11 +370,77 @@ static void test_assign_with_foreign_uid_is_ignored(void)
     mesh_node_runtime_deinit(&runtime);
 }
 
+static void test_neighbor_probe_request_learns_parent_and_reports_link(void)
+{
+    struct mesh_node_runtime runtime;
+    struct fake_transport transport;
+    struct fake_server_ctx server_ctx;
+    uint8_t probe_request_frame[64];
+    size_t probe_request_len = 0u;
+    uint8_t next_hop = 0u;
+    bool is_local = true;
+    size_t link_state_index;
+    size_t probe_response_index;
+    struct mesh_frame_view view;
+    struct mesh_link_state_payload payload;
+    const uint8_t uid[MESH_UID_LEN] = {0xD1u, 0xD2u, 0xD3u, 0xD4u, 0xD5u, 0xD6u, 0xD7u, 0xD8u};
+
+    memset(&server_ctx, 0, sizeof(server_ctx));
+    fake_transport_reset(&transport);
+
+    init_runtime(&runtime, &transport, &server_ctx, uid, false);
+    runtime.config.send_frame_to_port = fake_send_frame_to_port;
+    runtime.initialized = true;
+    runtime.cluster.config.local_addr = 0x22u;
+    runtime.processor.config.local_addr = 0x22u;
+    runtime.upstream_port = 2u;
+    runtime.control_plane_addr = 0x00u;
+
+    assert(mesh_build_neighbor_probe_request(
+        0x11u,
+        0x2001u,
+        6u,
+        probe_request_frame,
+        sizeof(probe_request_frame),
+        &probe_request_len));
+    fake_transport_queue_rx_on_port(&transport, probe_request_frame, probe_request_len, 2u);
+
+    assert(mesh_node_runtime_poll_once(&runtime) == 0);
+    assert(cluster_lookup_next_hop(&runtime.cluster, 0x11u, &next_hop, &is_local) == 0);
+    assert(!is_local);
+    assert(next_hop == 0x11u);
+    assert(cluster_lookup_next_hop(&runtime.cluster, 0x00u, &next_hop, &is_local) == 0);
+    assert(!is_local);
+    assert(next_hop == 0x11u);
+    assert(transport.learned_count == 1u);
+    assert(transport.learned_addr[0] == 0x11u);
+    assert(transport.learned_port[0] == 2u);
+
+    link_state_index = find_tx_frame_type(&transport, MESH_TYPE_LINK_STATE);
+    assert(link_state_index < transport.tx_count);
+    assert(mesh_decode_frame(
+        transport.tx_queue[link_state_index].data,
+        transport.tx_queue[link_state_index].len,
+        &view));
+    assert(view.src == 0x22u);
+    assert(view.dst == 0x00u);
+    assert(mesh_parse_link_state(&view, &payload));
+    assert(payload.neighbor == 0x11u);
+    assert(payload.link_up == 1u);
+
+    probe_response_index = find_tx_frame_type(&transport, MESH_TYPE_NEIGHBOR_PROBE_RESPONSE);
+    assert(probe_response_index < transport.tx_count);
+    assert(transport.tx_next_hop[probe_response_index] == 2u);
+
+    mesh_node_runtime_deinit(&runtime);
+}
+
 int main(void)
 {
     test_auto_register_on_init_sends_uid_to_current_link();
     test_assign_updates_local_addr_and_allows_server_reply();
     test_assign_with_foreign_uid_is_ignored();
+    test_neighbor_probe_request_learns_parent_and_reports_link();
 
     puts("mesh node runtime host tests passed");
     return 0;

@@ -73,6 +73,8 @@ struct mesh_node_runtime_bootstrap_pending {
     uint8_t uid[MESH_UID_LEN];
     uint32_t boot_nonce;
     uint8_t ingress_port;
+    uint8_t assigned_addr;
+    bool assign_forwarded;
 };
 
 /**
@@ -185,6 +187,22 @@ int mesh_node_runtime_process_frame_from_port(
  * @return 0 表示处理了一帧；负的 MESH_ERR_* 表示暂无帧或处理失败。
  */
 int mesh_node_runtime_poll_once(struct mesh_node_runtime *runtime);
+
+/**
+ * @brief 将 runtime 当前路由诊断信息格式化为文本。
+ *
+ * 输出用于 /sys/routes 调试文件，包含本机地址、上游端口/邻居以及有效
+ * direct-table route。
+ *
+ * @param[in] runtime runtime 实例。
+ * @param[out] out 输出缓冲。
+ * @param[in] out_cap 输出缓冲容量。
+ * @return 0 表示成功；负的 MESH_ERR_* 表示失败。
+ */
+int mesh_node_runtime_format_routes(
+    struct mesh_node_runtime *runtime,
+    char *out,
+    size_t out_cap);
 
 #ifdef __cplusplus
 }
