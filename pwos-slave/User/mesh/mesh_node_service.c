@@ -11,6 +11,25 @@
 #include <string.h>
 
 #define MESH_NODE_SERVICE_DEFAULT_LOCAL_ADDR MESH_ADDR_UNASSIGNED
+#define MESH_NODE_SERVICE_DEBUG_LOG_CAP 64u
+#define MESH_NODE_SERVICE_DEBUG_PORT_NONE 0xffu
+
+enum mesh_node_service_debug_event {
+    MESH_NODE_SERVICE_DEBUG_EVENT_SEND = 1,
+    MESH_NODE_SERVICE_DEBUG_EVENT_SEND_PORT = 2,
+};
+
+struct mesh_node_service_debug_entry {
+    uint32_t time_ms;
+    uint8_t event;
+    uint8_t type;
+    uint8_t src;
+    uint8_t dst;
+    uint8_t next_hop;
+    uint8_t port_id;
+    uint16_t tx_len;
+    int rc;
+};
 
 struct mesh_node_service_addr_port {
     bool used;
@@ -30,6 +49,9 @@ struct mesh_node_service {
     struct mesh_node_runtime runtime;
     struct mesh_node_service_port ports[MESH_NODE_SERVICE_MAX_PORTS];
     struct mesh_node_service_addr_port addr_ports[MESH_NODE_SERVICE_MAX_PORTS];
+    struct mesh_node_service_debug_entry debug_log[MESH_NODE_SERVICE_DEBUG_LOG_CAP];
+    size_t debug_log_next;
+    size_t debug_log_count;
 };
 
 static struct mesh_node_service g_mesh_node_service;
@@ -147,6 +169,47 @@ static uint32_t mesh_node_service_time_ms(void *ctx)
     return HAL_GetTick();
 }
 
+static void mesh_node_service_debug_record(
+    struct mesh_node_service *service,
+    uint8_t event,
+    uint8_t next_hop,
+    uint8_t port_id,
+    const uint8_t *tx_data,
+    size_t tx_len,
+    int rc)
+{
+    struct mesh_node_service_debug_entry *entry;
+    struct mesh_frame_view frame;
+
+    if (service == NULL || tx_data == NULL || tx_len == 0u) {
+        return;
+    }
+
+    entry = &service->debug_log[service->debug_log_next];
+    memset(entry, 0, sizeof(*entry));
+    entry->time_ms = HAL_GetTick();
+    entry->event = event;
+    entry->next_hop = next_hop;
+    entry->port_id = port_id;
+    entry->tx_len = tx_len > UINT16_MAX ? UINT16_MAX : (uint16_t)tx_len;
+    entry->rc = rc;
+
+    if (mesh_decode_frame(tx_data, tx_len, &frame)) {
+        entry->type = frame.type;
+        entry->src = frame.src;
+        entry->dst = frame.dst;
+    } else {
+        entry->type = 0xffu;
+        entry->src = MESH_ADDR_UNASSIGNED;
+        entry->dst = MESH_ADDR_UNASSIGNED;
+    }
+
+    service->debug_log_next = (service->debug_log_next + 1u) % MESH_NODE_SERVICE_DEBUG_LOG_CAP;
+    if (service->debug_log_count < MESH_NODE_SERVICE_DEBUG_LOG_CAP) {
+        ++service->debug_log_count;
+    }
+}
+
 static int mesh_node_service_send_frame(
     void *transport_ctx,
     uint8_t next_hop,
@@ -170,6 +233,14 @@ static int mesh_node_service_send_frame(
                 continue;
             }
             rc = mesh_uart_transport_send_frame(&service->ports[i].transport, tx_data, tx_len);
+            mesh_node_service_debug_record(
+                service,
+                MESH_NODE_SERVICE_DEBUG_EVENT_SEND,
+                next_hop,
+                (uint8_t)i,
+                tx_data,
+                tx_len,
+                rc);
             if (rc != 0 && first_error == 0) {
                 mesh_diag_send_frame((uint8_t)i, next_hop, tx_len, rc);
                 first_error = rc;
@@ -180,6 +251,14 @@ static int mesh_node_service_send_frame(
 
     port_index = mesh_node_service_find_port_for_next_hop(service, next_hop);
     if (port_index < 0) {
+        mesh_node_service_debug_record(
+            service,
+            MESH_NODE_SERVICE_DEBUG_EVENT_SEND,
+            next_hop,
+            MESH_NODE_SERVICE_DEBUG_PORT_NONE,
+            tx_data,
+            tx_len,
+            -(int)MESH_ERR_NO_ROUTE);
         mesh_diag_send_frame(MESH_PROCESSER_INGRESS_PORT_NONE, next_hop, tx_len, -(int)MESH_ERR_NO_ROUTE);
         return -(int)MESH_ERR_NO_ROUTE;
     }
@@ -187,6 +266,14 @@ static int mesh_node_service_send_frame(
     {
         int rc = mesh_uart_transport_send_frame(&service->ports[port_index].transport, tx_data, tx_len);
 
+        mesh_node_service_debug_record(
+            service,
+            MESH_NODE_SERVICE_DEBUG_EVENT_SEND,
+            next_hop,
+            (uint8_t)port_index,
+            tx_data,
+            tx_len,
+            rc);
         if (rc != 0) {
             mesh_diag_send_frame((uint8_t)port_index, next_hop, tx_len, rc);
         }
@@ -216,6 +303,14 @@ static int mesh_node_service_send_frame_to_port(
     {
         int rc = mesh_uart_transport_send_frame(&service->ports[port_id].transport, tx_data, tx_len);
 
+        mesh_node_service_debug_record(
+            service,
+            MESH_NODE_SERVICE_DEBUG_EVENT_SEND_PORT,
+            port_id,
+            port_id,
+            tx_data,
+            tx_len,
+            rc);
         if (rc != 0) {
             mesh_diag_send_frame(port_id, port_id, tx_len, rc);
         }
@@ -432,6 +527,49 @@ int mesh_node_service_format_addr_ports(char *out, size_t out_cap)
             "addr_port addr=0x%02x port=%u\n",
             entry->mesh_addr,
             (unsigned)entry->port_id);
+        if (written < 0) {
+            return -(int)MESH_ERR_BAD_FRAME;
+        }
+        if ((size_t)written >= out_cap - used) {
+            used = out_cap - 1u;
+            break;
+        }
+        used += (size_t)written;
+    }
+
+    out[used] = '\0';
+    return 0;
+}
+
+int mesh_node_service_format_debug_log(char *out, size_t out_cap)
+{
+    size_t used = 0u;
+    size_t i;
+
+    if (!g_mesh_node_service_initialized || out == NULL || out_cap == 0u) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    for (i = 0u; i < g_mesh_node_service.debug_log_count && used < out_cap - 1u; ++i) {
+        size_t index =
+            (g_mesh_node_service.debug_log_next + MESH_NODE_SERVICE_DEBUG_LOG_CAP -
+             g_mesh_node_service.debug_log_count + i) % MESH_NODE_SERVICE_DEBUG_LOG_CAP;
+        const struct mesh_node_service_debug_entry *entry = &g_mesh_node_service.debug_log[index];
+        const char *event = entry->event == MESH_NODE_SERVICE_DEBUG_EVENT_SEND_PORT ? "send_port" : "send";
+        int written = snprintf(
+            out + used,
+            out_cap - used,
+            "t=%lu ev=%s type=0x%02x src=0x%02x dst=0x%02x next=0x%02x port=%u len=%u rc=%d\n",
+            (unsigned long)entry->time_ms,
+            event,
+            entry->type,
+            entry->src,
+            entry->dst,
+            entry->next_hop,
+            (unsigned)entry->port_id,
+            (unsigned)entry->tx_len,
+            entry->rc);
+
         if (written < 0) {
             return -(int)MESH_ERR_BAD_FRAME;
         }

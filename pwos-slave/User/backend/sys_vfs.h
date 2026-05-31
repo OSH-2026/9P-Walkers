@@ -21,6 +21,8 @@ struct sys_vfs_config {
     const char *info_text;
     int (*routes_text_fn)(void *ctx, char *out, size_t out_cap);
     void *routes_text_ctx;
+    int (*mesh_log_text_fn)(void *ctx, char *out, size_t out_cap);
+    void *mesh_log_text_ctx;
     uint16_t iounit;
 };
 
@@ -28,6 +30,8 @@ struct sys_vfs {
     const char *info_text;
     int (*routes_text_fn)(void *ctx, char *out, size_t out_cap);
     void *routes_text_ctx;
+    int (*mesh_log_text_fn)(void *ctx, char *out, size_t out_cap);
+    void *mesh_log_text_ctx;
     uint16_t iounit;
 };
 

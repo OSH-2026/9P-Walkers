@@ -11,12 +11,14 @@
 
 #define SYS_VFS_HEALTH_TEXT "ok\n"
 #define SYS_VFS_ROUTES_TEXT_CAP 256u
+#define SYS_VFS_MESH_LOG_TEXT_CAP 1024u
 
 enum sys_vfs_node_kind {
     SYS_VFS_NODE_DIR = 0,
     SYS_VFS_NODE_HEALTH,
     SYS_VFS_NODE_INFO,
     SYS_VFS_NODE_ROUTES,
+    SYS_VFS_NODE_MESH_LOG,
 };
 
 struct sys_vfs_node {
@@ -34,6 +36,7 @@ static const struct sys_vfs_node k_sys_nodes[] = {
     {"/sys/health", "health", SYS_VFS_NODE_HEALTH, M9P_QID_VIRTUAL | M9P_QID_READONLY, M9P_STAT_VIRTUAL, M9P_SERVER_PERM_READ, 0x101u},
     {"/sys/info", "info", SYS_VFS_NODE_INFO, M9P_QID_VIRTUAL | M9P_QID_READONLY, M9P_STAT_VIRTUAL, M9P_SERVER_PERM_READ, 0x102u},
     {"/sys/routes", "routes", SYS_VFS_NODE_ROUTES, M9P_QID_VIRTUAL | M9P_QID_READONLY, M9P_STAT_VIRTUAL, M9P_SERVER_PERM_READ, 0x103u},
+    {"/sys/mesh_log", "mesh_log", SYS_VFS_NODE_MESH_LOG, M9P_QID_VIRTUAL | M9P_QID_READONLY, M9P_STAT_VIRTUAL, M9P_SERVER_PERM_READ, 0x104u},
 };
 
 static const struct sys_vfs_node *find_node(const char *path)
@@ -186,6 +189,26 @@ static int build_routes_text(struct sys_vfs *vfs, char *out, size_t out_cap)
     return 0;
 }
 
+static int build_mesh_log_text(struct sys_vfs *vfs, char *out, size_t out_cap)
+{
+    int rc;
+
+    if (vfs == NULL || out == NULL || out_cap == 0u) {
+        return -(int)M9P_ERR_EINVAL;
+    }
+
+    if (vfs->mesh_log_text_fn == NULL) {
+        (void)snprintf(out, out_cap, "mesh log unavailable\n");
+        return 0;
+    }
+
+    rc = vfs->mesh_log_text_fn(vfs->mesh_log_text_ctx, out, out_cap);
+    if (rc != 0) {
+        (void)snprintf(out, out_cap, "mesh log error=%d\n", rc);
+    }
+    return 0;
+}
+
 static int sys_stat_cb(void *ctx, const char *path, struct m9p_stat *out_stat)
 {
     struct sys_vfs *vfs = (struct sys_vfs *)ctx;
@@ -205,7 +228,8 @@ static int sys_stat_cb(void *ctx, const char *path, struct m9p_stat *out_stat)
         size = (uint32_t)strlen(SYS_VFS_HEALTH_TEXT);
     } else if (node->kind == SYS_VFS_NODE_INFO && vfs->info_text != NULL) {
         size = (uint32_t)strlen(vfs->info_text);
-    } else if (node->kind == SYS_VFS_NODE_ROUTES) {
+    } else if (node->kind == SYS_VFS_NODE_ROUTES ||
+               node->kind == SYS_VFS_NODE_MESH_LOG) {
         size = vfs->iounit;
     }
 
@@ -270,7 +294,7 @@ static int sys_read_cb(void *ctx,
     if (node->kind == SYS_VFS_NODE_INFO) {
         return copy_text(vfs->info_text != NULL ? vfs->info_text : "", offset, out_data, out_cap, out_count);
     }
-    {
+    if (node->kind == SYS_VFS_NODE_ROUTES) {
         char routes[SYS_VFS_ROUTES_TEXT_CAP];
         int rc = build_routes_text(vfs, routes, sizeof(routes));
 
@@ -278,6 +302,15 @@ static int sys_read_cb(void *ctx,
             return rc;
         }
         return copy_text(routes, offset, out_data, out_cap, out_count);
+    }
+    {
+        char mesh_log[SYS_VFS_MESH_LOG_TEXT_CAP];
+        int rc = build_mesh_log_text(vfs, mesh_log, sizeof(mesh_log));
+
+        if (rc != 0) {
+            return rc;
+        }
+        return copy_text(mesh_log, offset, out_data, out_cap, out_count);
     }
 }
 
@@ -328,6 +361,8 @@ int sys_vfs_init(struct sys_vfs *vfs, const struct sys_vfs_config *config)
         vfs->info_text = config->info_text;
         vfs->routes_text_fn = config->routes_text_fn;
         vfs->routes_text_ctx = config->routes_text_ctx;
+        vfs->mesh_log_text_fn = config->mesh_log_text_fn;
+        vfs->mesh_log_text_ctx = config->mesh_log_text_ctx;
         vfs->iounit = config->iounit == 0u ? SYS_VFS_DEFAULT_IOUNIT : config->iounit;
     } else {
         vfs->iounit = SYS_VFS_DEFAULT_IOUNIT;
