@@ -38,3 +38,7 @@
 - 如果以后实现，建议新增“route advertise”语义，避免和现有“控制器指定 route update”混用。
 
 ![alt text](image.png)
+
+##  **拓扑有向**
+- 目前`收到 `A → B` 不自动补 `B → A`；反向路径必须由 B自行上报 LINK_STATE
+- 考虑将来：主机直接把这样的链路视做双向连通
