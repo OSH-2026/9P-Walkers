@@ -20,7 +20,7 @@
 这条链主要解决四件事：
 
 1. 主机启动后，自动接收 mesh 控制帧。
-2. 新节点发来 REGISTER 后，自动建立 UID 到节点名的稳定映射。
+2. 新节点完成地址分配后，自动建立 UID 到节点名的稳定映射。
 3. 节点链路变化后，自动刷新 VFS 中的在线状态与 9P 状态。
 4. 上层通过 `/mcuN/...` 路径访问节点时，底层自动走 mesh 数据面，不需要上层自己拼 mesh 帧。
 
@@ -68,29 +68,23 @@ mesh_host_service_start_default_task();
 - 后 4 字节取 `HAL_GetUIDw1() ^ HAL_GetUIDw2()`。
 
 如果未来板级代码能够显式检测某条 UART 的 link-up 事件，还可以继续调用
-`mesh_node_service_notify_link_up()`、`mesh_node_runtime_notify_link_up()`，或者更细粒度的
-`mesh_node_runtime_notify_link_up_on_port()`，在该事件上再次向对应串口重发 REGISTER。
+`mesh_node_service_notify_link_up()` 或更底层的 `mesh_node_runtime_notify_link_up()`，
+在该事件上再次向对应串口重发 REGISTER。
 
-多串口 runtime 额外承担两件事：
-
-1. 子机侧 direct-table 路由表保存的是“dst -> 本地出口端口号”，而不是“dst -> 下一跳地址”。
-2. 当某个邻居第一次从某个入端口出现时，runtime 会把这条 `src -> ingress_port` 关系写入 cluster，
-   并向主机上报带 `local_port` 的 LINK_STATE，供主机全图推导子机路由表。
-
-runtime 收到后，会自动完成：
+主机 runtime 收到 bootstrap REGISTER 后，会先完成地址分配；ASSIGN 成功发出后，或者旧固件继续发来已分配地址 REGISTER 时，runtime 才会把节点注册到 VFS。注册阶段会自动完成：
 
 1. 识别该节点当前的 mesh 地址。
 2. 读取该节点硬件 UID。
 3. 为该节点分配或复用稳定节点名。
 4. 为该节点绑定一个真正可用的 mesh-backed mini9P client。
-5. 若 REGISTER 声明该节点启用了 Wi-Fi，则主机把 Wi-Fi 能力写入节点信息，并补上一条 host<->node 的直连 Wi-Fi 拓扑边。
-6. 把节点同步到 VFS。
+5. 把节点 online 位、UID 映射和 client 同步到 VFS。
 
 最终效果是：
 
 - 新 UID 会分配新的 `mcuN` 名字。
 - 已知 UID 会复用旧名字。
 - 节点进入 `READY` 状态，但尚未 attach。
+- REGISTER 本身不再伪造 host 直连边；真实可达性仍由 LINK_STATE / ROUTE_UPDATE 刷新。
 
 ### 3.3 链路变化阶段
 
@@ -244,9 +238,10 @@ int cluster_config_on_mesh_node_registered(uint8_t mesh_addr,
 
 用途：
 
-- 真正 runtime 收到 REGISTER 时使用。
+- 真正 runtime 确认节点已有正式 mesh 地址后使用。
 - 不额外伪造 host 直连边。
-- 只负责把 UID、名字和 client 同步给 VFS。
+- ASSIGN 成功发出后即可调用；旧固件的二次 REGISTER 也可以幂等刷新。
+- 只负责把 online 位、UID、名字和 client 同步给 VFS。
 
 #### 手工直连发现接口
 
@@ -338,7 +333,7 @@ int cluster_vfs_stat(const char *path, struct m9p_stat *out_stat);
 推荐顺序：
 
 1. 启动时调用 `mesh_host_service_start_default_task()`。
-2. 等待 runtime 自动发现节点。
+2. 等待 runtime 收到 bootstrap REGISTER、发出 ASSIGN，并把已分配地址的节点同步到 VFS。
 3. 用 shared mesh cluster 或 `cluster_config_*` 查询节点是否在线/可达。
 4. 对需要访问的节点执行 `cluster_vfs_attach("mcuN")`。
 5. 通过 `cluster_vfs_read_path()` / `cluster_vfs_write_path()` / `cluster_vfs_list()` 访问。
@@ -349,7 +344,7 @@ int cluster_vfs_stat(const char *path, struct m9p_stat *out_stat);
 
 1. 调 `cluster_config_init_mesh_host()`。
 2. 手工创建或提供 `m9p_client`。
-3. 调 `cluster_config_on_node_discovered()` 或 `cluster_config_on_mesh_node_registered()`。
+3. 直连场景调 `cluster_config_on_node_discovered()`；模拟真实 runtime 的已分配地址节点时调 `cluster_config_on_mesh_node_registered()`。
 4. 再使用 `cluster_vfs_attach()` 与路径访问接口验证行为。
 
 ## 7. 上层不用关心什么
