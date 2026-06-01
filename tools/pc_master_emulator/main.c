@@ -76,8 +76,8 @@
 /** 从机 mesh 路由诊断路径。 */
 #define PC_MASTER_ROUTES_PATH_FMT "/%s/sys/routes"
 
-/** 从机 mesh 发送/转发日志路径。 */
-#define PC_MASTER_MESH_LOG_PATH_FMT "/%s/sys/mesh_log"
+/** 从机通用诊断日志路径。 */
+#define PC_MASTER_LOG_PATH_FMT "/%s/sys/log"
 
 /** 发现阶段最大轮询次数（60 × 1s = 60s 超时） */
 #define PC_MASTER_DISCOVERY_POLLS 60
@@ -88,8 +88,8 @@
 /** 路由诊断响应最大字节数 */
 #define PC_MASTER_ROUTES_CAP 512u
 
-/** Mesh debug log 响应最大字节数 */
-#define PC_MASTER_MESH_LOG_CAP 2048u
+/** 诊断日志响应最大字节数 */
+#define PC_MASTER_LOG_CAP 2048u
 
 /** 本机（PC 主控）在 Mesh 网络中的虚拟地址 */
 #define PC_MASTER_LOCAL_ADDR 0x00u
@@ -474,6 +474,139 @@ static const char *mesh_type_name(uint8_t type)
         return "ERROR";
     default:
         return "unknown";
+    }
+}
+
+static const char *mini9p_type_name(uint8_t type)
+{
+    switch (type) {
+    case M9P_TATTACH:
+        return "TATTACH";
+    case M9P_RATTACH:
+        return "RATTACH";
+    case M9P_TWALK:
+        return "TWALK";
+    case M9P_RWALK:
+        return "RWALK";
+    case M9P_TOPEN:
+        return "TOPEN";
+    case M9P_ROPEN:
+        return "ROPEN";
+    case M9P_TREAD:
+        return "TREAD";
+    case M9P_RREAD:
+        return "RREAD";
+    case M9P_TWRITE:
+        return "TWRITE";
+    case M9P_RWRITE:
+        return "RWRITE";
+    case M9P_TSTAT:
+        return "TSTAT";
+    case M9P_RSTAT:
+        return "RSTAT";
+    case M9P_TCLUNK:
+        return "TCLUNK";
+    case M9P_RCLUNK:
+        return "RCLUNK";
+    case M9P_RERROR:
+        return "RERROR";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+static int hex_nibble(char ch)
+{
+    if (ch >= '0' && ch <= '9') {
+        return ch - '0';
+    }
+    if (ch >= 'a' && ch <= 'f') {
+        return ch - 'a' + 10;
+    }
+    if (ch >= 'A' && ch <= 'F') {
+        return ch - 'A' + 10;
+    }
+    return -1;
+}
+
+static bool parse_hex_u8(const char *text, size_t len, uint8_t *out_value)
+{
+    int hi;
+    int lo;
+
+    if (text == NULL || out_value == NULL || len < 2u) {
+        return false;
+    }
+
+    hi = hex_nibble(text[0]);
+    lo = hex_nibble(text[1]);
+    if (hi < 0 || lo < 0) {
+        return false;
+    }
+
+    *out_value = (uint8_t)(((uint8_t)hi << 4) | (uint8_t)lo);
+    return true;
+}
+
+static bool line_matches_at(const char *line, size_t line_len, size_t offset, const char *prefix)
+{
+    size_t prefix_len;
+
+    if (line == NULL || prefix == NULL || offset > line_len) {
+        return false;
+    }
+
+    prefix_len = strlen(prefix);
+    return prefix_len <= line_len - offset &&
+           memcmp(line + offset, prefix, prefix_len) == 0;
+}
+
+static void print_annotated_log_line(const char *line, size_t line_len)
+{
+    size_t i = 0u;
+
+    while (i < line_len) {
+        uint8_t value;
+
+        if (line_matches_at(line, line_len, i, "type=0x") &&
+            parse_hex_u8(line + i + 7u, line_len - i - 7u, &value)) {
+            printf("type=0x%02x(%s)", value, mesh_type_name(value));
+            i += 9u;
+            continue;
+        }
+        if (line_matches_at(line, line_len, i, "m9p=0x") &&
+            parse_hex_u8(line + i + 6u, line_len - i - 6u, &value)) {
+            printf("m9p=0x%02x(%s)", value, mini9p_type_name(value));
+            i += 8u;
+            continue;
+        }
+
+        putchar((unsigned char)line[i]);
+        ++i;
+    }
+    putchar('\n');
+}
+
+static void print_annotated_log_text(const char *text)
+{
+    const char *line = text;
+
+    if (text == NULL) {
+        return;
+    }
+
+    while (*line != '\0') {
+        const char *end = strchr(line, '\n');
+        size_t line_len;
+
+        if (end == NULL) {
+            print_annotated_log_line(line, strlen(line));
+            break;
+        }
+
+        line_len = (size_t)(end - line);
+        print_annotated_log_line(line, line_len);
+        line = end + 1;
     }
 }
 
@@ -1119,16 +1252,16 @@ static int read_text_file_chunked(
     return 0;
 }
 
-static int read_mesh_log_path(const char *target)
+static int read_log_path(const char *target)
 {
     char log_path[64];
-    uint8_t log_text[PC_MASTER_MESH_LOG_CAP];
+    uint8_t log_text[PC_MASTER_LOG_CAP];
     uint16_t len = 0u;
     int rc;
 
-    rc = snprintf(log_path, sizeof(log_path), PC_MASTER_MESH_LOG_PATH_FMT, target);
+    rc = snprintf(log_path, sizeof(log_path), PC_MASTER_LOG_PATH_FMT, target);
     if (rc < 0 || (size_t)rc >= sizeof(log_path)) {
-        fprintf(stderr, "mesh log path too long for %s\n", target);
+        fprintf(stderr, "log path too long for %s\n", target);
         return -(int)M9P_ERR_EINVAL;
     }
 
@@ -1138,11 +1271,29 @@ static int read_mesh_log_path(const char *target)
         return rc;
     }
 
-    printf("read %s:\n%s", log_path, (const char *)log_text);
+    printf("read %s:\n", log_path);
+    print_annotated_log_text((const char *)log_text);
     if (len == (uint16_t)(sizeof(log_text) - 1u)) {
         printf("warning: %s output truncated at %u bytes\n", log_path, (unsigned)len);
     }
     return 0;
+}
+
+static void read_all_logs(size_t target_node_count)
+{
+    size_t i;
+
+    for (i = 0u; i < target_node_count; ++i) {
+        char target[MESH_MAX_NODE_NAME + 1u];
+        int rc = snprintf(target, sizeof(target), PC_MASTER_NODE_NAME_FMT, i + 1u);
+
+        if (rc < 0 || (size_t)rc >= sizeof(target)) {
+            fprintf(stderr, "target node name too long: index=%zu\n", i + 1u);
+            continue;
+        }
+
+        (void)read_log_path(target);
+    }
 }
 
 /**
@@ -1153,7 +1304,7 @@ static int read_mesh_log_path(const char *target)
  * 2. cluster_vfs_read_path("/mcuN/sys/health") 读取健康检查文件
  * 3. 验证每个响应内容为 "ok\n"，否则返回 EIO
  *
- * 成功时打印 "pc_master_emulator: ok" 并返回 0。
+ * 成功时返回 0。
  *
  * @param[in] runtime 已初始化的 mesh_host_runtime
  * @param[in] target_node_count 本次要验证的目标节点数量
@@ -1191,19 +1342,6 @@ static int run_dynamic_sequence(
         }
     }
 
-    for (i = 0u; i < target_node_count; ++i) {
-        char target[MESH_MAX_NODE_NAME + 1u];
-        int rc = snprintf(target, sizeof(target), PC_MASTER_NODE_NAME_FMT, i + 1u);
-
-        if (rc < 0 || (size_t)rc >= sizeof(target)) {
-            fprintf(stderr, "target node name too long: index=%zu\n", i + 1u);
-            return -(int)M9P_ERR_EINVAL;
-        }
-
-        (void)read_mesh_log_path(target);
-    }
-
-    puts("pc_master_emulator: ok");
     return 0;
 }
 
@@ -1229,6 +1367,7 @@ int main(int argc, char **argv)
     struct mesh_host_runtime runtime;
     struct pc_mesh_transport transport;
     int rc;
+    bool runtime_initialized = false;
 
     if (argc < 2 || argc > 4) {
         print_usage(argv[0]);
@@ -1274,8 +1413,17 @@ int main(int argc, char **argv)
            node_count);
     rc = init_runtime(&runtime, &transport);
     if (rc == 0) {
+        runtime_initialized = true;
         rc = run_dynamic_sequence(&runtime, &transport, transport.target_node_count);
+        read_all_logs(transport.target_node_count);
+        if (rc == 0) {
+            puts("pc_master_emulator: ok");
+        }
         mesh_host_runtime_deinit(&runtime);
+    }
+
+    if (rc != 0 && runtime_initialized) {
+        fprintf(stderr, "pc_master_emulator: failed rc=%d; logs were read before shutdown\n", rc);
     }
 
     close(transport.fd);

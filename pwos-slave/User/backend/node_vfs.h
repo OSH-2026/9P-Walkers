@@ -23,8 +23,8 @@ extern "C" {
 struct node_vfs_config {
     int (*routes_text_fn)(void *ctx, char *out, size_t out_cap);
     void *routes_text_ctx;
-    int (*mesh_log_text_fn)(void *ctx, char *out, size_t out_cap);
-    void *mesh_log_text_ctx;
+    int (*log_text_fn)(void *ctx, char *out, size_t out_cap);
+    void *log_text_ctx;
     uint16_t iounit;
 };
 

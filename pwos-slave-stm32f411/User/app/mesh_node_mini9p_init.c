@@ -4,6 +4,7 @@
 #include "mesh_node_service.h"
 #include "mini9p_server.h"
 #include "node_vfs.h"
+#include "pwos_log.h"
 
 #include <string.h>
 
@@ -35,7 +36,7 @@ static int mesh_node_routes_text(void *ctx, char *out, size_t out_cap)
 static int mesh_node_log_text(void *ctx, char *out, size_t out_cap)
 {
     (void)ctx;
-    return mesh_node_service_format_debug_log(out, out_cap);
+    return pwos_log_format(out, out_cap);
 }
 
 int mesh_node_mini9p_init(void)
@@ -48,7 +49,8 @@ int mesh_node_mini9p_init(void)
     memset(&node_config, 0, sizeof(node_config));
     node_config.iounit = NODE_VFS_DEFAULT_IOUNIT;
     node_config.routes_text_fn = mesh_node_routes_text;
-    node_config.mesh_log_text_fn = mesh_node_log_text;
+    node_config.log_text_fn = mesh_node_log_text;
+    pwos_log_init();
     rc = node_vfs_init(&g_node_vfs, &node_config);
     if (rc != 0) {
         mesh_diag_kv_u32("mesh init node_vfs rc", (uint32_t)(int32_t)rc);

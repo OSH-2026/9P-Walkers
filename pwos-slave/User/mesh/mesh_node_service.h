@@ -144,18 +144,6 @@ int mesh_node_service_learn_addr_port(uint8_t mesh_addr, uint8_t port_id);
  */
 int mesh_node_service_format_addr_ports(char *out, size_t out_cap);
 
-/**
- * @brief 将 service 层发送/转发环形日志格式化为文本。
- *
- * 日志只记录发送侧事实：mesh envelope type/src/dst、next_hop、实际 UART port、
- * 长度和底层发送返回值。用于测试结束后通过 /sys/mesh_log 读取。
- *
- * @param[out] out 输出缓冲。
- * @param[in] out_cap 输出缓冲容量。
- * @return 0 表示成功；负的 MESH_ERR_* 表示失败。
- */
-int mesh_node_service_format_debug_log(char *out, size_t out_cap);
-
 #ifdef __cplusplus
 }
 #endif
