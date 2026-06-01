@@ -21,6 +21,9 @@
 /* 当前协议版本号。 */
 #define MESH_VERSION 0x01u
 
+/* 主机 mesh 短地址。 */
+#define MESH_ADDR_HOST 0x00u
+
 /* 未分配短地址，常用于新节点 bootstrap 注册阶段。 */
 #define MESH_ADDR_UNASSIGNED 0xFFu
 

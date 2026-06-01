@@ -28,7 +28,7 @@
  * 3. 调用 cluster_config_on_mesh_node_registered()，把 UID、名字映射和 client 绑定同步到 VFS；
  * 4. 在 LINK_STATE / ROUTE_UPDATE 变化后，调用 cluster_config_refresh_all_nodes_connectivity()，
  *    让所有已知节点按当前共享 cluster 的 reachability 统一回退或保持在线；
- * 5. 对外提供默认 UART 版本的初始化/启动入口，供 app_main 直接拉起后台轮询任务。
+ * 5. 提供实例级初始化、轮询和测试注入接口；具体 service/transport 实例由外层装配。
  *
  * 设计取舍：
  * - 当前实现明确采用"全局单事务"语义：同一时刻只允许一个 mesh-backed m9p_client
@@ -64,7 +64,7 @@ extern "C" {
 /* 未分配 mesh 地址时在 runtime client 槽位中使用的占位值。 */
 #define MESH_HOST_RUNTIME_UNASSIGNED_ADDR MESH_ADDR_UNASSIGNED
 
-/* 默认后台轮询任务参数，仅用于 ESP 平台默认实例。 */
+/* 默认后台轮询任务参数，由 mesh_host_service 的默认实例使用。 */
 #define MESH_HOST_RUNTIME_TASK_STACK_SIZE 4096
 #define MESH_HOST_RUNTIME_TASK_PRIORITY 5
 #define MESH_HOST_RUNTIME_IDLE_DELAY_MS 10u
@@ -193,32 +193,6 @@ int mesh_host_runtime_process_frame(
  * - 否则从 raw transport 接收一帧，再交给 shared processor 分流。
  */
 int mesh_host_runtime_poll_once(struct mesh_host_runtime *runtime);
-
-/**
- * @brief 初始化默认全局 runtime 单例。
- *
- * 默认路径会自动完成：
- * 1. cluster_config_init_mesh_host()
- * 2. mesh_transport_manager_init_default()
- * 3. 基于默认 UART transport 装配 runtime
- */
-int mesh_host_runtime_init_default(void);
-
-/**
- * @brief 获取默认全局 runtime 单例。
- *
- * @return 已初始化时返回实例指针，否则返回 NULL。
- */
-struct mesh_host_runtime *mesh_host_runtime_default(void);
-
-/**
- * @brief 启动默认全局 runtime 的后台轮询任务。
- *
- * 在 ESP 平台上，该函数会创建一个 FreeRTOS 任务持续调用 poll_once；
- * 在主机单元测试环境中，该函数返回 -M9P_ERR_ENOTSUP，测试应直接手动调用
- * process_frame() 或 poll_once()。
- */
-int mesh_host_runtime_start_default_task(void);
 
 #ifdef __cplusplus
 }

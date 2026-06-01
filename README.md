@@ -71,7 +71,7 @@ Mini9P 是本项目使用的轻量级 9P 变体。帧格式包括 magic `0x39 0x
 - `mini9p_protocol`：帧编解码、请求解析、响应构造和 CRC 校验。
 - `mini9p_client`：主控侧 attach/walk/open/read/write/stat/clunk 封装。
 - `mini9p_server`：从机侧 session、fid 表、权限检查和 backend 分发。
-- `mini9p_service`：从机上板联调组装层，连接 `local_vfs`、server、`mesh_node_runtime` 和 `mesh_uart_transport`。
+- `mesh_node_service`：从机上板联调组装层，连接 `local_vfs`、server、`mesh_node_runtime` 和 `mesh_uart_transport`。
 
 协议细节见：
 
@@ -80,7 +80,7 @@ Mini9P 是本项目使用的轻量级 9P 变体。帧格式包括 magic `0x39 0x
 
 ### Cluster VFS
 
-`pwos-master-esp32p4/vfs_bridge/cluster_vfs.c` 是主控上的统一命名空间桥接层。它不是完整 POSIX 文件系统，而是维护静态路由表和本地 fd 表：
+`pwos-master-esp32p4/vfs_bridge/cluster_host_vfs.c` 是主控上的统一命名空间桥接层。它不是完整 POSIX 文件系统，而是维护静态路由表和本地 fd 表：
 
 - 直连路由：`/mcu1/dev/temp` 命中 `mcu1`，发送到从机时转为 `/dev/temp`。
 - 本地 fd：`local_fd -> route + remote_fid`，其中 `remote_fid` 是 Mini9P session 内的远端句柄。
@@ -164,9 +164,9 @@ pwos-slave/User/uart_transport/test/build/slave_uart_transport_host_test
 ### STM32F411 Mini9P server test
 
 ```bash
-cmake -S pwos-slave-stm32f411/User/mini9p/test -B pwos-slave-stm32f411/User/mini9p/test/build
-cmake --build pwos-slave-stm32f411/User/mini9p/test/build
-pwos-slave-stm32f411/User/mini9p/test/build/mini9p_server_test
+cmake -S pwos-slave-stm32f411/User/backend/test -B pwos-slave-stm32f411/User/backend/test/build
+cmake --build pwos-slave-stm32f411/User/backend/test/build
+pwos-slave-stm32f411/User/backend/test/build/local_vfs_test
 ```
 
 ### PC 主控模拟器硬件 smoke test

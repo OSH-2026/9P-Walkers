@@ -38,7 +38,7 @@
 主机启动时调用：
 
 ```c
-mesh_host_runtime_start_default_task();
+mesh_host_service_start_default_task();
 ```
 
 该入口会自动完成：
@@ -54,13 +54,13 @@ mesh_host_runtime_start_default_task();
 
 当远端节点接入后，它会发 REGISTER。
 
-在当前从机接线里，这个 REGISTER 不是靠上层业务手写触发，而是由单个
-`mesh_node_runtime` 统一管理本节点全部 UART 后自动完成：
+在当前从机接线里，这个 REGISTER 不是靠上层业务手写触发，而是由节点 service
+持有的 `mesh_node_runtime` 通过已配置 UART 端口自动完成：
 
-1. `mini9p_service_init()` 先初始化本地 `mini9p_server` 和 raw mesh UART transport。
-2. 然后把所有本地串口绑定到同一个 `mesh_node_runtime`。
-3. `mesh_node_runtime` 在 init 成功后，会向每个已绑定 UART 各发送一帧 REGISTER；若板级启用了 Wi-Fi，也会额外通过保留的 Wi-Fi 特殊端口发送一帧 REGISTER。
-4. REGISTER 里会携带当前板子的稳定硬件 UID、该 runtime 汇总后的端口位图，以及 `wifi_supported` 标记；Wi-Fi 启用时，端口位图最高位保留给 Wi-Fi。
+1. `mesh_node_mini9p_init()` 先初始化 `node_vfs` 和 `mini9p_server`，再把 server handler/context 注入 `mesh_node_service_init(config)`。
+2. `mesh_node_service_init(config)` 初始化端口数组里的 raw mesh UART transport，并装配一个共享的 `mesh_node_runtime`。
+3. `mesh_node_runtime` 在 init 成功后，会通过所有已启用端口各发送一帧 REGISTER；若板级启用了 Wi-Fi，也会额外通过保留的 Wi-Fi 特殊端口发送一帧 REGISTER。
+4. REGISTER 里会携带当前板子的稳定硬件 UID、固定能力位、该 runtime 汇总后的端口位图，以及 `wifi_supported` 标记；Wi-Fi 启用时，端口位图最高位保留给 Wi-Fi。
 
 当前 STM32 实现里，8 字节 UID 由 96-bit 硬件唯一编号压缩得到：
 
@@ -68,7 +68,7 @@ mesh_host_runtime_start_default_task();
 - 后 4 字节取 `HAL_GetUIDw1() ^ HAL_GetUIDw2()`。
 
 如果未来板级代码能够显式检测某条 UART 的 link-up 事件，还可以继续调用
-`mini9p_service_notify_link_up()`、`mesh_node_runtime_notify_link_up()`，或者更细粒度的
+`mesh_node_service_notify_link_up()`、`mesh_node_runtime_notify_link_up()`，或者更细粒度的
 `mesh_node_runtime_notify_link_up_on_port()`，在该事件上再次向对应串口重发 REGISTER。
 
 多串口 runtime 额外承担两件事：
@@ -163,14 +163,14 @@ cluster_vfs_write_path("/mcu1/dev/led", data, len, &written);
 
 这套 runtime 对外接口可以按三层理解。
 
-### 5.1 第一层：runtime 启动接口
+### 5.1 第一层：service 启动接口
 
 这层用于“把自动链条拉起来”。
 
 #### 默认启动入口
 
 ```c
-int mesh_host_runtime_start_default_task(void);
+int mesh_host_service_start_default_task(void);
 ```
 
 用途：
@@ -185,8 +185,9 @@ int mesh_host_runtime_start_default_task(void);
 #### 默认实例初始化
 
 ```c
-int mesh_host_runtime_init_default(void);
-struct mesh_host_runtime *mesh_host_runtime_default(void);
+int mesh_host_service_init_default(void);
+struct mesh_host_service *mesh_host_service_default(void);
+struct mesh_host_runtime *mesh_host_service_default_runtime(void);
 ```
 
 用途：
@@ -336,7 +337,7 @@ int cluster_vfs_stat(const char *path, struct m9p_stat *out_stat);
 
 推荐顺序：
 
-1. 启动时调用 `mesh_host_runtime_start_default_task()`。
+1. 启动时调用 `mesh_host_service_start_default_task()`。
 2. 等待 runtime 自动发现节点。
 3. 用 shared mesh cluster 或 `cluster_config_*` 查询节点是否在线/可达。
 4. 对需要访问的节点执行 `cluster_vfs_attach("mcuN")`。

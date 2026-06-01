@@ -397,6 +397,7 @@ int mesh_processer_process_frame(
 int mesh_processer_poll_once(struct mesh_processer *processor)
 {
     size_t rx_len = 0u;
+    uint8_t ingress_port = MESH_PROCESSER_INGRESS_PORT_NONE;
     int rc;
 
     if (processor == NULL || !processor->initialized) {
@@ -407,7 +408,8 @@ int mesh_processer_poll_once(struct mesh_processer *processor)
         processor->config.transport_ctx,
         processor->rx_buffer,
         sizeof(processor->rx_buffer),
-        &rx_len);
+        &rx_len,
+        &ingress_port);
     if (rc != 0) {
         return rc;
     }

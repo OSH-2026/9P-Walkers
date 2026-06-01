@@ -17,6 +17,7 @@ CompileFlags:
     - -DSTM32F407xx
     - -Ipwos-shared/mini9p
     - -Ipwos-slave/User/backend
+    - -Ipwos-slave/User/mesh
     - -Ipwos-slave/User/uart_transport
     - -Ipwos-slave/User/app
     - -Ipwos-slave/User/fs
@@ -35,7 +36,7 @@ CompileFlags:
     - -DUSE_HAL_DRIVER
     - -DSTM32F411xE
     - -Ipwos-slave-stm32f411/User/backend
-    - -Ipwos-slave-stm32f411/User/mini9p
+    - -Ipwos-slave/User/mesh
     - -Ipwos-slave-stm32f411/User/os
     - -Ipwos-slave-stm32f411/User/app
     - -Ipwos-slave-stm32f411/User/fs
@@ -55,12 +56,11 @@ CompileFlags:
     - -fno-threadsafe-statics
 ---
 If:
-  PathMatch: ^pwos-master-esp32p4/(vfs_bridge|transport|mesh|cluster)/.*
+  PathMatch: ^pwos-master-esp32p4/(vfs_bridge|mesh|cluster)/.*
 CompileFlags:
   CompilationDatabase: pwos-master-esp32p4/vfs_bridge/test/build
   Add:
     - -std=gnu11
-    - -Ipwos-master-esp32p4/transport
     - -Ipwos-master-esp32p4/mesh
     - -Ipwos-master-esp32p4/cluster
     - -Ipwos-master-esp32p4/vfs_bridge
@@ -86,10 +86,9 @@ CompileFlags:
   CompilationDatabase: pwos-slave/User/uart_transport/test/build
 ---
 If:
-  PathMatch: ^pwos-master-esp32p4/(transport|vfs_bridge|mesh|cluster)/test/.*
+  PathMatch: ^pwos-master-esp32p4/(vfs_bridge|mesh|cluster)/test/.*
 CompileFlags:
-  Add:
-    - -Ipwos-master-esp32p4/transport/test/stubs
+  Add: []
 ---
 If:
   PathMatch: ^pwos-slave/User/uart_transport/test/.*

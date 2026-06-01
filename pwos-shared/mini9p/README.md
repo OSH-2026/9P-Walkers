@@ -9,11 +9,11 @@
 mini9p_protocol  帧编解码、T* 解析、R* 构造
 mini9p_client    请求/响应式客户端，transport 由外层注入
 mini9p_server    会话状态、fid 生命周期、请求分发、Rerror
-mini9p_service   节点侧组装层，串起已注入 backend + server + mesh_node_runtime + mesh_uart_transport
+mesh_node_service   节点侧组装层，串起已注入 backend + server + mesh_node_runtime + mesh_uart_transport
 ```
 
 `mini9p_server` 不直接访问 littlefs 或设备资源。它只通过 `m9p_server_ops` 调用 backend。
-`mini9p_service` 同样不构造具体 backend；板级代码负责初始化 lfs/node_vfs 等本地资源后注入。
+`mesh_node_service` 同样不构造具体 backend；板级代码负责初始化 lfs/node_vfs 等本地资源后注入。
 
 `mini9p_client` 也不直接理解 UART 或 mesh。它只要求外层提供一个 `m9p_transport_fn`：
 
@@ -64,46 +64,54 @@ m9p_server_init(&server, &config);
 
 核心文件：
 
-- `mini9p_service.h`
-- `mini9p_service.c`
+- `mesh_node_service.h`
+- `mesh_node_service.c`
 
-service 是 STM32 节点侧的薄组装层，内部持有静态实例：
+service 是 STM32 节点侧的 mesh 装配层，内部持有静态实例：
 
-- `m9p_server`
-- `mesh_uart_transport`
+- 一组 `mesh_uart_transport`
 - `mesh_node_runtime`
 
-具体 backend（例如 `lfs_vfs` 或从机本地 `node_vfs`）由板级代码持有和初始化。
+具体 backend 由 `node_vfs_init()` 内部初始化并挂载；`mesh_node_mini9p_init` 持有 `m9p_server` 并只把 `node_vfs_ops()` 接入 Mini9P server。
 
-对外暴露三个入口：
+对外暴露入口：
 
 ```c
-struct mini9p_service_backend {
-    const struct m9p_server_ops *ops;
-    void *ops_ctx;
-    uint16_t default_iounit;
+struct mesh_node_service_port_config {
+    bool enabled;
+    uint8_t neighbor_addr;
+    struct mesh_uart_transport_config uart_config;
 };
 
-int mini9p_service_init_with_backend(const struct mini9p_service_backend *backend);
-int mini9p_service_notify_link_up(void);
-int mini9p_service_poll_once(void);
+struct mesh_node_service_config {
+    mesh_processer_mini9p_server_handler_fn mini9p_server_handler;
+    void *mini9p_server_ctx;
+    size_t port_count;
+    struct mesh_node_service_port_config ports[MESH_NODE_SERVICE_MAX_PORTS];
+};
+
+void mesh_node_service_get_default_config(struct mesh_node_service_config *out_config);
+int mesh_node_service_init(const struct mesh_node_service_config *config);
+void mesh_node_service_deinit(void);
+int mesh_node_service_notify_link_up(void);
+int mesh_node_service_poll_once(void);
 ```
 
 初始化顺序：
 
 ```text
-board code initializes backend
-  -> mini9p_service_init_with_backend(backend)
-  -> m9p_server_init(backend.ops)
+node_vfs_init initializes sys/dev/lfs
+  -> m9p_server_init(node_vfs_ops)
+  -> mesh_node_service_init(config with m9p_server_handle_frame + server ctx)
   -> mesh_uart_transport_init
-  -> mesh_node_runtime_init(send_frame/receive_frame + m9p_server_handle_frame)
+  -> mesh_node_runtime_init(send_frame/receive_frame + injected Mini9P handler)
   -> auto REGISTER
 ```
 
 轮询流程：
 
 ```text
-mini9p_service_poll_once
+mesh_node_service_poll_once
   -> mesh_node_runtime_poll_once
   -> mesh_uart_transport_receive_frame
   -> mesh_processer_process_frame
@@ -111,17 +119,17 @@ mini9p_service_poll_once
   -> local R* -> 封回 mesh MINI9P frame 发出
 ```
 
-在节点侧，`mini9p_service_init_with_backend()` 会给 `mesh_node_runtime` 配好 `local_uid`、`boot_nonce` 和 REGISTER 能力位；
-`mini9p_service_notify_link_up()` 可在未来链路明确恢复后再次主动发 REGISTER。
+在节点侧，`mesh_node_service_init(config)` 会给 `mesh_node_runtime` 配好 `local_uid`、`boot_nonce`、REGISTER 能力位和 Mini9P handler；
+`mesh_node_service_notify_link_up()` 可在未来链路明确恢复后再次主动发 REGISTER。
 
 ## PC 测试
 
 server 单元测试：
 
 ```bash
-cmake -S pwos-slave/User/mini9p/test -B pwos-slave/User/mini9p/test/build
-cmake --build pwos-slave/User/mini9p/test/build
-pwos-slave/User/mini9p/test/build/mini9p_server_test
+cmake -S pwos-slave/User/uart_transport/test -B pwos-slave/User/uart_transport/test/build
+cmake --build pwos-slave/User/uart_transport/test/build
+pwos-slave/User/uart_transport/test/build/mini9p_server_test
 ```
 
 上板串口联调工具见：

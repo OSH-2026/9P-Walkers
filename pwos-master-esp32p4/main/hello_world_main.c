@@ -7,7 +7,7 @@
 #include "esp_system.h"
 #include "http_server.h"
 #include "lua_port.h"
-#include "mesh_host_runtime.h"
+#include "mesh_host_service.h"
 #include "sdkconfig.h"
 #include "shell.h"
 #include "wifi_softap.h"
@@ -38,11 +38,11 @@ void app_main(void)
     print_chip_banner();
 
     /*
-     * 启动 mesh host runtime：一次性完成 cluster 初始化、UART transport 初始化，
+     * 启动 mesh host service：一次性完成 cluster、UART transport 和 runtime 初始化，
      * 并创建后台 FreeRTOS 任务持续处理 REGISTER / LINK_STATE / MINI9P mesh 帧。
      * 节点上线后 REGISTER 帧会自动触发 VFS 注册，无需手动添加静态节点。
      */
-    if (mesh_host_runtime_start_default_task() != 0) {
+    if (mesh_host_service_start_default_task() != 0) {
         puts("fatal: mesh host runtime init failed");
         return;
     }

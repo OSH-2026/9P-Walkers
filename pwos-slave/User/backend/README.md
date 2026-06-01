@@ -27,24 +27,16 @@
 ## 典型接入方式
 
 ```c
-struct lfs_vfs lfs;
-struct dev_vfs dev;
-struct sys_vfs sys;
 struct node_vfs node;
 struct node_vfs_config node_cfg = {
-    .sys_ops  = sys_vfs_ops(),
-    .sys_ctx  = &sys,
-    .dev_ops  = dev_vfs_ops(),
-    .dev_ctx  = &dev,
-    .lfs_ops  = lfs_vfs_ops(),
-    .lfs_ctx  = &lfs,
+    .iounit = NODE_VFS_DEFAULT_IOUNIT,
 };
 node_vfs_init(&node, &node_cfg);
 
-// 将 node_ops() 接入 mini9p_server
+// 将 node_vfs_ops() 接入 mini9p_server
 ```
 
-三个后端统一使用 ops/ctx 模式，配置结构一致。
+`node_vfs_init()` 内部初始化并挂载 `sys_vfs`、`dev_vfs`、`lfs_vfs`；Mini9P server 只直接挂载 `node_vfs`。
 
 ## dev_vfs 设备操作接口
 
