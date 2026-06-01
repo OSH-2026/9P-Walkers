@@ -1,3 +1,111 @@
+# PWOS ESP32-P4 主控
+
+`pwos-master-esp32p4` 是集群的主控固件目录,基于 ESP-IDF 框架。
+
+## 工程目录结构
+
+```
+pwos-master-esp32p4/
+├── CMakeLists.txt          # 根 CMake,检查 IDF_PATH
+├── main/                   # ESP-IDF 组件入口
+│   ├── CMakeLists.txt
+│   ├── hello_world_main.c  # app_main 入口
+│   ├── lua_bindings.c/.h
+│   ├── lua_port.c/.h
+│   └── lua_vfs_bindings.c/.h
+├── cluster/                # cluster_config:把 mesh 事件翻译给 VFS
+│   ├── cluster_config.c
+│   └── cluster_config.h
+├── mesh/                   # 主机侧 mesh 装配层
+│   ├── mesh_host_runtime.c/.h
+│   └── mesh_host_service.c/.h
+├── vfs_bridge/             # 集群命名空间桥接
+│   ├── cluster_host_vfs.c/.h
+│   ├── design.md
+│   ├── mini9p.md
+│   ├── vfs接口说明.md
+│   └── test/               # 独立 host test 工程
+├── shell/                  # 本地 C shell
+│   ├── shell.c
+│   └── shell.h
+├── web/                    # HTTP + WebSocket + Wi-Fi softAP
+│   ├── http_server.c/.h
+│   ├── websocket_shell.c/.h
+│   ├── wifi_softap.c/.h
+│   └── index.html          # 嵌入式 web shell
+├── lua/                    # Lua 5.x 源码(裁剪后)
+│   └── (lapi.c, lauxlib.c, ...)
+└── pytest_hello_world.py   # ESP-IDF pytest 入口
+```
+
+## 构建
+
+需要先 source ESP-IDF 环境,保证 `IDF_PATH` 可用。根 `CMakeLists.txt` 在未设置 `IDF_PATH` 时会直接 `FATAL_ERROR` 报错。
+
+```bash
+cd pwos-master-esp32p4
+idf.py build
+idf.py flash
+idf.py monitor
+# 一条命令完成
+idf.py build flash monitor
+```
+
+### 组件入口
+
+`main/CMakeLists.txt` 通过 `idf_component_register` 注册组件,关键点:
+
+- 收集 `lua/*.c` 时移除 `lua.c`、`luac.c`、`linit.c`、`liolib.c`、`loslib.c`、`loadlib.c`、`ldblib.c` 等 OS 相关标准库
+- 显式把 `pwos-shared/mini9p` 和 `pwos-shared/mesh/{envelope,processer,cluster,transport}` 拉入组件
+- `EMBED_FILES "../web/index.html"` 把 web shell 静态资源编进固件
+- `PRIV_REQUIRES` 列 `esp_timer`、`spi_flash`、`esp_http_server`、`esp_wifi`、`esp_event`、`esp_netif`、`nvs_flash` 等
+
+## 主机侧 mesh 装配
+
+`mesh/` 子目录提供:
+
+- `mesh_host_runtime`:主机 mesh runtime 对象,封装 `mesh_processer`,处理 `REGISTER`/`LINK_STATE`/`ROUTE_UPDATE`,为已发现节点绑定 mesh-backed mini9P client,挂到 `cluster_config` / `cluster_host_vfs`
+- `mesh_host_service`:拥有最多 `MESH_HOST_SERVICE_MAX_PORTS = 4` 个 UART 端口,默认单端口模式使用 `MESH_HOST_SERVICE_NEIGHBOR_ANY == 0xff`
+
+`next_hop -> UART 端口` 由 service 在静态 `neighbor_addr` 配置中查表。详细设计见 `mesh/README.md`。
+
+## Cluster VFS 桥接
+
+`vfs_bridge/cluster_host_vfs.c` 是主控的 VFS 桥接层,提供 `init / discover_node / attach / detach / open / read / write / close / read_path / write_path / list / stat`。设计文档 `vfs_bridge/design.md`、接口详解 `vfs_bridge/vfs接口说明.md`、mini9P 帧格式 `vfs_bridge/mini9p.md`。
+
+## 本地 Shell、Lua、WebShell
+
+- `shell/shell.c` 解析 C shell 命令并把文件访问下推到 `cluster_vfs_*`
+- `lua/` 是裁剪后的 Lua 5.x 源码,`main/lua_port.c` + `main/lua_bindings.c` 把 Lua 嵌入主控,`main/lua_vfs_bindings.c` 把 Lua 的 `read/write/list/stat` 落到 `cluster_vfs_*`
+- `web/http_server.c` + `web/websocket_shell.c` 提供浏览器 WebShell,`web/wifi_softap.c` 配置 Wi-Fi softAP,`web/index.html` 由 ESP-IDF 嵌入
+
+## Host test
+
+`vfs_bridge/test/` 是独立 CMake 工程,使用帧级 `mock_transport()` 模拟 mini9P server,验证 `cluster_vfs -> mini9p_client -> transport` 真实调用链。`vfs_bridge/test/test说明.md` 描述每个用例。覆盖:重复路由、`/mcu1` vs `/mcu10` 边界、`open/read/write/close`、`stat` 成功/失败路径 clunk、`close` 返回远端错误、远端目录 list、detach 时的 busy 检查等。
+
+```bash
+cmake -S pwos-master-esp32p4/vfs_bridge/test -B pwos-master-esp32p4/vfs_bridge/test/build
+cmake --build pwos-master-esp32p4/vfs_bridge/test/build
+pwos-master-esp32p4/vfs_bridge/test/build/cluster_vfs_test
+pwos-master-esp32p4/vfs_bridge/test/build/mesh_host_service_test
+pwos-master-esp32p4/vfs_bridge/test/build/mesh_host_runtime_test
+```
+
+## ESP-IDF pytest
+
+```bash
+cd pwos-master-esp32p4
+pytest pytest_hello_world.py
+```
+
+## 当前边界
+
+- `mesh_host_runtime` 仍具有全局单事务语义(通过 `dispatch_busy`)
+- 主机侧尚未为"远端主动发到主机的 mini9P T*"挂接本地 server handler
+- `vfs_bridge/design.md` 和 `vfs_bridge/TODO.md` 中标注 `<!-- 过期说明 -->` 的内容已过期,实际行为以 `cluster_host_vfs.c` 当前实现为准
+
+---
+
 # mini9P 协议帧格式
 
 ![mini9p帧格式](mini9p_frame_structures.svg)

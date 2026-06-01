@@ -183,7 +183,7 @@ pc_master_emulator / mesh_host_runtime
 
 **主机侧发现/离线流程**：
 
-- 新节点 REGISTER → `cluster_config_on_mesh_node_registered()` → cluster 加入拓扑，VFS 用 UID 分配/复用节点名，状态 = NEW
+- bootstrap REGISTER → 主机发 ASSIGN；ASSIGN 成功后或收到已分配地址 REGISTER → `cluster_config_on_mesh_node_registered()` → 同步 online 位、VFS UID 映射和 mesh-backed Mini9P client，状态 = NEW
 - 节点 LINK_STATE → cluster 添加拓扑边 → `cluster_config_refresh_all_nodes_connectivity()` → VFS 刷新可达性
 - 节点离线 → `cluster_config_on_node_departed()` → cluster 摘图，VFS 保留 UID 映射，清除地址绑定，9P 状态回退 NEW
 

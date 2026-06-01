@@ -20,7 +20,7 @@ pwos-slave/User/
 │   ├── lfs_vfs.c/h             # littlefs VFS 包装
 │   ├── local_vfs.c/h           # Mini9P server 本地 VFS 后端
 │   ├── node_vfs.c/h            # 节点级 VFS 入口（组合 sys/dev/lfs）
-│   └── sys_vfs.c/h             # /sys 虚拟节点（health/info/routes）
+│   └── sys_vfs.c/h             # /sys 虚拟节点（health/info/routes/log）
 ├── fs/
 │   ├── lfs.c/h                 # littlefs 核心
 │   └── lfs_util.c/h            # littlefs 工具函数
@@ -77,18 +77,23 @@ mesh_config.ports[1].uart_config.uart = &huart1;  // 下游从机通信口
 |------|------------------|---------------------|
 | mesh init 文件 | `User/app/mesh_node_mini9p_init.c` | 同左（F411 独立版本） |
 | mesh_diag | `User/app/mesh_diag.c/h` 引用 | **不引用**，mesh_diag 来自 pwos-slave 共享 |
-| node_vfs 回调 | 无 routes_text_fn | `routes_text_fn` + `mesh_log_text_fn` |
+| node_vfs 回调 | `routes_text_fn` + `log_text_fn` | `routes_text_fn` + `log_text_fn` |
 | UART 配置 | 注释掉 USART1 init | 启用 USART1/USART2 双端口 |
 | LFS backend | SD 卡 | RAM backed（`PWOS_LFS_PORT_USE_RAM`） |
 | 时钟树 | HSI PLL（默认） | **HSE PLL**（SYSCLK 96MHz，APB1 48MHz） |
 
 ## 构建预设
 
+F411 只提供 `Debug` 和 `Release` preset,不使用 F407 板级联调 preset。
+
 ```sh
 # Debug 构建
 cmake --preset Debug
 cmake --build --preset Debug
 
+# Release 构建
+cmake --preset Release
+cmake --build --preset Release
 ```
 ## 上板方法
 
@@ -169,6 +174,7 @@ pwos-slave-stm32f411/
 ## 注意事项
 
 - F411 固件不支持 SD 卡存储，littlefs 使用 RAM backed（`PWOS_LFS_PORT_USE_RAM`）
-- USART2 是与 PC/host 通信的 mesh 主口，USART1 是下游级联口
-- 两个串口均运行在 **1000000 baud**，时钟树必须配置为 HSE PLL 以保证精度
+- F411 不使用 F407 板级联调 preset;构建时只使用本文档列出的 Debug/Release 命令
+- USART2（PA2=TX, PA3=RX）是与 PC/host 通信的 mesh 主口，USART1 是下游级联口
+- 两个串口均运行在 **1000000 baud**，只传 Mini9P/mesh 二进制帧，不混入 VOFA 文本；时钟树必须配置为 HSE PLL 以保证精度
 - 共用代码变更后，F411 和 F407 固件会同时生效；建议先在 F407 验证后再烧录 F411
