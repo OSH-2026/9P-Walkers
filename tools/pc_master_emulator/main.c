@@ -76,6 +76,9 @@
 /** 从机 mesh 路由诊断路径。 */
 #define PC_MASTER_ROUTES_PATH_FMT "/%s/sys/routes"
 
+/** 从机 mesh 发送/转发日志路径。 */
+#define PC_MASTER_MESH_LOG_PATH_FMT "/%s/sys/mesh_log"
+
 /** 发现阶段最大轮询次数（60 × 1s = 60s 超时） */
 #define PC_MASTER_DISCOVERY_POLLS 60
 
@@ -84,6 +87,9 @@
 
 /** 路由诊断响应最大字节数 */
 #define PC_MASTER_ROUTES_CAP 512u
+
+/** Mesh debug log 响应最大字节数 */
+#define PC_MASTER_MESH_LOG_CAP 2048u
 
 /** 本机（PC 主控）在 Mesh 网络中的虚拟地址 */
 #define PC_MASTER_LOCAL_ADDR 0x00u
@@ -1065,6 +1071,80 @@ static int read_routes_path(const char *target)
     return 0;
 }
 
+static int read_text_file_chunked(
+    const char *path,
+    uint8_t *buffer,
+    uint16_t buffer_cap,
+    uint16_t max_chunk,
+    uint16_t *out_len)
+{
+    uint16_t fd = 0u;
+    uint16_t total = 0u;
+    int rc;
+
+    if (path == NULL || buffer == NULL || buffer_cap == 0u || out_len == NULL) {
+        return -(int)M9P_ERR_EINVAL;
+    }
+
+    rc = cluster_vfs_open(path, M9P_OREAD, &fd);
+    if (rc != 0) {
+        return rc;
+    }
+
+    while (total < (uint16_t)(buffer_cap - 1u)) {
+        uint16_t chunk = (uint16_t)(buffer_cap - 1u - total);
+
+        if (chunk > max_chunk) {
+            chunk = max_chunk;
+        }
+
+        rc = cluster_vfs_read(fd, buffer + total, &chunk);
+        if (rc != 0) {
+            (void)cluster_vfs_close(fd);
+            return rc;
+        }
+        if (chunk == 0u) {
+            break;
+        }
+        total = (uint16_t)(total + chunk);
+    }
+
+    rc = cluster_vfs_close(fd);
+    if (rc != 0) {
+        return rc;
+    }
+
+    buffer[total] = '\0';
+    *out_len = total;
+    return 0;
+}
+
+static int read_mesh_log_path(const char *target)
+{
+    char log_path[64];
+    uint8_t log_text[PC_MASTER_MESH_LOG_CAP];
+    uint16_t len = 0u;
+    int rc;
+
+    rc = snprintf(log_path, sizeof(log_path), PC_MASTER_MESH_LOG_PATH_FMT, target);
+    if (rc < 0 || (size_t)rc >= sizeof(log_path)) {
+        fprintf(stderr, "mesh log path too long for %s\n", target);
+        return -(int)M9P_ERR_EINVAL;
+    }
+
+    rc = read_text_file_chunked(log_path, log_text, sizeof(log_text), 48u, &len);
+    if (rc != 0) {
+        fprintf(stderr, "warning: cluster_vfs_read(%s) failed: %d\n", log_path, rc);
+        return rc;
+    }
+
+    printf("read %s:\n%s", log_path, (const char *)log_text);
+    if (len == (uint16_t)(sizeof(log_text) - 1u)) {
+        printf("warning: %s output truncated at %u bytes\n", log_path, (unsigned)len);
+    }
+    return 0;
+}
+
 /**
  * @brief 执行 smoke test：attach + walk + open + read + clunk
  *
@@ -1109,6 +1189,18 @@ static int run_dynamic_sequence(
         if (rc != 0) {
             return rc;
         }
+    }
+
+    for (i = 0u; i < target_node_count; ++i) {
+        char target[MESH_MAX_NODE_NAME + 1u];
+        int rc = snprintf(target, sizeof(target), PC_MASTER_NODE_NAME_FMT, i + 1u);
+
+        if (rc < 0 || (size_t)rc >= sizeof(target)) {
+            fprintf(stderr, "target node name too long: index=%zu\n", i + 1u);
+            return -(int)M9P_ERR_EINVAL;
+        }
+
+        (void)read_mesh_log_path(target);
     }
 
     puts("pc_master_emulator: ok");
