@@ -11,8 +11,9 @@
  * 2. 初始化 mesh_host_runtime（将串口 fd 作为 transport_ctx 传入）
  * 3. 轮询 mesh_host_runtime_poll_once()，接收从机的 REGISTER 帧
  * 4. 收到第一次 REGISTER（src=dst=UNASSIGNED）时回送 ASSIGN，给节点分配地址
- * 5. 节点收到 ASSIGN 后会发送第二次 REGISTER（src=分配地址），确认上线
- * 6. cluster_vfs_attach("mcuN") 挂载节点，然后 cluster_vfs_read_path 读文件
+ * 5. ASSIGN 成功发出后主机立即注册节点；旧固件的二次 REGISTER 仅作幂等刷新
+ * 6. 从机通过 LINK_STATE 上报真实邻居边后，host runtime 下发 ROUTE_UPDATE
+ * 7. cluster_vfs_attach("mcuN") 挂载节点，然后 cluster_vfs_read_path 读文件
  *
  * ## 帧格式（Mesh over UART）
  *
@@ -51,7 +52,7 @@
 #include <termios.h>
 #include <unistd.h>
 
-/** 默认波特率：1 Mbps（STM32F411 USART1 默认值） */
+/** 默认波特率：1 Mbps（当前 STM32 Mini9P UART 默认值） */
 #define PC_MASTER_DEFAULT_BAUD 1000000u
 
 /** poll/recv 超时时间（毫秒） */
@@ -72,11 +73,23 @@
 /** 健康检查路径格式，先 walk 再 open read。 */
 #define PC_MASTER_HEALTH_PATH_FMT "/%s/sys/health"
 
+/** 从机 mesh 路由诊断路径。 */
+#define PC_MASTER_ROUTES_PATH_FMT "/%s/sys/routes"
+
+/** 从机通用诊断日志路径。 */
+#define PC_MASTER_LOG_PATH_FMT "/%s/sys/log"
+
 /** 发现阶段最大轮询次数（60 × 1s = 60s 超时） */
 #define PC_MASTER_DISCOVERY_POLLS 60
 
 /** 健康检查响应最大字节数 */
 #define PC_MASTER_HEALTH_CAP 64u
+
+/** 路由诊断响应最大字节数 */
+#define PC_MASTER_ROUTES_CAP 512u
+
+/** 诊断日志响应最大字节数 */
+#define PC_MASTER_LOG_CAP 2048u
 
 /** 本机（PC 主控）在 Mesh 网络中的虚拟地址 */
 #define PC_MASTER_LOCAL_ADDR 0x00u
@@ -91,7 +104,6 @@
  */
 struct pc_master_node_slot {
     bool used;                  /**< 是否已分配给某个 UID */
-    bool confirmed;             /**< 是否收到带正式 src 地址的确认 REGISTER */
     uint8_t uid[MESH_UID_LEN];  /**< REGISTER 中的硬件 UID */
     uint8_t mesh_addr;          /**< 本次运行分配的 mesh 地址 */
     char name[MESH_MAX_NODE_NAME + 1u]; /**< 本次运行分配的节点名，如 mcu1 */
@@ -108,6 +120,7 @@ struct pc_mesh_transport {
     uint16_t next_seq;                       /**< 下一个待发送帧的序列号（用于 Mesh 帧头） */
     size_t target_node_count;                /**< 本次 smoke test 期望的节点数量 */
     size_t assigned_node_count;              /**< 已分配过槽位的节点数量 */
+    struct mesh_host_runtime *runtime;       /**< host runtime，用于 ASSIGN 后立即注册节点 */
     struct pc_master_node_slot nodes[PC_MASTER_MAX_TARGET_NODES]; /**< 节点分配表 */
 };
 
@@ -453,11 +466,465 @@ static const char *mesh_type_name(uint8_t type)
         return "ROUTE_UPDATE";
     case MESH_TYPE_LINK_STATE:
         return "LINK_STATE";
+    case MESH_TYPE_NEIGHBOR_PROBE_REQUEST:
+        return "NEIGHBOR_PROBE_REQUEST";
+    case MESH_TYPE_NEIGHBOR_PROBE_RESPONSE:
+        return "NEIGHBOR_PROBE_RESPONSE";
     case MESH_TYPE_ERROR:
         return "ERROR";
     default:
         return "unknown";
     }
+}
+
+static const char *mini9p_type_name(uint8_t type)
+{
+    switch (type) {
+    case M9P_TATTACH:
+        return "TATTACH";
+    case M9P_RATTACH:
+        return "RATTACH";
+    case M9P_TWALK:
+        return "TWALK";
+    case M9P_RWALK:
+        return "RWALK";
+    case M9P_TOPEN:
+        return "TOPEN";
+    case M9P_ROPEN:
+        return "ROPEN";
+    case M9P_TREAD:
+        return "TREAD";
+    case M9P_RREAD:
+        return "RREAD";
+    case M9P_TWRITE:
+        return "TWRITE";
+    case M9P_RWRITE:
+        return "RWRITE";
+    case M9P_TSTAT:
+        return "TSTAT";
+    case M9P_RSTAT:
+        return "RSTAT";
+    case M9P_TCLUNK:
+        return "TCLUNK";
+    case M9P_RCLUNK:
+        return "RCLUNK";
+    case M9P_RERROR:
+        return "RERROR";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+static int hex_nibble(char ch)
+{
+    if (ch >= '0' && ch <= '9') {
+        return ch - '0';
+    }
+    if (ch >= 'a' && ch <= 'f') {
+        return ch - 'a' + 10;
+    }
+    if (ch >= 'A' && ch <= 'F') {
+        return ch - 'A' + 10;
+    }
+    return -1;
+}
+
+static bool parse_hex_u8(const char *text, size_t len, uint8_t *out_value)
+{
+    int hi;
+    int lo;
+
+    if (text == NULL || out_value == NULL || len < 2u) {
+        return false;
+    }
+
+    hi = hex_nibble(text[0]);
+    lo = hex_nibble(text[1]);
+    if (hi < 0 || lo < 0) {
+        return false;
+    }
+
+    *out_value = (uint8_t)(((uint8_t)hi << 4) | (uint8_t)lo);
+    return true;
+}
+
+static bool line_matches_at(const char *line, size_t line_len, size_t offset, const char *prefix)
+{
+    size_t prefix_len;
+
+    if (line == NULL || prefix == NULL || offset > line_len) {
+        return false;
+    }
+
+    prefix_len = strlen(prefix);
+    return prefix_len <= line_len - offset &&
+           memcmp(line + offset, prefix, prefix_len) == 0;
+}
+
+static void print_annotated_log_line(const char *line, size_t line_len)
+{
+    size_t i = 0u;
+
+    while (i < line_len) {
+        uint8_t value;
+
+        if (line_matches_at(line, line_len, i, "type=0x") &&
+            parse_hex_u8(line + i + 7u, line_len - i - 7u, &value)) {
+            printf("type=0x%02x(%s)", value, mesh_type_name(value));
+            i += 9u;
+            continue;
+        }
+        if (line_matches_at(line, line_len, i, "m9p=0x") &&
+            parse_hex_u8(line + i + 6u, line_len - i - 6u, &value)) {
+            printf("m9p=0x%02x(%s)", value, mini9p_type_name(value));
+            i += 8u;
+            continue;
+        }
+
+        putchar((unsigned char)line[i]);
+        ++i;
+    }
+    putchar('\n');
+}
+
+static void print_annotated_log_text(const char *text)
+{
+    const char *line = text;
+
+    if (text == NULL) {
+        return;
+    }
+
+    while (*line != '\0') {
+        const char *end = strchr(line, '\n');
+        size_t line_len;
+
+        if (end == NULL) {
+            print_annotated_log_line(line, strlen(line));
+            break;
+        }
+
+        line_len = (size_t)(end - line);
+        print_annotated_log_line(line, line_len);
+        line = end + 1;
+    }
+}
+
+static size_t pc_log_prefix_width(const char *prefix)
+{
+    size_t width = 0u;
+    const unsigned char *p = (const unsigned char *)prefix;
+
+    if (p == NULL) {
+        return 0u;
+    }
+
+    while (*p != '\0') {
+        if ((*p & 0xc0u) != 0x80u) {
+            ++width;
+        }
+        ++p;
+    }
+    return width + 1u;
+}
+
+static void pc_log_detail_indent(size_t width)
+{
+    size_t i;
+
+    for (i = 0u; i < width; ++i) {
+        putchar(' ');
+    }
+}
+
+static void pc_mini9p_log_frame_details(size_t indent_width, const struct mesh_frame_view *view)
+{
+    struct m9p_frame_view frame;
+
+    if (view == NULL || view->type != MESH_TYPE_MINI9P) {
+        return;
+    }
+
+    if (!m9p_decode_frame(view->payload, view->payload_len, &frame)) {
+        pc_log_detail_indent(indent_width);
+        printf("mini9p decode failed payload=%u\n", view->payload_len);
+        return;
+    }
+
+    switch (frame.type) {
+    case M9P_TATTACH: {
+        struct m9p_attach_request request;
+
+        if (m9p_parse_tattach(&frame, &request)) {
+            pc_log_detail_indent(indent_width);
+            printf(
+                "mini9p %s tag=%u fid=%u msize=%u inflight=%u flags=0x%02x\n",
+                mini9p_type_name(frame.type),
+                frame.tag,
+                request.fid,
+                request.requested_msize,
+                request.requested_inflight,
+                request.attach_flags);
+        }
+        break;
+    }
+    case M9P_RATTACH: {
+        struct m9p_attach_result result;
+
+        if (m9p_parse_rattach(&frame, &result)) {
+            pc_log_detail_indent(indent_width);
+            printf(
+                "mini9p %s tag=%u msize=%u max_fids=%u inflight=%u features=0x%08lx root_qid=0x%08lx\n",
+                mini9p_type_name(frame.type),
+                frame.tag,
+                result.negotiated_msize,
+                result.max_fids,
+                result.max_inflight,
+                (unsigned long)result.feature_bits,
+                (unsigned long)result.root_qid.object_id);
+        }
+        break;
+    }
+    case M9P_TWALK: {
+        struct m9p_walk_request request;
+
+        if (m9p_parse_twalk(&frame, &request)) {
+            pc_log_detail_indent(indent_width);
+            printf(
+                "mini9p %s tag=%u fid=%u newfid=%u path=%s\n",
+                mini9p_type_name(frame.type),
+                frame.tag,
+                request.fid,
+                request.newfid,
+                request.path);
+        }
+        break;
+    }
+    case M9P_RWALK: {
+        struct m9p_qid qid;
+
+        if (m9p_parse_rwalk(&frame, &qid)) {
+            pc_log_detail_indent(indent_width);
+            printf(
+                "mini9p %s tag=%u qid_type=0x%02x qid=0x%08lx\n",
+                mini9p_type_name(frame.type),
+                frame.tag,
+                qid.type,
+                (unsigned long)qid.object_id);
+        }
+        break;
+    }
+    case M9P_TOPEN: {
+        struct m9p_open_request request;
+
+        if (m9p_parse_topen(&frame, &request)) {
+            pc_log_detail_indent(indent_width);
+            printf(
+                "mini9p %s tag=%u fid=%u mode=0x%02x\n",
+                mini9p_type_name(frame.type),
+                frame.tag,
+                request.fid,
+                request.mode);
+        }
+        break;
+    }
+    case M9P_ROPEN: {
+        struct m9p_open_result result;
+
+        if (m9p_parse_ropen(&frame, &result)) {
+            pc_log_detail_indent(indent_width);
+            printf(
+                "mini9p %s tag=%u qid_type=0x%02x qid=0x%08lx iounit=%u\n",
+                mini9p_type_name(frame.type),
+                frame.tag,
+                result.qid.type,
+                (unsigned long)result.qid.object_id,
+                result.iounit);
+        }
+        break;
+    }
+    case M9P_TREAD: {
+        struct m9p_read_request request;
+
+        if (m9p_parse_tread(&frame, &request)) {
+            pc_log_detail_indent(indent_width);
+            printf(
+                "mini9p %s tag=%u fid=%u offset=%lu count=%u\n",
+                mini9p_type_name(frame.type),
+                frame.tag,
+                request.fid,
+                (unsigned long)request.offset,
+                request.count);
+        }
+        break;
+    }
+    case M9P_RREAD: {
+        uint16_t count;
+
+        if (frame.payload_len >= 2u) {
+            count = (uint16_t)frame.payload[0] | (uint16_t)((uint16_t)frame.payload[1] << 8);
+            pc_log_detail_indent(indent_width);
+            printf(
+                "mini9p %s tag=%u count=%u\n",
+                mini9p_type_name(frame.type),
+                frame.tag,
+                count);
+        }
+        break;
+    }
+    case M9P_TWRITE: {
+        struct m9p_write_request request;
+
+        if (m9p_parse_twrite(&frame, &request)) {
+            pc_log_detail_indent(indent_width);
+            printf(
+                "mini9p %s tag=%u fid=%u offset=%lu count=%u\n",
+                mini9p_type_name(frame.type),
+                frame.tag,
+                request.fid,
+                (unsigned long)request.offset,
+                request.count);
+        }
+        break;
+    }
+    case M9P_RWRITE: {
+        uint16_t count = 0u;
+
+        if (m9p_parse_rwrite(&frame, &count)) {
+            pc_log_detail_indent(indent_width);
+            printf(
+                "mini9p %s tag=%u count=%u\n",
+                mini9p_type_name(frame.type),
+                frame.tag,
+                count);
+        }
+        break;
+    }
+    case M9P_TSTAT: {
+        uint16_t fid = 0u;
+
+        if (m9p_parse_tstat(&frame, &fid)) {
+            pc_log_detail_indent(indent_width);
+            printf("mini9p %s tag=%u fid=%u\n", mini9p_type_name(frame.type), frame.tag, fid);
+        }
+        break;
+    }
+    case M9P_RSTAT: {
+        struct m9p_stat stat;
+
+        if (m9p_parse_rstat(&frame, &stat)) {
+            pc_log_detail_indent(indent_width);
+            printf(
+                "mini9p %s tag=%u name=%s size=%lu flags=0x%02x\n",
+                mini9p_type_name(frame.type),
+                frame.tag,
+                stat.name,
+                (unsigned long)stat.size,
+                stat.flags);
+        }
+        break;
+    }
+    case M9P_TCLUNK: {
+        uint16_t fid = 0u;
+
+        if (m9p_parse_tclunk(&frame, &fid)) {
+            pc_log_detail_indent(indent_width);
+            printf("mini9p %s tag=%u fid=%u\n", mini9p_type_name(frame.type), frame.tag, fid);
+        }
+        break;
+    }
+    case M9P_RCLUNK:
+        pc_log_detail_indent(indent_width);
+        printf("mini9p %s tag=%u\n", mini9p_type_name(frame.type), frame.tag);
+        break;
+    case M9P_RERROR: {
+        struct m9p_error error;
+
+        if (m9p_parse_rerror(&frame, &error)) {
+            pc_log_detail_indent(indent_width);
+            printf(
+                "mini9p %s tag=%u code=%u (%s) msg=%s\n",
+                mini9p_type_name(frame.type),
+                frame.tag,
+                error.code,
+                m9p_error_name(error.code),
+                error.msg);
+        }
+        break;
+    }
+    default:
+        pc_log_detail_indent(indent_width);
+        printf(
+            "mini9p %s tag=%u payload=%u\n",
+            mini9p_type_name(frame.type),
+            frame.tag,
+            frame.payload_len);
+        break;
+    }
+}
+
+static void pc_mesh_log_frame_details_ex(
+    const char *prefix,
+    const struct mesh_frame_view *view,
+    const char *suffix)
+{
+    struct mesh_link_state_payload link_state;
+    struct mesh_route_update_payload route_update;
+
+    if (prefix == NULL || view == NULL) {
+        return;
+    }
+
+    printf("%s %s src=0x%02x dst=0x%02x seq=%u payload=%u",
+           prefix,
+           mesh_type_name(view->type),
+           view->src,
+           view->dst,
+           view->seq,
+           view->payload_len);
+    if (suffix != NULL) {
+        printf(" %s", suffix);
+    }
+    putchar('\n');
+
+    switch (view->type) {
+    case MESH_TYPE_MINI9P:
+        pc_mini9p_log_frame_details(pc_log_prefix_width(prefix), view);
+        break;
+    case MESH_TYPE_LINK_STATE:
+        if (mesh_parse_link_state(view, &link_state)) {
+            pc_log_detail_indent(pc_log_prefix_width(prefix));
+            printf("LINK_STATE neighbor=0x%02x link_up=%u quality=%u\n",
+                   link_state.neighbor, link_state.link_up, link_state.quality);
+        }
+        break;
+    case MESH_TYPE_ROUTE_UPDATE:
+        if (mesh_parse_route_update(view, &route_update)) {
+            pc_log_detail_indent(pc_log_prefix_width(prefix));
+            printf("ROUTE_UPDATE dst=0x%02x next_hop=0x%02x metric=%u version=%u action=%u\n",
+                   route_update.dst,
+                   route_update.next_hop,
+                   route_update.metric,
+                   route_update.route_version,
+                   route_update.action);
+        }
+        break;
+    case MESH_TYPE_NEIGHBOR_PROBE_REQUEST:
+        pc_log_detail_indent(pc_log_prefix_width(prefix));
+        printf("NEIGHBOR_PROBE_REQUEST\n");
+        break;
+    case MESH_TYPE_NEIGHBOR_PROBE_RESPONSE:
+        pc_log_detail_indent(pc_log_prefix_width(prefix));
+        printf("NEIGHBOR_PROBE_RESPONSE\n");
+        break;
+    default:
+        break;
+    }
+}
+
+static void pc_mesh_log_frame_details(const char *prefix, const struct mesh_frame_view *view)
+{
+    pc_mesh_log_frame_details_ex(prefix, view, NULL);
 }
 
 /**
@@ -475,12 +942,20 @@ static const char *mesh_type_name(uint8_t type)
 static int pc_mesh_send_frame(void *transport_ctx, uint8_t next_hop, const uint8_t *tx_data, size_t tx_len)
 {
     struct pc_mesh_transport *transport = (struct pc_mesh_transport *)transport_ctx;
+    struct mesh_frame_view view;
 
     if (transport == NULL || transport->fd < 0 || tx_data == NULL || tx_len == 0u) {
         return -(int)MESH_ERR_INVALID_STATE;
     }
 
-    printf("[PC→mesh] next_hop=0x%02x %zu bytes\n", next_hop, tx_len);
+    if (mesh_decode_frame(tx_data, tx_len, &view)) {
+        char suffix[48];
+
+        (void)snprintf(suffix, sizeof(suffix), "next_hop=0x%02x bytes=%zu", next_hop, tx_len);
+        pc_mesh_log_frame_details_ex("[PC→mesh]", &view, suffix);
+    } else {
+        printf("[PC→mesh] next_hop=0x%02x bytes=%zu decode=failed\n", next_hop, tx_len);
+    }
     return write_all(transport->fd, tx_data, tx_len);
 }
 
@@ -541,6 +1016,55 @@ static struct pc_master_node_slot *pc_master_find_node_by_addr(
     return NULL;
 }
 
+static struct pc_master_node_slot *pc_master_find_node_by_name(
+    struct pc_mesh_transport *transport,
+    const char *name)
+{
+    size_t i;
+
+    if (transport == NULL || name == NULL) {
+        return NULL;
+    }
+
+    for (i = 0u; i < transport->assigned_node_count; ++i) {
+        if (transport->nodes[i].used && strcmp(transport->nodes[i].name, name) == 0) {
+            return &transport->nodes[i];
+        }
+    }
+
+    return NULL;
+}
+
+static bool pc_master_target_routes_ready(struct pc_mesh_transport *transport, const char *target)
+{
+    struct cluster *mesh_cluster = cluster_config_mesh_cluster();
+    struct pc_master_node_slot *slot;
+    uint8_t next_hop = 0u;
+    uint8_t metric = 0u;
+    bool reachable = false;
+
+    if (mesh_cluster == NULL) {
+        return false;
+    }
+    slot = pc_master_find_node_by_name(transport, target);
+    if (slot == NULL || !slot->used) {
+        return false;
+    }
+    if (cluster_can_reach(mesh_cluster, slot->mesh_addr, &reachable) != 0 || !reachable) {
+        return false;
+    }
+    if (cluster_compute_next_hop_from(
+            mesh_cluster,
+            slot->mesh_addr,
+            PC_MASTER_LOCAL_ADDR,
+            &next_hop,
+            &metric) != 0) {
+        return false;
+    }
+
+    return true;
+}
+
 static struct pc_master_node_slot *pc_master_allocate_node(
     struct pc_mesh_transport *transport,
     const uint8_t uid[MESH_UID_LEN])
@@ -557,7 +1081,6 @@ static struct pc_master_node_slot *pc_master_allocate_node(
     slot = &transport->nodes[index];
     memset(slot, 0, sizeof(*slot));
     slot->used = true;
-    slot->confirmed = false;
     memcpy(slot->uid, uid, MESH_UID_LEN);
     slot->mesh_addr = pc_master_node_addr_for_index(index);
     (void)snprintf(slot->name, sizeof(slot->name), PC_MASTER_NODE_NAME_FMT, index + 1u);
@@ -587,8 +1110,8 @@ static void pc_master_print_uid(const uint8_t uid[MESH_UID_LEN])
  * @param[in] register_frame 已解码的 REGISTER 帧视图
  * @return 0 = 成功；负数错误码（-MESH_ERR_BAD_FRAME 表示帧解析失败）
  *
- * @note ASSIGN 发送后节点地址尚未最终确认，实际在线状态要等节点
- *       收到 ASSIGN 后发送第二次 REGISTER（带分配到的地址）才算正式完成。
+ * @note ASSIGN 成功发出后，PC 主控立即把该 UID/地址注册进 host runtime；
+ *       后续二次 REGISTER 只作为旧固件的幂等刷新。
  */
 static int pc_mesh_assign_bootstrap_node(
     struct pc_mesh_transport *transport,
@@ -599,6 +1122,7 @@ static int pc_mesh_assign_bootstrap_node(
     struct pc_master_node_slot *slot;
     uint8_t assign_frame[PC_MASTER_FRAME_CAP];
     size_t assign_len = 0u;
+    int rc;
 
     if (!mesh_parse_register(register_frame, &register_payload)) {
         return -(int)MESH_ERR_BAD_FRAME;
@@ -635,15 +1159,27 @@ static int pc_mesh_assign_bootstrap_node(
     printf("[PC→mesh] ASSIGN %s addr=0x%02x uid=", slot->name, assign_payload.node_addr);
     pc_master_print_uid(slot->uid);
     printf(" (%zu bytes)\n", assign_len);
-    return write_all(transport->fd, assign_frame, assign_len);
+    rc = write_all(transport->fd, assign_frame, assign_len);
+    if (rc != 0) {
+        return rc;
+    }
+
+    if (transport->runtime != NULL) {
+        rc = mesh_host_runtime_register_assigned_node(
+            transport->runtime,
+            slot->mesh_addr,
+            slot->uid);
+        if (rc != 0) {
+            return rc;
+        }
+    }
+    return 0;
 }
 
 /**
- * @brief 确认已分配地址的从节点正式上线
+ * @brief 兼容旧固件的二次 REGISTER 刷新
  *
- * 当收到第二次 REGISTER（src=已分配地址，dst=UNASSIGNED）时调用。
- * 将节点标记为 ONLINE 并在本地节点与该从节点之间建立一条双向 link，
- * 表示集群拓扑中存在直接相连的邻居。
+ * 新协议不依赖二次 REGISTER；若旧固件仍发送，刷新 runtime/VFS 绑定即可。
  *
  * @param[in] transport  指向 pc_mesh_transport 的指针
  * @param[in] mesh_addr  从节点被分配的 Mesh 地址（MESH_ADDR_UNASSIGNED 为非法）
@@ -671,13 +1207,19 @@ static int pc_mesh_confirm_assigned_node(struct pc_mesh_transport *transport, ui
     if (rc != 0) {
         return rc;
     }
-    rc = cluster_add_link(mesh_cluster, PC_MASTER_LOCAL_ADDR, mesh_addr, 1u, false);
-    if (rc != 0) {
-        return rc;
+    if (transport->runtime != NULL) {
+        rc = mesh_host_runtime_register_assigned_node(
+            transport->runtime,
+            slot->mesh_addr,
+            slot->uid);
+        if (rc != 0) {
+            return rc;
+        }
     }
 
-    slot->confirmed = true;
-    printf("[mesh→PC] confirmed %s addr=0x%02x\n", slot->name, slot->mesh_addr);
+    printf("[mesh→PC] refreshed %s addr=0x%02x from legacy REGISTER\n",
+           slot->name,
+           slot->mesh_addr);
     return 0;
 }
 
@@ -685,10 +1227,10 @@ static int pc_mesh_confirm_assigned_node(struct pc_mesh_transport *transport, ui
  * @brief 接收并处理一个 Mesh 帧（transport receive_frame 实现）
  *
  * 从串口读取一个完整的 Mesh 帧，解码帧头并打印诊断信息。
- * 对两次 REGISTER 有不同处理：
+ * 对 REGISTER 有不同处理：
  * - 第一次（src=dst=UNASSIGNED）：分配地址并回送 ASSIGN，返回 -MESH_ERR_BUSY
  *   告知调用方本帧已被消费无需进一步处理。
- * - 第二次（src≠UNASSIGNED, dst=UNASSIGNED）：确认节点上线，正常返回。
+ * - 旧固件二次 REGISTER（src≠UNASSIGNED, dst=UNASSIGNED）：幂等刷新，正常返回。
  *
  * @param[in]  transport_ctx 指向 pc_mesh_transport 的指针
  * @param[out] rx_data      接收缓冲区
@@ -697,16 +1239,21 @@ static int pc_mesh_confirm_assigned_node(struct pc_mesh_transport *transport, ui
  * @return 0 = 成功，帧已放入 rx_data；-MESH_ERR_BUSY = 帧已消费（第一次 REGISTER）；
  *         负数 = 错误
  */
-static int pc_mesh_receive_frame(void *transport_ctx, uint8_t *rx_data, size_t rx_cap, size_t *rx_len)
+static int pc_mesh_receive_frame(
+    void *transport_ctx,
+    uint8_t *rx_data,
+    size_t rx_cap,
+    size_t *rx_len,
+    uint8_t *out_ingress_port)
 {
     struct pc_mesh_transport *transport = (struct pc_mesh_transport *)transport_ctx;
     struct mesh_frame_view view;
     int rc;
 
-    if (transport == NULL || transport->fd < 0) {
+    if (transport == NULL || transport->fd < 0 || out_ingress_port == NULL) {
         return -(int)MESH_ERR_INVALID_STATE;
     }
-
+    *out_ingress_port = MESH_PROCESSER_INGRESS_PORT_NONE;
     rc = pc_receive_mesh_frame(transport->fd, rx_data, rx_cap, rx_len);
     if (rc != 0) {
         return rc;
@@ -717,12 +1264,7 @@ static int pc_mesh_receive_frame(void *transport_ctx, uint8_t *rx_data, size_t r
         return 0;
     }
 
-    printf("[mesh→PC] %s src=0x%02x dst=0x%02x seq=%u payload=%u\n",
-           mesh_type_name(view.type),
-           view.src,
-           view.dst,
-           view.seq,
-           view.payload_len);
+        pc_mesh_log_frame_details("[mesh→PC]", &view);
 
     if (view.type == MESH_TYPE_REGISTER &&
         view.src == MESH_ADDR_UNASSIGNED &&
@@ -780,8 +1322,11 @@ static int init_runtime(struct mesh_host_runtime *runtime, struct pc_mesh_transp
     rc = mesh_host_runtime_init(runtime, &config);
     if (rc != 0) {
         fprintf(stderr, "mesh_host_runtime_init failed: %d\n", rc);
+        return rc;
     }
-    return rc;
+
+    transport->runtime = runtime;
+    return 0;
 }
 
 /**
@@ -802,13 +1347,27 @@ static int init_runtime(struct mesh_host_runtime *runtime, struct pc_mesh_transp
  * @param[in] target 节点名称字符串（如 "mcu1"）
  * @return 0 = 挂载成功；负数错误码（ENOTTY/EAGAIN 等）
  */
-static int wait_for_target(struct mesh_host_runtime *runtime, const char *target)
+static int wait_for_target(
+    struct mesh_host_runtime *runtime,
+    struct pc_mesh_transport *transport,
+    const char *target)
 {
     int i;
 
     printf("mesh runtime: waiting for %s; reset the slave now if it already booted\n", target);
     for (i = 0; i < PC_MASTER_DISCOVERY_POLLS; ++i) {
-        int rc = cluster_vfs_attach(target);
+        int rc;
+
+        if (!pc_master_target_routes_ready(transport, target)) {
+            rc = mesh_host_runtime_poll_once(runtime);
+            if (rc != 0 && rc != -(int)MESH_ERR_BUSY && rc != -(int)M9P_ERR_EBUSY) {
+                fprintf(stderr, "mesh_host_runtime_poll_once failed: %d\n", rc);
+                return rc;
+            }
+            continue;
+        }
+
+        rc = cluster_vfs_attach(target);
 
         if (rc == 0) {
             printf("mesh runtime: %s attached\n", target);
@@ -861,6 +1420,150 @@ static int read_health_path(const char *target)
     return 0;
 }
 
+static int read_routes_path(const char *target)
+{
+    char routes_path[64];
+    uint8_t routes[PC_MASTER_ROUTES_CAP];
+    uint16_t fd = 0u;
+    uint16_t total = 0u;
+    int rc;
+
+    rc = snprintf(routes_path, sizeof(routes_path), PC_MASTER_ROUTES_PATH_FMT, target);
+    if (rc < 0 || (size_t)rc >= sizeof(routes_path)) {
+        fprintf(stderr, "routes path too long for %s\n", target);
+        return -(int)M9P_ERR_EINVAL;
+    }
+
+    rc = cluster_vfs_open(routes_path, M9P_OREAD, &fd);
+    if (rc != 0) {
+        fprintf(stderr, "cluster_vfs_open(%s) failed: %d\n", routes_path, rc);
+        return rc;
+    }
+
+    while (total < (uint16_t)(sizeof(routes) - 1u)) {
+        uint16_t chunk = (uint16_t)(sizeof(routes) - 1u - total);
+
+        if (chunk > 48u) {
+            chunk = 48u;
+        }
+
+        rc = cluster_vfs_read(fd, routes + total, &chunk);
+        if (rc != 0) {
+            int close_rc = cluster_vfs_close(fd);
+
+            (void)close_rc;
+            fprintf(stderr, "cluster_vfs_read(%s) failed: %d\n", routes_path, rc);
+            return rc;
+        }
+        if (chunk == 0u) {
+            break;
+        }
+        total = (uint16_t)(total + chunk);
+    }
+
+    rc = cluster_vfs_close(fd);
+    if (rc != 0) {
+        fprintf(stderr, "cluster_vfs_close(%s) failed: %d\n", routes_path, rc);
+        return rc;
+    }
+
+    routes[total] = '\0';
+    printf("read %s:\n%s", routes_path, (const char *)routes);
+    return 0;
+}
+
+static int read_text_file_chunked(
+    const char *path,
+    uint8_t *buffer,
+    uint16_t buffer_cap,
+    uint16_t max_chunk,
+    uint16_t *out_len)
+{
+    uint16_t fd = 0u;
+    uint16_t total = 0u;
+    int rc;
+
+    if (path == NULL || buffer == NULL || buffer_cap == 0u || out_len == NULL) {
+        return -(int)M9P_ERR_EINVAL;
+    }
+
+    rc = cluster_vfs_open(path, M9P_OREAD, &fd);
+    if (rc != 0) {
+        return rc;
+    }
+
+    while (total < (uint16_t)(buffer_cap - 1u)) {
+        uint16_t chunk = (uint16_t)(buffer_cap - 1u - total);
+
+        if (chunk > max_chunk) {
+            chunk = max_chunk;
+        }
+
+        rc = cluster_vfs_read(fd, buffer + total, &chunk);
+        if (rc != 0) {
+            (void)cluster_vfs_close(fd);
+            return rc;
+        }
+        if (chunk == 0u) {
+            break;
+        }
+        total = (uint16_t)(total + chunk);
+    }
+
+    rc = cluster_vfs_close(fd);
+    if (rc != 0) {
+        return rc;
+    }
+
+    buffer[total] = '\0';
+    *out_len = total;
+    return 0;
+}
+
+static int read_log_path(const char *target)
+{
+    char log_path[64];
+    uint8_t log_text[PC_MASTER_LOG_CAP];
+    uint16_t len = 0u;
+    int rc;
+
+    rc = snprintf(log_path, sizeof(log_path), PC_MASTER_LOG_PATH_FMT, target);
+    if (rc < 0 || (size_t)rc >= sizeof(log_path)) {
+        fprintf(stderr, "log path too long for %s\n", target);
+        return -(int)M9P_ERR_EINVAL;
+    }
+
+    rc = read_text_file_chunked(log_path, log_text, sizeof(log_text), 48u, &len);
+    if (rc != 0) {
+        fprintf(stderr, "warning: cluster_vfs_read(%s) failed: %d\n", log_path, rc);
+        return rc;
+    }
+
+    printf("read %s:\n", log_path);
+    print_annotated_log_text((const char *)log_text);
+    if (len == (uint16_t)(sizeof(log_text) - 1u)) {
+        printf("warning: %s output truncated at %u bytes\n", log_path, (unsigned)len);
+    }
+    return 0;
+}
+
+static void read_all_logs(size_t target_node_count)
+{
+    size_t i;
+
+    for (i = 0u; i < target_node_count; ++i) {
+        char target[MESH_MAX_NODE_NAME + 1u];
+        int rc = snprintf(target, sizeof(target), PC_MASTER_NODE_NAME_FMT, i + 1u);
+
+        if (rc < 0 || (size_t)rc >= sizeof(target)) {
+            fprintf(stderr, "target node name too long: index=%zu\n", i + 1u);
+            continue;
+        }
+
+        (void)read_log_path(target);
+    }
+}
+
 /**
  * @brief 执行 smoke test：attach + walk + open + read + clunk
  *
@@ -869,13 +1572,16 @@ static int read_health_path(const char *target)
  * 2. cluster_vfs_read_path("/mcuN/sys/health") 读取健康检查文件
  * 3. 验证每个响应内容为 "ok\n"，否则返回 EIO
  *
- * 成功时打印 "pc_master_emulator: ok" 并返回 0。
+ * 成功时返回 0。
  *
  * @param[in] runtime 已初始化的 mesh_host_runtime
  * @param[in] target_node_count 本次要验证的目标节点数量
  * @return 0 = 测试通过；负数错误码
  */
-static int run_dynamic_sequence(struct mesh_host_runtime *runtime, size_t target_node_count)
+static int run_dynamic_sequence(
+    struct mesh_host_runtime *runtime,
+    struct pc_mesh_transport *transport,
+    size_t target_node_count)
 {
     size_t i;
 
@@ -888,7 +1594,7 @@ static int run_dynamic_sequence(struct mesh_host_runtime *runtime, size_t target
             return -(int)M9P_ERR_EINVAL;
         }
 
-        rc = wait_for_target(runtime, target);
+        rc = wait_for_target(runtime, transport, target);
         if (rc != 0) {
             return rc;
         }
@@ -897,9 +1603,13 @@ static int run_dynamic_sequence(struct mesh_host_runtime *runtime, size_t target
         if (rc != 0) {
             return rc;
         }
+
+        rc = read_routes_path(target);
+        if (rc != 0) {
+            return rc;
+        }
     }
 
-    puts("pc_master_emulator: ok");
     return 0;
 }
 
@@ -925,6 +1635,7 @@ int main(int argc, char **argv)
     struct mesh_host_runtime runtime;
     struct pc_mesh_transport transport;
     int rc;
+    bool runtime_initialized = false;
 
     if (argc < 2 || argc > 4) {
         print_usage(argv[0]);
@@ -970,8 +1681,17 @@ int main(int argc, char **argv)
            node_count);
     rc = init_runtime(&runtime, &transport);
     if (rc == 0) {
-        rc = run_dynamic_sequence(&runtime, transport.target_node_count);
+        runtime_initialized = true;
+        rc = run_dynamic_sequence(&runtime, &transport, transport.target_node_count);
+        read_all_logs(transport.target_node_count);
+        if (rc == 0) {
+            puts("pc_master_emulator: ok");
+        }
         mesh_host_runtime_deinit(&runtime);
+    }
+
+    if (rc != 0 && runtime_initialized) {
+        fprintf(stderr, "pc_master_emulator: failed rc=%d; logs were read before shutdown\n", rc);
     }
 
     close(transport.fd);

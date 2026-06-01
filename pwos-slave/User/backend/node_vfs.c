@@ -329,7 +329,6 @@ int node_vfs_init(struct node_vfs *vfs, const struct node_vfs_config *config)
 {
     struct sys_vfs_config sys_config;
     struct dev_vfs_config dev_config;
-    struct lfs_vfs_config lfs_config;
     struct lfs_vfs *active_lfs = NULL;
     int rc;
 
@@ -340,6 +339,8 @@ int node_vfs_init(struct node_vfs *vfs, const struct node_vfs_config *config)
     memset(vfs, 0, sizeof(*vfs));
 
 #ifndef PWOS_SKIP_LFS_MOUNT
+    struct lfs_vfs_config lfs_config;
+
     lfs_vfs_get_default_config(&lfs_config);
     rc = lfs_vfs_init(&vfs->lfs_vfs, &lfs_config);
     if (rc == 0) {
@@ -352,6 +353,10 @@ int node_vfs_init(struct node_vfs *vfs, const struct node_vfs_config *config)
 
     memset(&sys_config, 0, sizeof(sys_config));
     sys_config.info_text = active_lfs != NULL ? "pwos node lfs=ok\n" : "pwos node lfs=unavailable\n";
+    sys_config.routes_text_fn = config->routes_text_fn;
+    sys_config.routes_text_ctx = config->routes_text_ctx;
+    sys_config.log_text_fn = config->log_text_fn;
+    sys_config.log_text_ctx = config->log_text_ctx;
     sys_config.iounit = SYS_VFS_DEFAULT_IOUNIT;
     rc = sys_vfs_init(&vfs->sys_vfs, &sys_config);
     if (rc != 0) {

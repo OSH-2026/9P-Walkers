@@ -1,3 +1,15 @@
+/**
+ * @file mesh_node_runtime.h
+ * @brief STM32 slave 侧 mesh 节点运行时。
+ *
+ * mesh_node_runtime 连接 shared mesh_processer、direct-table cluster 和本地
+ * Mini9P server。它负责节点 bootstrap REGISTER、ASSIGN 落地、本机地址同步、
+ * ingress-port 感知处理，以及把“某个 mesh 地址从哪个端口进入”上报给 service。
+ *
+ * runtime 不直接拥有 UART transport；底层收发通过 send_frame/receive_frame
+ * 回调注入。多 UART 端口和 addr-port 映射由 mesh_node_service 管理。
+ */
+
 #ifndef MESH_NODE_RUNTIME_H
 #define MESH_NODE_RUNTIME_H
 
@@ -13,121 +25,106 @@
 extern "C" {
 #endif
 
-/*
- * mesh node runtime：节点侧的多端口运行时装配层。
- *
- * 这一层负责把：
- * - 一个 shared mesh_processer；
- * - 一个 direct-table cluster；
- * - 多个物理串口/链路；
- * - 一个本地 mini9P server；
- *
- * 串成“单 runtime 管理本节点所有串口”的可轮询闭环。
- *
- * 设计目标：
- * 1. runtime 自己统一轮询多个 UART，而不是为每条 UART 各起一个 runtime；
- * 2. 子机 cluster 的 direct-table 路由表保存“dst -> 本地出口端口号”；
- * 3. processor 仍维持原有 send_frame/receive_frame 接口，不要求 shared mesh
- *    层感知多端口细节；
- * 4. 当节点收到 ASSIGN 后，会同时更新 cluster.local_addr 与 processor.local_addr，
- *    确保后续回包不再继续使用 0xFF。
+#define MESH_NODE_RUNTIME_MAX_BOOTSTRAP_PENDING 4u
+
+/**
+ * @brief mesh_node_runtime 初始化配置。
  */
-
-/* 当前单个 runtime 最多管理的总传输端口数（UART + 可选 Wi-Fi）。 */
-#define MESH_NODE_RUNTIME_MAX_PORTS 8u
-
-/* 为 Wi-Fi 保留最高位后，当前 runtime 最多能直接管理的 UART 数量。 */
-#define MESH_NODE_RUNTIME_MAX_UART_PORTS MESH_PORT_SELECTOR_WIFI_ID
-
-/* Wi-Fi 在 runtime 内部固定映射到保留端口号。 */
-#define MESH_NODE_RUNTIME_WIFI_PORT_ID CLUSTER_PORT_WIFI_ID
-
-/* 无效或未知的本地端口编号。 */
-#define MESH_NODE_RUNTIME_INVALID_PORT CLUSTER_PORT_INVALID
-
-/*
- * 一个物理端口的静态配置。
- *
- * send_frame/receive_frame 与 shared mesh_processer 使用的签名保持一致，
- * 这样 runtime 内部既可以包装真实 UART，也可以在主机测试里直接挂 fake transport。
- */
-struct mesh_node_runtime_port_config {
-    mesh_processer_send_frame_fn send_frame;     /**< 绑定到该物理端口的原始发帧函数。 */
-    mesh_processer_receive_frame_fn receive_frame; /**< 绑定到该物理端口的原始收帧函数。 */
-    void *transport_ctx;                         /**< 原样传给该端口 send/receive 的上下文。 */
-    uint8_t port_id;                            /**< runtime 内部使用的稳定本地端口编号。 */
-};
-
-/* 运行时内部保存的一条端口绑定。 */
-struct mesh_node_runtime_port {
-    bool initialized;                           /**< 该端口是否已成功注册到 runtime。 */
-    uint8_t port_id;                            /**< 本地端口编号。 */
-    mesh_processer_send_frame_fn send_frame;    /**< 该端口的底层发帧函数。 */
-    mesh_processer_receive_frame_fn receive_frame; /**< 该端口的底层收帧函数。 */
-    void *transport_ctx;                        /**< 该端口的链路上下文。 */
-};
-
 struct mesh_node_runtime_config {
-    /*
-     * 多端口主路径：
-     * - ports 指向长度至少为 port_count 的端口配置数组；
-     * - runtime_init() 会按端口数组逐个绑定、编号并纳入轮询。
-     */
-    const struct mesh_node_runtime_port_config *ports;
-
-    /*
-     * 兼容旧版的单端口快捷字段。
-     * 当 ports == NULL 且 runtime_init(..., port_count=1) 时，runtime 会退化为
-     * 仅使用这一组 send/receive/transport_ctx，端口编号固定为 0。
-     */
+    /** 原始 mesh 帧发送函数，不可为 NULL。next_hop 使用 cluster 返回的 mesh 地址语义。 */
     mesh_processer_send_frame_fn send_frame;
+    /** 原始 mesh 帧接收函数，不可为 NULL，必须返回入口端口或 MESH_PROCESSER_INGRESS_PORT_NONE。 */
+    /** 向指定物理端口直接发送帧的回调；用于 NEIGHBOR_PROBE_RESPONSE 等 port-local 回复。可不填，此时 PROBE_RESPONSE 降级用 send_frame(next_hop=port_id)。 */
+    int (*send_frame_to_port)(void *ctx, uint8_t port_id, const uint8_t *tx_data, size_t tx_len);
     mesh_processer_receive_frame_fn receive_frame;
+    /** 原样传给 send_frame/receive_frame 的底层 transport 上下文。 */
     void *transport_ctx;
-    const struct mesh_wifi_config *wifi_config;                 /**< 启用 Wi-Fi 时使用的 mesh_wifi 配置。 */
-
-    mesh_processer_mini9p_server_handler_fn mini9p_server_handler; /**< 本地 mini9P server 处理器。 */
-    void *mini9p_server_ctx;                                      /**< 传给 mini9P server 的上下文。 */
-    uint8_t local_uid[MESH_UID_LEN];                              /**< 当前节点对外通告的稳定硬件 UID。 */
-    uint32_t boot_nonce;                                          /**< 本次上电对应的 boot nonce。 */
-    uint16_t capability_bits;                                     /**< REGISTER 中的能力位图。 */
-    uint8_t port_bitmap;                                          /**< REGISTER 中的端口位图；为 0 时按 ports 自动生成。 */
-    uint8_t local_addr;                                           /**< 初始本机地址；通常为 MESH_ADDR_UNASSIGNED。 */
-    uint8_t default_hop;                                          /**< 本机发起 REGISTER/回包时的默认 hop。 */
-    bool auto_register_on_init;                                   /**< init 成功后是否自动向所有端口发送一次 REGISTER。 */
+    /** 可选回调：当 runtime 从 ingress_port 学到 mesh_addr 可达时通知上层 service。 */
+    int (*learn_peer_port)(void *ctx, uint8_t mesh_addr, uint8_t port_id);
+    /** 原样传给 learn_peer_port 的上下文。 */
+    void *learn_peer_port_ctx;
+    /** 可选毫秒时钟；用于 ASSIGN 后邻居探测重试。 */
+    uint32_t (*time_ms)(void *ctx);
+    /** 原样传给 time_ms 的上下文。 */
+    void *time_ctx;
+    /** 本地 Mini9P server 帧处理器；不需要数据面服务时可为 NULL。 */
+    mesh_processer_mini9p_server_handler_fn mini9p_server_handler;
+    /** 原样传给 mini9p_server_handler 的上下文。 */
+    void *mini9p_server_ctx;
+    /** REGISTER 中通告的稳定硬件 UID。 */
+    uint8_t local_uid[MESH_UID_LEN];
+    /** REGISTER 中通告的本次启动随机/时序 nonce。 */
+    uint32_t boot_nonce;
+    /** REGISTER 中通告的能力位。 */
+    uint16_t capability_bits;
+    /** REGISTER 中通告的本机可用端口位图。 */
+    uint8_t port_bitmap;
+    /** bootstrap REGISTER 使用的 next_hop；通常为 broadcast selector。 */
+    uint8_t bootstrap_next_hop;
+    /** 初始本机 mesh 地址；未分配地址时通常为 MESH_ADDR_UNASSIGNED。 */
+    uint8_t local_addr;
+    /** 本机发起 REGISTER 或响应帧时使用的默认 hop。 */
+    uint8_t default_hop;
+    /** init 成功后是否立即发送一次 REGISTER。 */
+    bool auto_register_on_init;
 };
 
+struct mesh_node_runtime_bootstrap_pending {
+    bool used;
+    uint8_t uid[MESH_UID_LEN];
+    uint32_t boot_nonce;
+    uint8_t ingress_port;
+};
+
+/**
+ * @brief mesh_node_runtime 实例状态。
+ */
 struct mesh_node_runtime {
-    struct mesh_node_runtime_config config;             /**< 当前生效的初始化配置快照。 */
-    struct cluster cluster;                            /**< 子机侧 direct-table cluster。 */
-    struct mesh_processer processor;                   /**< 统一处理所有端口流量的 shared processor。 */
-    bool initialized;                                  /**< 是否完成初始化。 */
-    uint16_t next_mesh_seq;                            /**< 本节点下次发出的 mesh 序号。 */
-    size_t port_count;                                 /**< 当前 runtime 管理的本地端口数量。 */
-    size_t next_rx_port_index;                         /**< 下一轮轮询从哪个端口开始。 */
-    uint8_t active_rx_port;                            /**< 当前正在被 processor 处理的入端口编号。 */
-    uint8_t control_plane_port;                        /**< 当前已知的上行控制面出口端口。 */
-    bool wifi_supported;                               /**< 当前 runtime 是否启用了 Wi-Fi 传输。 */
-    struct mesh_wifi wifi;                             /**< Wi-Fi transport 实例。 */
-    struct mesh_node_runtime_port ports[MESH_NODE_RUNTIME_MAX_PORTS]; /**< 已绑定端口表。 */
+    /** 当前生效配置。 */
+    struct mesh_node_runtime_config config;
+    /** direct-table cluster，保存本机地址和 dst->next_hop(mesh addr) 路由。 */
+    struct cluster cluster;
+    /** shared mesh processor，负责帧解码、本机命中、转发和 Mini9P 分发。 */
+    struct mesh_processer processor;
+    /** 是否已完成初始化。 */
+    bool initialized;
+    /** 下一帧由 runtime 主动生成的 mesh seq。 */
+    uint16_t next_mesh_seq;
+    /** 最近到达帧的入口端口，供 control_handler 回调读取。 */
+    uint8_t last_ingress_port;
+    /** 收到本机 ASSIGN 的端口，作为路由表收敛前的上游 control-plane 临时端口。 */
+    uint8_t upstream_port;
+    /** 上游 control-plane mesh 地址，用于构造早期 LINK_STATE dst。 */
+    uint8_t control_plane_addr;
+    /** 上游物理口直连邻居地址；由 upstream_port 上收到的 PROBE_RESPONSE 学到。 */
+    uint8_t upstream_peer_addr;
+    /** ASSIGN 后邻居探测剩余重试次数。 */
+    uint8_t neighbor_probe_retries_left;
+    /** 下一次邻居探测重试的时间戳。 */
+    uint32_t next_neighbor_probe_ms;
+    /** 下游 bootstrap REGISTER 等待 ASSIGN 回转的临时表。 */
+    struct mesh_node_runtime_bootstrap_pending pending_bootstrap[MESH_NODE_RUNTIME_MAX_BOOTSTRAP_PENDING];
 };
 
-/* 填充安全默认值：未分配地址、默认 hop、自动 init 后广播 REGISTER。 */
+/**
+ * @brief 填充 runtime 默认配置。
+ *
+ * 默认 local_addr 为 MESH_ADDR_UNASSIGNED，default_hop 为
+ * MESH_PROCESSER_DEFAULT_HOP，并启用 auto_register_on_init。
+ *
+ * @param[out] out_config 要填充的配置；为 NULL 时无操作。
+ */
 void mesh_node_runtime_get_default_config(struct mesh_node_runtime_config *out_config);
 
-/*
- * 初始化一个多端口 node runtime。
+/**
+ * @brief 初始化 mesh_node_runtime。
  *
- * @param runtime 待初始化实例。
- * @param config  初始化配置。
- * @param port_count 当前 MCU 节点需要由该 runtime 管理的物理 UART 端口数量。
- * @param wifi_supported 当前硬件是否支持并启用 Wi-Fi mesh 传输。
+ * 初始化会创建 direct-table cluster 和 shared mesh processor。若
+ * auto_register_on_init 为 true，会立即按 bootstrap_next_hop 发送 REGISTER。
  *
- * 行为：
- * - 若 config->ports != NULL，则按端口数组逐个绑定端口；
- * - 若 config->ports == NULL 且 port_count == 1，则退化为旧版单端口模式；
- * - wifi_supported=true 时，会额外挂接一个保留的 Wi-Fi 特殊端口；
- * - runtime 会把 cluster 配成 DIRECT_TABLE + 端口选择器语义；
- * - auto_register_on_init=true 时，会向所有已绑定端口各发送一次 REGISTER。
+ * @param[out] runtime runtime 实例。
+ * @param[in] config 调用方配置；send_frame 和 receive_frame 不可为 NULL。
+ * @return 0 表示成功；负的 MESH_ERR_* 表示失败。
  */
 int mesh_node_runtime_init(
     struct mesh_node_runtime *runtime,
@@ -135,50 +132,78 @@ int mesh_node_runtime_init(
      size_t port_count,
      bool wifi_supported);
 
-/* 清理 runtime、processor、cluster 和端口绑定状态。 */
+/**
+ * @brief 反初始化 runtime，并清空内部状态。
+ *
+ * @param[in,out] runtime runtime 实例；为 NULL 时无操作。
+ */
 void mesh_node_runtime_deinit(struct mesh_node_runtime *runtime);
 
-/*
- * 显式通知“所有已绑定链路已连通”，向每个端口各发送一次 REGISTER。
+/**
+ * @brief 通知链路恢复，并主动发送一次 REGISTER。
+ *
+ * @param[in,out] runtime runtime 实例。
+ * @return 0 表示 REGISTER 已提交到底层发送回调；负的 MESH_ERR_* 表示失败。
  */
 int mesh_node_runtime_notify_link_up(struct mesh_node_runtime *runtime);
 
-/*
- * 显式通知“某个端口链路已连通”，只在该端口上发送一次 REGISTER。
- */
-int mesh_node_runtime_notify_link_up_on_port(
-    struct mesh_node_runtime *runtime,
-    uint8_t port_id);
-
-/*
- * 处理一帧已经读入内存的 mesh 数据，但不提供入端口信息。
+/**
+ * @brief 处理一帧 mesh 数据，入口端口未知。
  *
- * 该兼容接口保留给旧调用方；若需要让 runtime 自动把 frame.src 记成
- * “可通过哪个本地串口到达”，请优先使用 process_frame_on_port()。
+ * 等价于 mesh_node_runtime_process_frame_from_port(...,
+ * MESH_PROCESSER_INGRESS_PORT_NONE)。
+ *
+ * @param[in,out] runtime runtime 实例。
+ * @param[in] frame_data 完整 mesh 帧。
+ * @param[in] frame_len mesh 帧长度。
+ * @return 0 表示处理成功；负的 MESH_ERR_* 表示失败。
  */
 int mesh_node_runtime_process_frame(
     struct mesh_node_runtime *runtime,
     const uint8_t *frame_data,
     size_t frame_len);
 
-/*
- * 处理一帧来自指定本地端口的 mesh 数据。
+/**
+ * @brief 处理一帧 mesh 数据，并携带该帧进入的 UART 端口。
  *
- * runtime 会把 frame.src -> port_id 记入 direct-table cluster，后续再向该 src
- * 发包时，就会自动通过该端口发出。
+ * frame type 为 NEIGHBOR_PROBE_REQUEST/RESPONSE 时由 runtime 本地处理：
+ * PROBE_REQUEST 在拥有地址时原地回复，PROBE_RESPONSE 才建立直连邻居。
+ * 其他类型交给 mesh_processer 做本机分发或转发，不从普通帧 src 自动推断直连邻居。
+ *
+ * @param[in] frame_data 完整 mesh 帧。
+ * @param[in] frame_len mesh 帧长度。
+ * @param[in] ingress_port 收到该帧的端口索引，未知时传 MESH_PROCESSER_INGRESS_PORT_NONE。
+ * @return 0 表示处理成功；负的 MESH_ERR_* 表示失败。
  */
-int mesh_node_runtime_process_frame_on_port(
+int mesh_node_runtime_process_frame_from_port(
     struct mesh_node_runtime *runtime,
-    uint8_t port_id,
     const uint8_t *frame_data,
-    size_t frame_len);
+    size_t frame_len,
+    uint8_t ingress_port);
 
-/*
- * 从所有已绑定端口中轮询至多一帧并处理。
+/**
+ * @brief 通过 receive_frame 读取并处理最多一帧 mesh 数据。
  *
- * 轮询策略为 round-robin：每次从 next_rx_port_index 开始扫描，谁先有完整帧就处理谁。
+ * @param[in,out] runtime runtime 实例。
+ * @return 0 表示处理了一帧；负的 MESH_ERR_* 表示暂无帧或处理失败。
  */
 int mesh_node_runtime_poll_once(struct mesh_node_runtime *runtime);
+
+/**
+ * @brief 将 runtime 当前路由诊断信息格式化为文本。
+ *
+ * 输出用于 /sys/routes 调试文件，包含本机地址、上游端口/邻居以及有效
+ * direct-table route。
+ *
+ * @param[in] runtime runtime 实例。
+ * @param[out] out 输出缓冲。
+ * @param[in] out_cap 输出缓冲容量。
+ * @return 0 表示成功；负的 MESH_ERR_* 表示失败。
+ */
+int mesh_node_runtime_format_routes(
+    struct mesh_node_runtime *runtime,
+    char *out,
+    size_t out_cap);
 
 #ifdef __cplusplus
 }

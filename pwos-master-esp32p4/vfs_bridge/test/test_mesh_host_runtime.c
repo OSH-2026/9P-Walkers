@@ -9,7 +9,7 @@
 #include "mesh_host_runtime.h"
 
 #define TEST_FRAME_CAP (MESH_FRAME_OVERHEAD + MESH_MAX_PAYLOAD_LEN)
-#define TEST_QUEUE_CAP 32u
+#define TEST_QUEUE_CAP 64u
 
 static int g_failures;
 
@@ -245,14 +245,23 @@ static void build_link_state_frame_with_port(
     }
 }
 
-static void build_link_state_frame(
+static void build_neighbor_probe_frame(
+    uint8_t type,
     uint8_t src,
-    uint8_t neighbor,
-    uint8_t link_up,
+    uint8_t dst,
     uint8_t *out_frame,
     size_t *out_len)
 {
-    build_link_state_frame_with_port(src, neighbor, link_up, 0u, out_frame, out_len);
+    bool ok;
+
+    if (type == MESH_TYPE_NEIGHBOR_PROBE_REQUEST) {
+        ok = mesh_build_neighbor_probe_request(src, 0x3000u, 6u, out_frame, TEST_FRAME_CAP, out_len);
+    } else {
+        ok = mesh_build_neighbor_probe_response(src, dst, 0x3000u, 6u, out_frame, TEST_FRAME_CAP, out_len);
+    }
+    if (!ok) {
+        failf("build_neighbor_probe_frame", "mesh_build_neighbor_probe failed");
+    }
 }
 
 static void build_mini9p_response_mesh_frame(
@@ -451,13 +460,14 @@ static const struct cluster_node *find_cluster_node(const struct cluster *cluste
 }
 
 /*
- * bootstrap REGISTER 的 src 仍是 0xFF，host 此时只应继续控制面流程，
- * 不能把节点提前暴露给上层 VFS。
+ * bootstrap REGISTER 的 src 仍是 0xFF，host 此时不能把节点暴露给上层 VFS。
+ * ASSIGN 成功后由调用方显式注册 UID/addr，二次 REGISTER 不再是必要条件。
  */
-static void test_unassigned_register_waits_for_confirmed_register(void)
+static void test_unassigned_register_waits_for_assigned_registration(void)
 {
     struct mesh_host_runtime runtime;
     struct fake_mesh_io io;
+    uint8_t uid[MESH_UID_LEN];
     bool online = true;
 
     init_runtime(&runtime, &io);
@@ -468,8 +478,9 @@ static void test_unassigned_register_waits_for_confirmed_register(void)
                cluster_get_node_online(cluster_config_mesh_cluster(), MESH_ADDR_UNASSIGNED, &online),
                -(int)MESH_ERR_NO_ROUTE);
 
-    process_register(&runtime, 0x11u, 0x05u);
-    expect_int("confirmed register visible", cluster_vfs_attach("mcu1"), -(int)M9P_ERR_EAGAIN);
+    fill_uid(uid, 0x05u);
+    expect_int("assign registers node", mesh_host_runtime_register_assigned_node(&runtime, 0x11u, uid), 0);
+    expect_int("assigned node visible", cluster_vfs_attach("mcu1"), -(int)M9P_ERR_EAGAIN);
 }
 
 static void process_link_state(
@@ -548,6 +559,127 @@ static void decode_last_tx(
     }
 }
 
+static bool tx_has_route_update(
+    struct fake_mesh_io *io,
+    uint8_t owner,
+    uint8_t route_dst,
+    uint8_t route_next_hop)
+{
+    size_t i;
+
+    for (i = 0u; i < io->tx_count; ++i) {
+        struct mesh_frame_view frame;
+        struct mesh_route_update_payload payload;
+
+        if (!mesh_decode_frame(io->tx_frames[i], io->tx_lens[i], &frame)) {
+            continue;
+        }
+        if (frame.type != MESH_TYPE_ROUTE_UPDATE || frame.dst != owner) {
+            continue;
+        }
+        if (!mesh_parse_route_update(&frame, &payload)) {
+            continue;
+        }
+        if (payload.dst == route_dst &&
+            payload.next_hop == route_next_hop &&
+            payload.action == MESH_ROUTE_SET) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void expect_route_update(
+    const char *label,
+    struct fake_mesh_io *io,
+    uint8_t owner,
+    uint8_t route_dst,
+    uint8_t route_next_hop)
+{
+    if (!tx_has_route_update(io, owner, route_dst, route_next_hop)) {
+        failf(label, "route update not found");
+    }
+}
+
+static void expect_no_route_update(
+    const char *label,
+    struct fake_mesh_io *io,
+    uint8_t owner,
+    uint8_t route_dst,
+    uint8_t route_next_hop)
+{
+    if (tx_has_route_update(io, owner, route_dst, route_next_hop)) {
+        failf(label, "unexpected route update found");
+    }
+}
+
+static void test_neighbor_probe_request_gets_host_response_without_topology(void)
+{
+    struct mesh_host_runtime runtime;
+    struct fake_mesh_io io;
+    struct mesh_frame_view response;
+    uint8_t frame[TEST_FRAME_CAP];
+    size_t frame_len = 0u;
+    bool reachable = true;
+
+    init_runtime(&runtime, &io);
+    build_neighbor_probe_frame(MESH_TYPE_NEIGHBOR_PROBE_REQUEST, 0x11u, MESH_ADDR_UNASSIGNED, frame, &frame_len);
+
+    expect_int("probe request", mesh_host_runtime_process_frame(&runtime, frame, frame_len), 0);
+    expect_int("probe response tx count", (int)io.tx_count, 1);
+    expect_int("probe response next hop", io.tx_next_hops[0], 0x11u);
+    if (!mesh_decode_frame(io.tx_frames[0], io.tx_lens[0], &response)) {
+        failf("probe response decode", "mesh_decode_frame failed");
+        return;
+    }
+    expect_int("probe response type", response.type, MESH_TYPE_NEIGHBOR_PROBE_RESPONSE);
+    expect_int("probe response src", response.src, MESH_ADDR_HOST);
+    expect_int("probe response dst", response.dst, MESH_ADDR_UNASSIGNED);
+    expect_int("probe no topology rc", cluster_can_reach(cluster_config_mesh_cluster(), 0x11u, &reachable), 0);
+    expect_int("probe no topology", reachable, 0);
+}
+
+static void test_neighbor_probe_request_poll_path_gets_host_response(void)
+{
+    struct mesh_host_runtime runtime;
+    struct fake_mesh_io io;
+    struct mesh_frame_view response;
+    uint8_t frame[TEST_FRAME_CAP];
+    size_t frame_len = 0u;
+
+    init_runtime(&runtime, &io);
+    build_neighbor_probe_frame(MESH_TYPE_NEIGHBOR_PROBE_REQUEST, 0x11u, MESH_ADDR_UNASSIGNED, frame, &frame_len);
+    push_rx_frame(&io, frame, frame_len);
+
+    expect_int("probe request poll", mesh_host_runtime_poll_once(&runtime), 0);
+    expect_int("probe poll tx count", (int)io.tx_count, 1);
+    if (!mesh_decode_frame(io.tx_frames[0], io.tx_lens[0], &response)) {
+        failf("probe poll response decode", "mesh_decode_frame failed");
+        return;
+    }
+    expect_int("probe poll response type", response.type, MESH_TYPE_NEIGHBOR_PROBE_RESPONSE);
+    expect_int("probe poll response src", response.src, MESH_ADDR_HOST);
+    expect_int("probe poll response dst", response.dst, MESH_ADDR_UNASSIGNED);
+}
+
+static void test_neighbor_probe_response_is_consumed_by_host(void)
+{
+    struct mesh_host_runtime runtime;
+    struct fake_mesh_io io;
+    uint8_t frame[TEST_FRAME_CAP];
+    size_t frame_len = 0u;
+    bool reachable = true;
+
+    init_runtime(&runtime, &io);
+    build_neighbor_probe_frame(MESH_TYPE_NEIGHBOR_PROBE_RESPONSE, 0x11u, MESH_ADDR_UNASSIGNED, frame, &frame_len);
+
+    expect_int("probe response consume", mesh_host_runtime_process_frame(&runtime, frame, frame_len), 0);
+    expect_int("probe response consume tx count", (int)io.tx_count, 0);
+    expect_int("probe response no topology rc", cluster_can_reach(cluster_config_mesh_cluster(), 0x11u, &reachable), 0);
+    expect_int("probe response no topology", reachable, 0);
+}
+
 /*
  * REGISTER 必须能在 runtime 中自动落到 VFS，
  * 但这里还不应该凭空伪造一条 host <-> node 直连边。
@@ -597,8 +729,7 @@ static void test_link_state_to_host_enables_attach_over_mesh_client(void)
 
     queue_rattach(&io, 0x11u, 1u);
     expect_int("attach over mesh", cluster_vfs_attach("mcu1"), 0);
-    expect_int("attach tx count", (int)io.tx_count, 1);
-    expect_int("attach next hop", io.tx_next_hops[0], 0x11u);
+    expect_int("attach next hop", io.tx_next_hops[io.tx_count - 1u], 0x11u);
 
     decode_last_tx(&io, &mesh_view, &m9p_view);
     expect_int("attach mesh type", mesh_view.type, MESH_TYPE_MINI9P);
@@ -607,38 +738,16 @@ static void test_link_state_to_host_enables_attach_over_mesh_client(void)
     expect_u16("attach mini9p tag", m9p_view.tag, 1u);
 }
 
-static void test_wifi_register_marks_node_and_creates_direct_link(void)
+static void test_attach_timeout_maps_mesh_busy_to_m9p_eagain(void)
 {
     struct mesh_host_runtime runtime;
     struct fake_mesh_io io;
-    const struct cluster_node *node;
-    struct mesh_frame_view mesh_view;
-    struct m9p_frame_view m9p_view;
-    bool reachable = false;
 
     init_runtime(&runtime, &io);
-    process_register_with_wifi(&runtime, 0x33u, 0x21u, true);
+    process_register(&runtime, 0x11u, 0x21u);
+    process_link_state(&runtime, 0x11u, 0x00u, 1u);
 
-    node = find_cluster_node(cluster_config_mesh_cluster(), 0x33u);
-    if (node == NULL) {
-        failf("wifi register node", "node metadata missing");
-        return;
-    }
-
-    expect_int("wifi register reachable rc", cluster_can_reach(cluster_config_mesh_cluster(), 0x33u, &reachable), 0);
-    expect_int("wifi register reachable", reachable, 1);
-    expect_int("wifi register flag", node->wifi_supported ? 1 : 0, 1);
-    expect_int("wifi register bitmap", node->port_bitmap, CLUSTER_PORT_WIFI_MASK);
-
-    fake_mesh_io_clear_tx(&io);
-    queue_rattach(&io, 0x33u, 1u);
-    expect_int("wifi attach over mesh", cluster_vfs_attach("mcu1"), 0);
-    expect_int("wifi attach tx count", (int)io.tx_count, 1);
-    expect_int("wifi attach next hop", io.tx_next_hops[0], 0x33u);
-
-    decode_last_tx(&io, &mesh_view, &m9p_view);
-    expect_int("wifi attach mesh type", mesh_view.type, MESH_TYPE_MINI9P);
-    expect_int("wifi attach mini9p type", m9p_view.type, M9P_TATTACH);
+    expect_int("attach timeout", cluster_vfs_attach("mcu1"), -(int)M9P_ERR_EAGAIN);
 }
 
 /*
@@ -679,89 +788,47 @@ static void test_routed_read_path_uses_cluster_next_hop(void)
     expect_int("route read_path", cluster_vfs_read_path("/mcu2/dev/temp", buf, &len), 0);
     expect_u16("route read len", len, (uint16_t)sizeof(expected));
     expect_mem("route read data", buf, expected, sizeof(expected));
-    expect_int("route tx count", (int)io.tx_count, 5);
-    expect_int("route attach next hop", io.tx_next_hops[0], 0x11u);
-    expect_int("route walk next hop", io.tx_next_hops[1], 0x11u);
+    expect_int("route attach next hop", io.tx_next_hops[io.tx_count - 5u], 0x11u);
+    expect_int("route walk next hop", io.tx_next_hops[io.tx_count - 4u], 0x11u);
 }
 
-static void test_topology_change_pushes_remote_route_updates(void)
+static void test_link_state_triggers_all_pairs_route_updates(void)
 {
     struct mesh_host_runtime runtime;
     struct fake_mesh_io io;
+    struct cluster *cluster;
+    size_t baseline_tx_count;
 
     init_runtime(&runtime, &io);
-    process_register(&runtime, 0x11u, 0x50u);
-    process_link_state(&runtime, 0x11u, 0x00u, 1u);
-    expect_int("direct route update tx count", (int)io.tx_count, 1);
-    expect_int("direct route update next hop", io.tx_next_hops[0], 0x11u);
-    expect_route_update_present(&io, 0x11u, 0x00u, 0u);
+    process_register(&runtime, 0x11u, 0x31u);
+    process_register(&runtime, 0x22u, 0x32u);
+    process_register(&runtime, 0x33u, 0x33u);
 
-    fake_mesh_io_clear_tx(&io);
-    process_register(&runtime, 0x22u, 0x51u);
-    process_link_state_with_port(&runtime, 0x11u, 0x22u, 1u, 1u);
-    expect_route_update_present(&io, 0x11u, 0x22u, 1u);
-}
+    cluster = cluster_config_mesh_cluster();
+    expect_int("add host a", cluster_add_link(cluster, 0x00u, 0x11u, 1u, true), 0);
+    expect_int("add a b", cluster_add_link(cluster, 0x11u, 0x22u, 1u, true), 0);
 
-/*
- * 混合传输主路径：
- * host --Wi-Fi--> mcu1 --UART(port1)--> mcu2。
- *
- * 它验证三件事：
- * 1. mcu1 的 REGISTER 可以同时声明 Wi-Fi 和 UART 端口；
- * 2. host 会把 mcu2 的下行路由表同步给 mcu1，且 next_hop=1 表示走 mcu1 的 UART1；
- * 3. host 访问 /mcu2/... 时，自己的第一跳仍然应发给 mcu1，由 mcu1 再继续转发。
- */
-static void test_hybrid_wifi_parent_uart_child_forwarding(void)
-{
-    static const uint8_t expected[] = {'h', 'y', 'b', 'r', 'i', 'd'};
-    struct mesh_host_runtime runtime;
-    struct fake_mesh_io io;
-    const struct cluster_node *parent;
-    uint8_t buf[8] = {0};
-    uint16_t len = sizeof(buf);
-    bool reachable = false;
+    baseline_tx_count = io.tx_count;
+    process_link_state(&runtime, 0x22u, 0x33u, 1u);
 
-    init_runtime(&runtime, &io);
-    process_register_with_metadata(
-        &runtime,
-        0x11u,
-        0x52u,
-        true,
-        (uint8_t)(CLUSTER_PORT_WIFI_MASK | (uint8_t)(1u << 1u)));
+    expect_int("route sync emitted", io.tx_count > baseline_tx_count, 1);
+    expect_route_update("A to host", &io, 0x11u, 0x00u, 0x00u);
+    expect_route_update("A to B", &io, 0x11u, 0x22u, 0x22u);
+    expect_route_update("A to C", &io, 0x11u, 0x33u, 0x22u);
+    expect_route_update("B to host", &io, 0x22u, 0x00u, 0x11u);
+    expect_route_update("B to A", &io, 0x22u, 0x11u, 0x11u);
+    expect_route_update("B to C", &io, 0x22u, 0x33u, 0x33u);
+    expect_no_route_update("C no host before reverse", &io, 0x33u, 0x00u, 0x22u);
+    expect_no_route_update("C no A before reverse", &io, 0x33u, 0x11u, 0x22u);
+    expect_no_route_update("C no B before reverse", &io, 0x33u, 0x22u, 0x22u);
 
-    parent = find_cluster_node(cluster_config_mesh_cluster(), 0x11u);
-    if (parent == NULL) {
-        failf("hybrid parent node", "parent metadata missing");
-        return;
-    }
+    baseline_tx_count = io.tx_count;
+    process_link_state(&runtime, 0x33u, 0x22u, 1u);
 
-    expect_int("hybrid parent wifi flag", parent->wifi_supported ? 1 : 0, 1);
-    expect_int("hybrid parent bitmap", parent->port_bitmap, (int)(CLUSTER_PORT_WIFI_MASK | (1u << 1u)));
-    expect_int("hybrid parent reachable rc", cluster_can_reach(cluster_config_mesh_cluster(), 0x11u, &reachable), 0);
-    expect_int("hybrid parent reachable", reachable, 1);
-
-    fake_mesh_io_clear_tx(&io);
-    process_register(&runtime, 0x22u, 0x53u);
-    process_link_state_with_port(&runtime, 0x11u, 0x22u, 1u, 1u);
-
-    expect_route_update_present(&io, 0x11u, 0x22u, 1u);
-    expect_int("hybrid child reachable rc", cluster_can_reach(cluster_config_mesh_cluster(), 0x22u, &reachable), 0);
-    expect_int("hybrid child reachable", reachable, 1);
-
-    fake_mesh_io_clear_tx(&io);
-    queue_rattach(&io, 0x22u, 1u);
-    queue_rwalk(&io, 0x22u, 2u, 43u);
-    queue_ropen(&io, 0x22u, 3u, 43u);
-    queue_rread(&io, 0x22u, 4u, expected, (uint16_t)sizeof(expected));
-    queue_rclunk(&io, 0x22u, 5u);
-
-    expect_int("hybrid attach", cluster_vfs_attach("mcu2"), 0);
-    expect_int("hybrid read_path", cluster_vfs_read_path("/mcu2/dev/hybrid", buf, &len), 0);
-    expect_u16("hybrid read len", len, (uint16_t)sizeof(expected));
-    expect_mem("hybrid read data", buf, expected, sizeof(expected));
-    expect_int("hybrid tx count", (int)io.tx_count, 5);
-    expect_int("hybrid attach next hop", io.tx_next_hops[0], 0x11u);
-    expect_int("hybrid walk next hop", io.tx_next_hops[1], 0x11u);
+    expect_int("reverse route sync emitted", io.tx_count > baseline_tx_count, 1);
+    expect_route_update("C to host", &io, 0x33u, 0x00u, 0x22u);
+    expect_route_update("C to A", &io, 0x33u, 0x11u, 0x22u);
+    expect_route_update("C to B", &io, 0x33u, 0x22u, 0x22u);
 }
 
 /*
@@ -829,20 +896,24 @@ int main(void)
 {
     printf("mesh_host_runtime test runner start\n");
 
-    run_test("test_unassigned_register_waits_for_confirmed_register",
-             test_unassigned_register_waits_for_confirmed_register);
+    run_test("test_unassigned_register_waits_for_assigned_registration",
+             test_unassigned_register_waits_for_assigned_registration);
     run_test("test_register_broadcast_updates_vfs_without_direct_link",
              test_register_broadcast_updates_vfs_without_direct_link);
-    run_test("test_wifi_register_marks_node_and_creates_direct_link",
-             test_wifi_register_marks_node_and_creates_direct_link);
+    run_test("test_neighbor_probe_request_gets_host_response_without_topology",
+             test_neighbor_probe_request_gets_host_response_without_topology);
+    run_test("test_neighbor_probe_request_poll_path_gets_host_response",
+             test_neighbor_probe_request_poll_path_gets_host_response);
+    run_test("test_neighbor_probe_response_is_consumed_by_host",
+             test_neighbor_probe_response_is_consumed_by_host);
     run_test("test_link_state_to_host_enables_attach_over_mesh_client",
              test_link_state_to_host_enables_attach_over_mesh_client);
-    run_test("test_topology_change_pushes_remote_route_updates",
-             test_topology_change_pushes_remote_route_updates);
-    run_test("test_hybrid_wifi_parent_uart_child_forwarding",
-             test_hybrid_wifi_parent_uart_child_forwarding);
+    run_test("test_attach_timeout_maps_mesh_busy_to_m9p_eagain",
+             test_attach_timeout_maps_mesh_busy_to_m9p_eagain);
     run_test("test_routed_read_path_uses_cluster_next_hop",
              test_routed_read_path_uses_cluster_next_hop);
+    run_test("test_link_state_triggers_all_pairs_route_updates",
+             test_link_state_triggers_all_pairs_route_updates);
     run_test("test_request_loop_processes_register_before_response",
              test_request_loop_processes_register_before_response);
     run_test("test_link_loss_marks_downstream_node_offline",

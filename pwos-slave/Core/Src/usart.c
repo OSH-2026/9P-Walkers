@@ -33,9 +33,9 @@ void MX_USART1_UART_Init(void)
 {
 
   /* USER CODE BEGIN USART1_Init 0 */
-#ifdef PWOS_ENABLE_MINI9P_SERIAL
-  return;
-#endif
+// #ifdef PWOS_ENABLE_MINI9P_SERIAL
+//   return;
+// #endif
 
   /* USER CODE END USART1_Init 0 */
 

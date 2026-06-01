@@ -267,6 +267,19 @@ int mesh_processer_process_frame(
     size_t frame_len);
 
 /*
+ * 处理一帧“已经收进来”的原始 mesh 数据，并显式携带入口端口。
+ *
+ * ingress_port 来自 receive_frame 的 out_ingress_port；没有端口概念的调用方
+ * 使用 MESH_PROCESSER_INGRESS_PORT_NONE。当前 processor 只负责保留入口信息
+ * 的传递点，具体端口语义由 runtime/control handler 决定。
+ */
+int mesh_processer_process_frame_from_port(
+    struct mesh_processer *processor,
+    const uint8_t *frame_data,
+    size_t frame_len,
+    uint8_t ingress_port);
+
+/*
  * 轮询一次：从串口/链路收一帧，然后调用 mesh_processer_process_frame()。
  *
  * 这是“processor 自己拉流”的便捷入口，适合裸循环或任务线程。

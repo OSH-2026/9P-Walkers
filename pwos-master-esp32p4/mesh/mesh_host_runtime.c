@@ -265,127 +265,182 @@ static int mesh_host_runtime_lookup_next_hop(
 
 static int mesh_host_runtime_send_route_update(
     struct mesh_host_runtime *runtime,
-    uint8_t target_addr,
-    const struct mesh_route_update_payload *payload)
+    uint8_t route_owner,
+    uint8_t route_dst,
+    uint8_t route_next_hop,
+    uint8_t metric)
 {
-    uint8_t next_hop = 0u;
+    struct mesh_route_update_payload payload;
+    uint8_t frame[MESH_PROCESSER_FRAME_CAP];
+    uint8_t tx_next_hop = 0u;
     size_t frame_len = 0u;
     int rc;
 
-    if (runtime == NULL || payload == NULL) {
+    if (runtime == NULL || !runtime->initialized) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    payload.dst = route_dst;
+    payload.next_hop = route_next_hop;
+    payload.metric = metric;
+    payload.route_version = mesh_host_runtime_next_seq(runtime);
+    payload.action = MESH_ROUTE_SET;
+
+    if (!mesh_build_route_update(
+            runtime->config.local_addr,
+            route_owner,
+            payload.route_version,
+            runtime->config.default_hop,
+            &payload,
+            frame,
+            sizeof(frame),
+            &frame_len)) {
         return -(int)MESH_ERR_BAD_FRAME;
     }
 
-    rc = mesh_host_runtime_lookup_next_hop(runtime, target_addr, &next_hop);
+    rc = mesh_host_runtime_lookup_next_hop(runtime, route_owner, &tx_next_hop);
     if (rc != 0) {
         return rc;
     }
 
-    if (!mesh_build_route_update(
+    return runtime->config.send_frame(
+        runtime->config.transport_ctx,
+        tx_next_hop,
+        frame,
+        frame_len);
+}
+
+static int mesh_host_runtime_sync_controller_routes(struct mesh_host_runtime *runtime)
+{
+    size_t source_index;
+    size_t dst_index;
+
+    if (runtime == NULL || !runtime->initialized) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    for (source_index = 0u; source_index < MESH_HOST_RUNTIME_MAX_CLIENTS; ++source_index) {
+        struct mesh_host_runtime_client_slot *source_slot = &runtime->clients[source_index];
+        uint8_t source_addr;
+
+        if (!source_slot->used || source_slot->mesh_addr == MESH_HOST_RUNTIME_UNASSIGNED_ADDR) {
+            continue;
+        }
+        source_addr = source_slot->mesh_addr;
+
+        for (dst_index = 0u; dst_index < MESH_HOST_RUNTIME_MAX_CLIENTS; ++dst_index) {
+            struct mesh_host_runtime_client_slot *dst_slot = &runtime->clients[dst_index];
+            uint8_t dst_addr;
+            uint8_t next_hop = 0u;
+            uint8_t metric = 0u;
+            int rc;
+
+            if (!dst_slot->used || dst_slot->mesh_addr == MESH_HOST_RUNTIME_UNASSIGNED_ADDR) {
+                continue;
+            }
+            dst_addr = dst_slot->mesh_addr;
+            if (dst_addr == source_addr) {
+                continue;
+            }
+
+            rc = cluster_compute_next_hop_from(
+                runtime->config.mesh_cluster,
+                source_addr,
+                dst_addr,
+                &next_hop,
+                &metric);
+            if (rc == -(int)MESH_ERR_NO_ROUTE) {
+                continue;
+            }
+            if (rc != 0) {
+                return rc;
+            }
+
+            rc = mesh_host_runtime_send_route_update(runtime, source_addr, dst_addr, next_hop, metric);
+            if (rc != 0) {
+                return rc;
+            }
+        }
+
+        {
+            uint8_t next_hop = 0u;
+            uint8_t metric = 0u;
+            int rc = cluster_compute_next_hop_from(
+                runtime->config.mesh_cluster,
+                source_addr,
+                runtime->config.local_addr,
+                &next_hop,
+                &metric);
+            if (rc == 0) {
+                rc = mesh_host_runtime_send_route_update(
+                    runtime,
+                    source_addr,
+                    runtime->config.local_addr,
+                    next_hop,
+                    metric);
+            }
+            if (rc != 0 && rc != -(int)MESH_ERR_NO_ROUTE) {
+                return rc;
+            }
+        }
+    }
+
+    return 0;
+}
+
+static int mesh_host_runtime_handle_neighbor_probe(
+    struct mesh_host_runtime *runtime,
+    const struct mesh_frame_view *frame)
+{
+    uint8_t response[MESH_PROCESSER_FRAME_CAP];
+    size_t response_len = 0u;
+
+    if (runtime == NULL || frame == NULL) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    if (frame->type == MESH_TYPE_NEIGHBOR_PROBE_RESPONSE) {
+        return 0;
+    }
+    if (frame->type != MESH_TYPE_NEIGHBOR_PROBE_REQUEST) {
+        return -(int)MESH_ERR_UNSUPPORTED_TYPE;
+    }
+
+    if (!mesh_build_neighbor_probe_response(
             runtime->config.local_addr,
-            target_addr,
+            MESH_ADDR_UNASSIGNED,
             mesh_host_runtime_next_seq(runtime),
             runtime->config.default_hop,
-            payload,
-            runtime->processor.tx_buffer,
-            sizeof(runtime->processor.tx_buffer),
-            &frame_len)) {
+            response,
+            sizeof(response),
+            &response_len)) {
         return -(int)MESH_ERR_BAD_FRAME;
     }
 
     return runtime->config.send_frame(
         runtime->config.transport_ctx,
-        next_hop,
-        runtime->processor.tx_buffer,
-        frame_len);
+        frame->src,
+        response,
+        response_len);
 }
 
-static int mesh_host_runtime_sync_remote_route_table(
-    struct mesh_host_runtime *runtime,
-    uint8_t source_addr)
+static int mesh_host_runtime_map_transport_error_to_m9p(int rc)
 {
-    uint16_t route_version;
-    size_t i;
-    bool reachable = false;
-    int rc;
-
-    if (runtime == NULL || source_addr == runtime->config.local_addr ||
-        source_addr == MESH_ADDR_UNASSIGNED) {
-        return 0;
+    if (rc == -(int)MESH_ERR_BUSY) {
+        return -(int)M9P_ERR_EAGAIN;
     }
-
-    rc = cluster_can_reach(runtime->config.mesh_cluster, source_addr, &reachable);
-    if (rc != 0 || !reachable) {
-        return rc;
+    if (rc == -(int)MESH_ERR_NO_ROUTE) {
+        return -(int)M9P_ERR_EAGAIN;
     }
-
-    route_version = mesh_host_runtime_next_seq(runtime);
-
-    for (i = 0u; i < CLUSTER_MAX_NODES; ++i) {
-        struct mesh_route_update_payload payload;
-        uint8_t dst;
-
-        if (!runtime->config.mesh_cluster->nodes[i].valid) {
-            continue;
-        }
-
-        dst = runtime->config.mesh_cluster->nodes[i].addr;
-        if (dst == MESH_ADDR_UNASSIGNED || dst == source_addr) {
-            continue;
-        }
-
-        rc = cluster_build_remote_route_update(
-            runtime->config.mesh_cluster,
-            source_addr,
-            dst,
-            route_version,
-            MESH_ROUTE_SET,
-            &payload);
-        if (rc == -(int)MESH_ERR_NO_ROUTE || rc == -(int)MESH_ERR_INVALID_STATE) {
-            rc = cluster_build_remote_route_update(
-                runtime->config.mesh_cluster,
-                source_addr,
-                dst,
-                route_version,
-                MESH_ROUTE_DELETE,
-                &payload);
-        }
-        if (rc != 0) {
-            return rc;
-        }
-
-        rc = mesh_host_runtime_send_route_update(runtime, source_addr, &payload);
-        if (rc != 0) {
-            return rc;
-        }
+    if (rc == -(int)MESH_ERR_BAD_FRAME) {
+        return -(int)M9P_ERR_EIO;
     }
-
-    return 0;
-}
-
-static int mesh_host_runtime_sync_all_remote_route_tables(struct mesh_host_runtime *runtime)
-{
-    size_t i;
-
-    if (runtime == NULL) {
-        return -(int)MESH_ERR_BAD_FRAME;
+    if (rc == -(int)MESH_ERR_UNSUPPORTED_TYPE ||
+        rc == -(int)MESH_ERR_NOT_AUTHORIZED ||
+        rc == -(int)MESH_ERR_INVALID_STATE) {
+        return -(int)M9P_ERR_EIO;
     }
-
-    for (i = 0u; i < MESH_HOST_RUNTIME_MAX_CLIENTS; ++i) {
-        struct mesh_host_runtime_client_slot *slot = &runtime->clients[i];
-        int rc;
-
-        if (!slot->used || slot->mesh_addr == MESH_HOST_RUNTIME_UNASSIGNED_ADDR) {
-            continue;
-        }
-
-        rc = mesh_host_runtime_sync_remote_route_table(runtime, slot->mesh_addr);
-        if (rc != 0) {
-            return rc;
-        }
-    }
-
-    return 0;
+    return rc;
 }
 
 static int mesh_host_runtime_client_request(
@@ -487,6 +542,7 @@ static int mesh_host_runtime_client_request(
             rx_len,
             &ingress_port);
         if (rc != 0) {
+            rc = mesh_host_runtime_map_transport_error_to_m9p(rc);
             goto out;
         }
 
@@ -515,6 +571,7 @@ static int mesh_host_runtime_client_request(
 
         rc = mesh_host_runtime_process_frame(runtime, runtime->processor.rx_buffer, *rx_len);
         if (rc != 0) {
+            rc = mesh_host_runtime_map_transport_error_to_m9p(rc);
             goto out;
         }
     }
@@ -524,7 +581,7 @@ out:
     return rc;
 }
 
-static int mesh_host_runtime_sync_registered_node(
+int mesh_host_runtime_register_assigned_node(
     struct mesh_host_runtime *runtime,
     uint8_t mesh_addr,
     const struct mesh_register_payload *payload,
@@ -533,11 +590,10 @@ static int mesh_host_runtime_sync_registered_node(
     struct m9p_client *client = NULL;
     int rc;
 
-    if (out_topology_changed != NULL) {
-        *out_topology_changed = false;
+    if (runtime == NULL || uid == NULL || !runtime->initialized) {
+        return -(int)MESH_ERR_INVALID_STATE;
     }
-
-    if (payload == NULL || mesh_addr == MESH_ADDR_UNASSIGNED) {
+    if (mesh_addr == MESH_ADDR_UNASSIGNED) {
         return 0;
     }
 
@@ -638,26 +694,7 @@ static int mesh_host_runtime_control_handler(
             return -(int)MESH_ERR_BAD_FRAME;
         }
 
-        rc = mesh_host_runtime_sync_registered_node(runtime, frame->src, &payload, &topology_changed);
-        if (rc != 0) {
-            return rc;
-        }
-
-        if (!topology_changed) {
-            return 0;
-        }
-
-        rc = cluster_config_refresh_all_nodes_connectivity(NULL);
-        if (rc != 0) {
-            return rc;
-        }
-
-        rc = mesh_host_runtime_sync_slots_from_cluster(runtime);
-        if (rc != 0) {
-            return rc;
-        }
-
-        return mesh_host_runtime_sync_all_remote_route_tables(runtime);
+        return mesh_host_runtime_register_assigned_node(runtime, frame->src, payload.uid);
     }
 
     case MESH_TYPE_LINK_STATE: {
@@ -693,7 +730,7 @@ static int mesh_host_runtime_control_handler(
             return rc;
         }
 
-        return mesh_host_runtime_sync_all_remote_route_tables(runtime);
+        return mesh_host_runtime_sync_controller_routes(runtime);
     }
 
     case MESH_TYPE_ROUTE_UPDATE:
@@ -795,8 +832,17 @@ int mesh_host_runtime_process_frame(
     const uint8_t *frame_data,
     size_t frame_len)
 {
+    struct mesh_frame_view frame;
+
     if (runtime == NULL || !runtime->initialized) {
         return -(int)MESH_ERR_INVALID_STATE;
+    }
+    if (frame_data == NULL || !mesh_decode_frame(frame_data, frame_len, &frame)) {
+        return -(int)MESH_ERR_BAD_FRAME;
+    }
+    if (frame.type == MESH_TYPE_NEIGHBOR_PROBE_REQUEST ||
+        frame.type == MESH_TYPE_NEIGHBOR_PROBE_RESPONSE) {
+        return mesh_host_runtime_handle_neighbor_probe(runtime, &frame);
     }
 
     return mesh_processer_process_frame(&runtime->processor, frame_data, frame_len);
@@ -804,6 +850,8 @@ int mesh_host_runtime_process_frame(
 
 int mesh_host_runtime_poll_once(struct mesh_host_runtime *runtime)
 {
+    size_t rx_len = 0u;
+    uint8_t ingress_port = MESH_PROCESSER_INGRESS_PORT_NONE;
     int rc;
 
     if (runtime == NULL || !runtime->initialized) {
@@ -815,7 +863,16 @@ int mesh_host_runtime_poll_once(struct mesh_host_runtime *runtime)
         return rc;
     }
 
-    rc = mesh_processer_poll_once(&runtime->processor);
+    rc = runtime->config.receive_frame(
+        runtime->config.transport_ctx,
+        runtime->processor.rx_buffer,
+        sizeof(runtime->processor.rx_buffer),
+        &rx_len,
+        &ingress_port);
+    if (rc == 0) {
+        (void)ingress_port;
+        rc = mesh_host_runtime_process_frame(runtime, runtime->processor.rx_buffer, rx_len);
+    }
     mesh_host_runtime_release_dispatch(runtime);
     return rc;
 }

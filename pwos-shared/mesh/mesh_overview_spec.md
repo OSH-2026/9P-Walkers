@@ -104,10 +104,11 @@ processor 不直接依赖 UART 驱动，而是依赖两条回调：
 
 ### 3.3 receive_frame 语义
 
-`receive_frame(transport_ctx, rx_data, rx_cap, rx_len)`
+`receive_frame(transport_ctx, rx_data, rx_cap, rx_len, out_ingress_port)`
 
 - 成功时返回 `0` 并输出一帧完整 mesh 帧。
 - 失败/暂未收齐时返回负值（例如可重试错误）。
+- `out_ingress_port` 用于返回物理入口端口；无端口概念时应填 `MESH_PROCESSER_INGRESS_PORT_NONE`。
 - 建议底层处理好帧边界，processor 假设拿到的是一帧完整数据。
 
 ### 3.4 poll 与上层线程模型
@@ -188,6 +189,12 @@ runtime REGISTER 路径会同时做两件事：
 
 1. 在 mesh cluster 中把该节点加入主机拓扑视图。
 2. 在 cluster_vfs 中按 `hw_uid` 建立或复用节点名映射。
+
+对于多跳场景的后续邻居事实与路由同步：
+
+- 从机通过 `LINK_STATE(src=A, neighbor=B)` 上报自己看到的直连邻居方向事实 `A -> B`。
+- 主机不会自动把 `A -> B` 补成 `B -> A`；反向路径必须来自 `B` 自己的 `LINK_STATE(src=B, neighbor=A)`。
+- 主机在 `LINK_STATE` 后可基于当前有向 topology 即时计算并下发 `ROUTE_UPDATE(dst, next_hop)`，但该计算结果不应写回 `cluster->routes` 作为全局持久路由档案。
 
 名字分配规则：
 

@@ -118,6 +118,8 @@ bool mesh_is_control_type(uint8_t type)
         (type == MESH_TYPE_TIME_SYNC) ||
         (type == MESH_TYPE_ROUTE_UPDATE) ||
         (type == MESH_TYPE_LINK_STATE) ||
+        (type == MESH_TYPE_NEIGHBOR_PROBE_REQUEST) ||
+        (type == MESH_TYPE_NEIGHBOR_PROBE_RESPONSE) ||
         (type == MESH_TYPE_ERROR);
 }
 
@@ -676,6 +678,51 @@ bool mesh_parse_error(const struct mesh_frame_view *frame, struct mesh_error_pay
     out_payload->related_seq = get_le16(frame->payload + 2);
     return true;
 }
+bool mesh_build_neighbor_probe_request(
+    uint8_t src,
+    uint16_t seq,
+    uint8_t hop,
+    uint8_t *out_frame,
+    size_t out_cap,
+    size_t *out_len)
+{
+    return encode_payload_to_frame(
+        MESH_TYPE_NEIGHBOR_PROBE_REQUEST,
+        src,
+        MESH_ADDR_UNASSIGNED,
+        seq,
+        hop,
+        MESH_FLAG_CONTROL,
+        NULL,
+        0u,
+        out_frame,
+        out_cap,
+        out_len);
+}
+
+bool mesh_build_neighbor_probe_response(
+    uint8_t src,
+    uint8_t dst,
+    uint16_t seq,
+    uint8_t hop,
+    uint8_t *out_frame,
+    size_t out_cap,
+    size_t *out_len)
+{
+    return encode_payload_to_frame(
+        MESH_TYPE_NEIGHBOR_PROBE_RESPONSE,
+        src,
+        dst,
+        seq,
+        hop,
+        MESH_FLAG_CONTROL,
+        NULL,
+        0u,
+        out_frame,
+        out_cap,
+        out_len);
+}
+
 
 const char *mesh_error_name(uint16_t code)
 {

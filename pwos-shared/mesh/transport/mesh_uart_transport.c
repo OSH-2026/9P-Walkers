@@ -75,6 +75,18 @@ int mesh_uart_transport_receive_frame(
     return -(int)MESH_ERR_INVALID_STATE;
 }
 
+bool mesh_uart_transport_rx_pending(const struct mesh_uart_transport *transport)
+{
+    (void)transport;
+    return true;
+}
+
+int mesh_uart_transport_flush_input(struct mesh_uart_transport *transport)
+{
+    (void)transport;
+    return 0;
+}
+
 #elif defined(MESH_UART_TRANSPORT_USE_STM32_HAL)
 
 static uint32_t transport_timeout_ms(const struct mesh_uart_transport *transport)
@@ -238,6 +250,24 @@ int mesh_uart_transport_receive_frame(
     }
 
     return receive_frame_locked(transport, rx_data, rx_cap, rx_len);
+}
+
+bool mesh_uart_transport_rx_pending(const struct mesh_uart_transport *transport)
+{
+    if (transport == NULL || !transport->initialized || transport->config.uart == NULL) {
+        return false;
+    }
+
+    return __HAL_UART_GET_FLAG(transport->config.uart, UART_FLAG_RXNE) != RESET;
+}
+
+int mesh_uart_transport_flush_input(struct mesh_uart_transport *transport)
+{
+    if (transport == NULL || !transport->initialized || transport->config.uart == NULL) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    return drain_rx_fifo(transport);
 }
 
 #else
@@ -538,6 +568,29 @@ int mesh_uart_transport_receive_frame(
     rc = receive_frame_locked(transport, rx_data, rx_cap, rx_len);
     transport_give_mutex(transport_rx_lock(transport));
     return rc;
+}
+
+bool mesh_uart_transport_rx_pending(const struct mesh_uart_transport *transport)
+{
+    size_t buffered = 0u;
+
+    if (transport == NULL || !transport->initialized) {
+        return false;
+    }
+    if (uart_get_buffered_data_len((uart_port_t)transport->config.uart_port, &buffered) != ESP_OK) {
+        return false;
+    }
+
+    return buffered > 0u;
+}
+
+int mesh_uart_transport_flush_input(struct mesh_uart_transport *transport)
+{
+    if (transport == NULL || !transport->initialized) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    return flush_input(transport);
 }
 
 #endif

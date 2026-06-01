@@ -506,6 +506,149 @@ static int cluster_rebuild_routes_from_topology(struct cluster *cluster)
     return 0;
 }
 
+static bool cluster_collect_node_addrs(
+    const struct cluster *cluster,
+    uint8_t node_addrs[CLUSTER_MAX_NODES],
+    size_t *out_node_count)
+{
+    size_t i;
+    size_t node_count = 0u;
+
+    if (cluster == NULL || node_addrs == NULL || out_node_count == NULL) {
+        return false;
+    }
+
+    for (i = 0u; i < CLUSTER_MAX_NODES; ++i) {
+        if (cluster->nodes[i].valid) {
+            node_addrs[node_count++] = cluster->nodes[i].addr;
+        }
+    }
+
+    *out_node_count = node_count;
+    return true;
+}
+
+static size_t cluster_find_addr_index(
+    const uint8_t node_addrs[CLUSTER_MAX_NODES],
+    size_t node_count,
+    uint8_t addr)
+{
+    size_t i;
+
+    for (i = 0u; i < node_count; ++i) {
+        if (node_addrs[i] == addr) {
+            return i;
+        }
+    }
+
+    return node_count;
+}
+
+static int cluster_compute_next_hop_from_topology(
+    const struct cluster *cluster,
+    uint8_t source,
+    uint8_t dst,
+    uint8_t *out_next_hop,
+    uint8_t *out_metric)
+{
+    uint8_t node_addrs[CLUSTER_MAX_NODES];
+    uint8_t dist[CLUSTER_MAX_NODES];
+    uint8_t first_hop[CLUSTER_MAX_NODES];
+    bool visited[CLUSTER_MAX_NODES];
+    size_t node_count = 0u;
+    size_t source_index;
+    size_t dst_index;
+    size_t i;
+    size_t j;
+
+    if (!cluster_collect_node_addrs(cluster, node_addrs, &node_count)) {
+        return -(int)MESH_ERR_BAD_FRAME;
+    }
+
+    source_index = cluster_find_addr_index(node_addrs, node_count, source);
+    dst_index = cluster_find_addr_index(node_addrs, node_count, dst);
+    if (source_index == node_count || dst_index == node_count) {
+        return -(int)MESH_ERR_NO_ROUTE;
+    }
+
+    for (i = 0u; i < node_count; ++i) {
+        dist[i] = CLUSTER_INF_COST;
+        first_hop[i] = CLUSTER_INVALID_ADDR;
+        visited[i] = false;
+    }
+
+    dist[source_index] = 0u;
+    first_hop[source_index] = source;
+
+    for (i = 0u; i < node_count; ++i) {
+        size_t u_index = node_count;
+        uint8_t best_dist = CLUSTER_INF_COST;
+
+        for (j = 0u; j < node_count; ++j) {
+            if (!visited[j] && dist[j] < best_dist) {
+                best_dist = dist[j];
+                u_index = j;
+            }
+        }
+
+        if (u_index == node_count) {
+            break;
+        }
+
+        visited[u_index] = true;
+
+        for (j = 0u; j < CLUSTER_MAX_LINKS; ++j) {
+            const struct cluster_link *link;
+            uint8_t u_addr;
+            uint8_t v_addr = CLUSTER_INVALID_ADDR;
+            uint8_t cost;
+            uint8_t candidate;
+            size_t v_index;
+
+            if (!cluster->links[j].valid) {
+                continue;
+            }
+
+            link = &cluster->links[j];
+            u_addr = node_addrs[u_index];
+            cost = (link->metric == 0u) ? 1u : link->metric;
+
+            if (link->from == u_addr) {
+                v_addr = link->to;
+            } else if (link->bidirectional && link->to == u_addr) {
+                v_addr = link->from;
+            }
+
+            if (v_addr == CLUSTER_INVALID_ADDR) {
+                continue;
+            }
+
+            v_index = cluster_find_addr_index(node_addrs, node_count, v_addr);
+            if (v_index == node_count || visited[v_index]) {
+                continue;
+            }
+
+            candidate = (uint8_t)(dist[u_index] + cost);
+            if (candidate < dist[v_index]) {
+                dist[v_index] = candidate;
+                if (u_index == source_index) {
+                    first_hop[v_index] = v_addr;
+                } else {
+                    first_hop[v_index] = first_hop[u_index];
+                }
+            }
+        }
+    }
+
+    if (dist[dst_index] == CLUSTER_INF_COST || first_hop[dst_index] == CLUSTER_INVALID_ADDR) {
+        return -(int)MESH_ERR_NO_ROUTE;
+    }
+
+    *out_next_hop = first_hop[dst_index];
+    *out_metric = dist[dst_index];
+    return 0;
+}
+
 /*
  * 获取默认配置：
  * - 地址设为未分配，避免误判“本机命中”。
@@ -793,6 +936,28 @@ int cluster_lookup_next_hop(
     *out_next_hop = route->next_hop;
     *out_is_local = route->local;
     return 0;
+}
+
+int cluster_compute_next_hop_from(
+    const struct cluster *cluster,
+    uint8_t source,
+    uint8_t dst,
+    uint8_t *out_next_hop,
+    uint8_t *out_metric)
+{
+    if (cluster == NULL || out_next_hop == NULL || out_metric == NULL || !cluster->initialized) {
+        return -(int)MESH_ERR_BAD_FRAME;
+    }
+    if (cluster->config.mode != CLUSTER_MODE_TOPOLOGY) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+    if (source == dst) {
+        *out_next_hop = source;
+        *out_metric = 0u;
+        return 0;
+    }
+
+    return cluster_compute_next_hop_from_topology(cluster, source, dst, out_next_hop, out_metric);
 }
 
 int cluster_can_reach(struct cluster *cluster, uint8_t dst, bool *out_reachable)

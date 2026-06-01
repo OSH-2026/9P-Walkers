@@ -21,6 +21,10 @@ extern "C" {
 #define NODE_VFS_DEFAULT_IOUNIT 128u
 
 struct node_vfs_config {
+    int (*routes_text_fn)(void *ctx, char *out, size_t out_cap);
+    void *routes_text_ctx;
+    int (*log_text_fn)(void *ctx, char *out, size_t out_cap);
+    void *log_text_ctx;
     uint16_t iounit;
 };
 

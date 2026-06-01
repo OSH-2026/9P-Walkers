@@ -9,6 +9,7 @@
   - 封装共享的 `mesh_processer`。
   - 处理 `REGISTER`、`LINK_STATE` 和 `ROUTE_UPDATE` 等 mesh 控制帧。
   - 为已发现的 mesh 节点创建长期存在的 Mini9P 客户端，并将其注册到 `cluster_config` / `cluster_host_vfs`。
+  - 在 `LINK_STATE` 后按当前有向 topology 即时计算各从机视角的路径，并下发 `ROUTE_UPDATE`。
 
 - `mesh_host_service.c/.h`
   - 拥有一个或多个原始 mesh UART 传输端口，以及默认主机 runtime 实例。
@@ -59,8 +60,15 @@ host -- UART2 -- mcu3(0x33)
 ## 当前限制
 
 - `mesh_host_runtime` 仍具有全局单事务语义（通过 `dispatch_busy`）。
-- 接收回调不向运行时暴露入口端口标识。
+- 接收回调当前仍不在主机 runtime 内进一步利用入口端口做控制面决策。
 - 端口路由静态配置；服务不从接收帧中学习路由。
 - 服务不实现每端口响应队列或并发请求分发。
+
+## Topology And Route Sync
+
+- `LINK_STATE(src=A, neighbor=B)` 在主机侧表示一条已上报的有向 topology 边 `A -> B`。
+- 主机不会因为收到 `A -> B` 自动补 `B -> A`；若需要反向路径，必须另行收到 `LINK_STATE(src=B, neighbor=A)`。
+- `mesh_host_runtime` 在 `LINK_STATE` 处理完成后，会基于当前 topology 对任意 `source -> dst` 即时计算 `next_hop` 和 metric，并向 `source` 下发主机生成的 `ROUTE_UPDATE(dst, next_hop, metric, SET)`。
+- 该计算通过 shared cluster 的只读接口完成，不写入 `cluster->routes`；`cluster->routes` 仍只表示主机自身 `local_addr` 视角的查询缓存。
 
 这些限制保持了当前实现与现有 mesh processor API 的兼容性，同时支持了首个有用的多 UART 主机拓扑。

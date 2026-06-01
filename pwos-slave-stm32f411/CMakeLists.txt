@@ -29,8 +29,10 @@ project(${CMAKE_PROJECT_NAME})
 message("Build type: " ${CMAKE_BUILD_TYPE})
 
 option(PWOS_LFS_BACKEND_RAM "Use RAM-backed littlefs for STM32F411 bring-up" ON)
+option(PWOS_ENABLE_MINI9P_SERIAL "Enable STM32F411 Mini9P mesh serial bring-up" ON)
 option(PWOS_ENABLE_LFS_SELFTEST "Populate littlefs debug fixtures on boot" ON)
 option(PWOS_SKIP_LFS_MOUNT "Skip lfs_vfs mount during Mini9P board bring-up" OFF)
+option(PWOS_ENABLE_MESH_DIAG "Enable blocking mesh diagnostic text output on USART1" OFF)
 
 # Enable CMake support for ASM, C and C++ languages
 enable_language(C CXX ASM)
@@ -46,27 +48,33 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined library search paths
 )
 
-set(PWOS_SHARED_MINI9P_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mini9p)
 set(PWOS_F411_USER_DIR ${CMAKE_SOURCE_DIR}/User)
 set(PWOS_SLAVE_USER_DIR ${CMAKE_SOURCE_DIR}/../pwos-slave/User)
+set(PWOS_SLAVE_USER_APP_DIR ${PWOS_SLAVE_USER_DIR}/app)
+set(PWOS_SLAVE_USER_BACKEND_DIR ${PWOS_SLAVE_USER_DIR}/backend)
+set(PWOS_SLAVE_USER_FS_DIR ${PWOS_SLAVE_USER_DIR}/fs)
 set(PWOS_SLAVE_USER_MESH_DIR ${PWOS_SLAVE_USER_DIR}/mesh)
-set(PWOS_SHARED_MESH_CLUSTER_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/cluster)
-set(PWOS_SHARED_MESH_ENVELOPE_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/envelope)
-set(PWOS_SHARED_MESH_PROCESSER_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/processer)
-set(PWOS_SHARED_MESH_TRANSPORT_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/transport)
-set(PWOS_SHARED_MESH_WIFI_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/wifi)
+set(PWOS_SHARED_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared)
+set(PWOS_SHARED_MINI9P_DIR ${PWOS_SHARED_DIR}/mini9p)
+set(PWOS_SHARED_MESH_DIR ${PWOS_SHARED_DIR}/mesh)
+set(PWOS_SHARED_MESH_CLUSTER_DIR ${PWOS_SHARED_MESH_DIR}/cluster)
+set(PWOS_SHARED_MESH_ENVELOPE_DIR ${PWOS_SHARED_MESH_DIR}/envelope)
+set(PWOS_SHARED_MESH_PROCESSER_DIR ${PWOS_SHARED_MESH_DIR}/processer)
+set(PWOS_SHARED_MESH_TRANSPORT_DIR ${PWOS_SHARED_MESH_DIR}/transport)
 
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-    ${PWOS_SLAVE_USER_DIR}/backend/dev_vfs.c
-    ${PWOS_SLAVE_USER_DIR}/backend/lfs_vfs.c
-    ${PWOS_SLAVE_USER_DIR}/backend/node_vfs.c
-    ${PWOS_SLAVE_USER_DIR}/backend/sys_vfs.c
-    ${PWOS_SLAVE_USER_DIR}/fs/lfs.c
-    ${PWOS_SLAVE_USER_DIR}/fs/lfs_util.c
+    ${PWOS_SLAVE_USER_BACKEND_DIR}/dev_vfs.c
+    ${PWOS_SLAVE_USER_BACKEND_DIR}/lfs_vfs.c
+    ${PWOS_SLAVE_USER_BACKEND_DIR}/node_vfs.c
+    ${PWOS_SLAVE_USER_BACKEND_DIR}/sys_vfs.c
+    ${PWOS_SLAVE_USER_FS_DIR}/lfs.c
+    ${PWOS_SLAVE_USER_FS_DIR}/lfs_util.c
     ${PWOS_F411_USER_DIR}/drivers/storage/lfs_port.cpp
-    ${PWOS_SLAVE_USER_DIR}/app/fs_selftest.c
-    ${PWOS_SLAVE_USER_DIR}/app/mesh_node_mini9p_service.c
+    ${PWOS_SLAVE_USER_APP_DIR}/fs_selftest.c
+    ${PWOS_SLAVE_USER_APP_DIR}/mesh_diag.c
+    ${PWOS_SLAVE_USER_APP_DIR}/pwos_log.c
+    ${PWOS_F411_USER_DIR}/app/mesh_node_mini9p_init.c
     ${PWOS_SLAVE_USER_MESH_DIR}/mesh_node_service.c
     ${PWOS_SHARED_MESH_CLUSTER_DIR}/cluster.c
     ${PWOS_SHARED_MESH_ENVELOPE_DIR}/mesh_protocal.c
@@ -84,10 +92,11 @@ endif()
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
-    ${PWOS_SLAVE_USER_DIR}/backend
-    ${PWOS_SLAVE_USER_DIR}/fs
+    ${PWOS_SLAVE_USER_BACKEND_DIR}
+    ${PWOS_SLAVE_USER_FS_DIR}
     ${PWOS_F411_USER_DIR}/drivers/storage
-    ${PWOS_SLAVE_USER_DIR}/app
+    ${PWOS_F411_USER_DIR}/app
+    ${PWOS_SLAVE_USER_APP_DIR}
     ${PWOS_SLAVE_USER_MESH_DIR}
     ${PWOS_SHARED_MINI9P_DIR}
     ${PWOS_SHARED_MESH_CLUSTER_DIR}
@@ -103,6 +112,9 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     MESH_UART_TRANSPORT_USE_STM32_HAL
 )
 
+if(PWOS_ENABLE_MINI9P_SERIAL)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE PWOS_ENABLE_MINI9P_SERIAL)
+endif()
 if(PWOS_LFS_BACKEND_RAM)
     target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE PWOS_LFS_PORT_USE_RAM)
 else()
@@ -114,6 +126,9 @@ if(PWOS_ENABLE_LFS_SELFTEST)
 endif()
 if(PWOS_SKIP_LFS_MOUNT)
     target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE PWOS_SKIP_LFS_MOUNT)
+endif()
+if(PWOS_ENABLE_MESH_DIAG)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE PWOS_ENABLE_MESH_DIAG)
 endif()
 
 # Remove wrong libob.a library dependency when using cpp files

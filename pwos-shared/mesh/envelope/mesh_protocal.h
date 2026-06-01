@@ -68,6 +68,8 @@ enum mesh_type {
     MESH_TYPE_TIME_SYNC = 0x14,
     MESH_TYPE_ROUTE_UPDATE = 0x15,
     MESH_TYPE_LINK_STATE = 0x16,
+    MESH_TYPE_NEIGHBOR_PROBE_REQUEST = 0x17,
+    MESH_TYPE_NEIGHBOR_PROBE_RESPONSE = 0x18,
     MESH_TYPE_ERROR = 0x7F
 };
 
@@ -319,6 +321,24 @@ bool mesh_build_link_state(
     size_t *out_len);
 
 bool mesh_parse_link_state(const struct mesh_frame_view *frame, struct mesh_link_state_payload *out_payload);
+
+/* NEIGHBOR_PROBE 构造（无 payload）。 */
+bool mesh_build_neighbor_probe_request(
+    uint8_t src,
+    uint16_t seq,
+    uint8_t hop,
+    uint8_t *out_frame,
+    size_t out_cap,
+    size_t *out_len);
+
+bool mesh_build_neighbor_probe_response(
+    uint8_t src,
+    uint8_t dst,
+    uint16_t seq,
+    uint8_t hop,
+    uint8_t *out_frame,
+    size_t out_cap,
+    size_t *out_len);
 
 /* ERROR 构造与解析。 */
 bool mesh_build_error(
