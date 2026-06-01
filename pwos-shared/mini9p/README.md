@@ -19,7 +19,7 @@ mesh_node_service   节点侧组装层，串起已注入 backend + server + mesh
 
 - 主机侧当前由 `mesh_host_runtime_client_request()` 实现该回调；
 - 该回调会把 Mini9P 请求封成 `MESH_TYPE_MINI9P` 帧，经 `mesh_uart_transport` 发出；
-- 在等待本次 `R*` 响应期间，runtime 仍会继续处理途中插入的 REGISTER、LINK_STATE、ROUTE_UPDATE 等 mesh 帧。
+- 在等待本次 `R*` 响应期间，runtime 会独占 dispatch，并继续处理途中插入的 REGISTER、LINK_STATE、ROUTE_UPDATE 等 mesh 帧。
 
 ## Mini9P Server
 

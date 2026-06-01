@@ -56,7 +56,7 @@ Shell / Lua / WebShell
 | --- | --- |
 | `pwos-master-esp32p4/` | ESP32-P4 主控工程，包含 Shell、Lua、Web Shell、VFS bridge、transport 组装 |
 | `pwos-slave/` | STM32F407 风格从机工程，包含 HAL、littleFS、local VFS、Mini9P service 集成 |
-| `pwos-slave-stm32f411/` | STM32F411 从机变体，包含 Mini9P 串口联调 preset |
+| `pwos-slave-stm32f411/` | STM32F411 从机变体，复用 `pwos-slave/User/`，只改板级 init |
 | `pwos-shared/mini9p/` | 主从共享 Mini9P 协议、client、server、service 代码 |
 | `pwos-shared/mesh/` | 共享 mesh envelope、cluster、processer、node_runtime、transport 代码 |
 | `tools/pc_master_emulator/` | PC 端 Mini9P 主控模拟器，用于硬件串口 smoke test |
@@ -71,12 +71,70 @@ Mini9P 是本项目使用的轻量级 9P 变体。帧格式包括 magic `0x39 0x
 - `mini9p_protocol`：帧编解码、请求解析、响应构造和 CRC 校验。
 - `mini9p_client`：主控侧 attach/walk/open/read/write/stat/clunk 封装。
 - `mini9p_server`：从机侧 session、fid 表、权限检查和 backend 分发。
-- `mesh_node_service`：从机上板联调组装层，连接 `local_vfs`、server、`mesh_node_runtime` 和 `mesh_uart_transport`。
 
 协议细节见：
 
 - `pwos-master-esp32p4/README.md`
 - `pwos-shared/mini9p/README.md`
+
+### Mesh 层
+
+Mesh 层负责把 Mini9P 数据面和 REGISTER/ASSIGN/ROUTE_UPDATE 等控制面统一封装成可路由的 envelope。帧格式包括 magic、长度、版本、type、src/dst、seq、hop、flags、payload 和 CRC-16/CCITT-FALSE。
+
+共享实现位于 `pwos-shared/mesh/`：
+
+- `envelope/mesh_protocal`：mesh 帧编解码、控制 payload 构造/解析、CRC 校验。
+- `processer/mesh_processer`：按目标地址分流、转发、本机 Mini9P dispatch、控制帧回调。
+- `cluster/cluster`：主机侧拓扑、路由表和 next-hop 计算。
+- `transport/mesh_uart_transport`：STM32 侧 raw mesh UART transport。
+
+协议细节见：
+
+- `pwos-shared/mesh/envelope/mesh_protocol_spec.md`
+- `docs/adr/0001-mesh-envelope-for-control-plane.md`
+- `docs/adr/0002-master-owns-global-topology.md`
+
+### 主机 Runtime / Service
+
+主机侧 runtime 负责把 cluster topology、Mini9P client、mesh processor 和底层 transport 连接起来。它维护全局视角的节点发现和路由下发流程：
+
+- `pwos-master-esp32p4/mesh/mesh_host_runtime`：处理 REGISTER、LINK_STATE、ROUTE_UPDATE 和 Mini9P 响应分流。
+- `pwos-master-esp32p4/mesh/mesh_host_service`：ESP32-P4 主控侧 service 组装层。
+- `pwos-master-esp32p4/cluster/cluster_config`：主机集群配置、节点发现回调和命名绑定。
+
+运行链路说明见：
+
+- `pwos-shared/RUN_TIME_NODE_MESH.md`
+- `pwos-master-esp32p4/README.md`
+
+### 从机 Runtime / Service
+
+从机侧 runtime 负责节点启动注册、地址分配后的本机地址维护、邻居探测、Mini9P server dispatch 和多 UART 端口转发。
+
+主要实现位于 `pwos-slave/User/mesh/`：
+
+- `mesh_node_runtime`：REGISTER/ASSIGN、邻居探测、路由表、Mini9P 收发分流。
+- `mesh_node_service`：板级 service 组装层，管理多个 UART mesh 端口和 `addr -> port` 学习表。
+- `mesh_node_mini9p_init`：把 node VFS、Mini9P server、mesh service 和板级 UART handle 连接起来。
+
+F411 变体复用大部分从机业务代码，只在 `pwos-slave-stm32f411/User/app/mesh_node_mini9p_init.c` 中适配 UART handle 和端口配置。
+
+### 从机 VFS 后端
+
+从机把本地资源抽象为 Mini9P 文件节点，Mini9P server 只负责 session/fid/权限管理，实际资源访问由 VFS 后端完成。
+
+主要实现位于 `pwos-slave/User/backend/`：
+
+- `node_vfs`：节点级路由入口，组合 `/sys`、`/dev`、`/fs`。
+- `sys_vfs`：虚拟系统节点，如 `/sys/health`、`/sys/info`、`/sys/routes`、`/sys/log`。
+- `dev_vfs`：设备节点后端。
+- `lfs_vfs`：littlefs 文件系统后端。
+- `local_vfs`：早期本地 VFS 后端，保留给测试和兼容路径。
+
+后端测试位于：
+
+- `pwos-slave/User/backend/test/`
+- `pwos-slave-stm32f411/User/backend/test/`
 
 ### Cluster VFS
 
@@ -89,9 +147,25 @@ Mini9P 是本项目使用的轻量级 9P 变体。帧格式包括 magic `0x39 0x
 
 详细设计见 `pwos-master-esp32p4/vfs_bridge/design.md`。
 
+### PC 主控模拟器
+
+PC emulator 是硬件 smoke test 和串口联调工具，用 PC 串口模拟主控侧 mesh host runtime。
+
+实现位于 `tools/pc_master_emulator/`：
+
+- 打开 USB-UART，接收从机 bootstrap `REGISTER`。
+- 分配 `mcuN` 名称和 mesh 地址，发送 `ASSIGN`。
+- 等待 `LINK_STATE`，触发 host runtime 下发 `ROUTE_UPDATE`。
+- 对 `/mcuN/sys/health`、`/mcuN/sys/routes`、`/mcuN/sys/log` 执行 Mini9P 读操作。
+- 实时打印 Mesh/Mini9P 收发日志，并在退出前尽量读取节点 `/sys/log`。
+
+工具说明见：
+
+- `tools/pc_master_emulator/README.md`
+
 ## 构建与运行
 
-### ESP32-P4 主控
+### ESP32-P4 主控（暂未验证）
 
 需要先导出 ESP-IDF 环境，使 `IDF_PATH` 可用。
 
@@ -115,24 +189,32 @@ pytest pytest_hello_world.py
 
 ### STM32 从机
 
+STM32F407 模板：
+
 ```bash
 cd pwos-slave
 cmake --preset Debug
 cmake --build --preset Debug
 cmake --build --preset Release
+
+# F407/ZGT6 板 Mini9P 串口联调
+cmake --preset ZGT6Debug
+cmake --build --preset ZGT6Debug
 ```
 
-### STM32F411 从机变体
+`pwos-slave/` 的 `ZGT6Debug` preset 启用 `PWOS_BOARD_ZGT6`、`PWOS_ENABLE_MINI9P_SERIAL`、`PWOS_SKIP_LFS_MOUNT`。ZGT6 上 Mini9P 联调口固定在 `USART2`，`PA2=TX`、`PA3=RX`、`1000000` baud；该 USART 只传 Mini9P/mesh 二进制帧，不应混入 VOFA 或文本日志。
+
+STM32F411 从机变体：
 
 ```bash
 cd pwos-slave-stm32f411
 cmake --preset Debug
 cmake --build --preset Debug
-cmake --preset ZGT6Debug
-cmake --build --preset ZGT6Debug
+cmake --preset Release
+cmake --build --preset Release
 ```
 
-`ZGT6Debug` 会启用 `PWOS_BOARD_ZGT6` 和 `PWOS_ENABLE_MINI9P_SERIAL`。当前 Mini9P 串口联调口为 `USART2`，`PA2=TX`、`PA3=RX`、`1000000` baud；该 USART 应只传输 Mini9P 二进制帧，不应混入 VOFA 或文本日志。
+`pwos-slave-stm32f411/` 只提供 `Debug/Release` presets。F411 当前板级配置中 `USART2`（`PA2=TX`、`PA3=RX`）是与 PC/host 通信的 mesh 主口，默认 `1000000` baud；该口只传 Mini9P/mesh 二进制帧，不应混入 VOFA 或文本日志。
 
 ## 测试
 
