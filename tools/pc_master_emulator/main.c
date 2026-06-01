@@ -610,7 +610,263 @@ static void print_annotated_log_text(const char *text)
     }
 }
 
-static void pc_mesh_log_frame_details(const char *prefix, const struct mesh_frame_view *view)
+static size_t pc_log_prefix_width(const char *prefix)
+{
+    size_t width = 0u;
+    const unsigned char *p = (const unsigned char *)prefix;
+
+    if (p == NULL) {
+        return 0u;
+    }
+
+    while (*p != '\0') {
+        if ((*p & 0xc0u) != 0x80u) {
+            ++width;
+        }
+        ++p;
+    }
+    return width + 1u;
+}
+
+static void pc_log_detail_indent(size_t width)
+{
+    size_t i;
+
+    for (i = 0u; i < width; ++i) {
+        putchar(' ');
+    }
+}
+
+static void pc_mini9p_log_frame_details(size_t indent_width, const struct mesh_frame_view *view)
+{
+    struct m9p_frame_view frame;
+
+    if (view == NULL || view->type != MESH_TYPE_MINI9P) {
+        return;
+    }
+
+    if (!m9p_decode_frame(view->payload, view->payload_len, &frame)) {
+        pc_log_detail_indent(indent_width);
+        printf("mini9p decode failed payload=%u\n", view->payload_len);
+        return;
+    }
+
+    switch (frame.type) {
+    case M9P_TATTACH: {
+        struct m9p_attach_request request;
+
+        if (m9p_parse_tattach(&frame, &request)) {
+            pc_log_detail_indent(indent_width);
+            printf(
+                "mini9p %s tag=%u fid=%u msize=%u inflight=%u flags=0x%02x\n",
+                mini9p_type_name(frame.type),
+                frame.tag,
+                request.fid,
+                request.requested_msize,
+                request.requested_inflight,
+                request.attach_flags);
+        }
+        break;
+    }
+    case M9P_RATTACH: {
+        struct m9p_attach_result result;
+
+        if (m9p_parse_rattach(&frame, &result)) {
+            pc_log_detail_indent(indent_width);
+            printf(
+                "mini9p %s tag=%u msize=%u max_fids=%u inflight=%u features=0x%08lx root_qid=0x%08lx\n",
+                mini9p_type_name(frame.type),
+                frame.tag,
+                result.negotiated_msize,
+                result.max_fids,
+                result.max_inflight,
+                (unsigned long)result.feature_bits,
+                (unsigned long)result.root_qid.object_id);
+        }
+        break;
+    }
+    case M9P_TWALK: {
+        struct m9p_walk_request request;
+
+        if (m9p_parse_twalk(&frame, &request)) {
+            pc_log_detail_indent(indent_width);
+            printf(
+                "mini9p %s tag=%u fid=%u newfid=%u path=%s\n",
+                mini9p_type_name(frame.type),
+                frame.tag,
+                request.fid,
+                request.newfid,
+                request.path);
+        }
+        break;
+    }
+    case M9P_RWALK: {
+        struct m9p_qid qid;
+
+        if (m9p_parse_rwalk(&frame, &qid)) {
+            pc_log_detail_indent(indent_width);
+            printf(
+                "mini9p %s tag=%u qid_type=0x%02x qid=0x%08lx\n",
+                mini9p_type_name(frame.type),
+                frame.tag,
+                qid.type,
+                (unsigned long)qid.object_id);
+        }
+        break;
+    }
+    case M9P_TOPEN: {
+        struct m9p_open_request request;
+
+        if (m9p_parse_topen(&frame, &request)) {
+            pc_log_detail_indent(indent_width);
+            printf(
+                "mini9p %s tag=%u fid=%u mode=0x%02x\n",
+                mini9p_type_name(frame.type),
+                frame.tag,
+                request.fid,
+                request.mode);
+        }
+        break;
+    }
+    case M9P_ROPEN: {
+        struct m9p_open_result result;
+
+        if (m9p_parse_ropen(&frame, &result)) {
+            pc_log_detail_indent(indent_width);
+            printf(
+                "mini9p %s tag=%u qid_type=0x%02x qid=0x%08lx iounit=%u\n",
+                mini9p_type_name(frame.type),
+                frame.tag,
+                result.qid.type,
+                (unsigned long)result.qid.object_id,
+                result.iounit);
+        }
+        break;
+    }
+    case M9P_TREAD: {
+        struct m9p_read_request request;
+
+        if (m9p_parse_tread(&frame, &request)) {
+            pc_log_detail_indent(indent_width);
+            printf(
+                "mini9p %s tag=%u fid=%u offset=%lu count=%u\n",
+                mini9p_type_name(frame.type),
+                frame.tag,
+                request.fid,
+                (unsigned long)request.offset,
+                request.count);
+        }
+        break;
+    }
+    case M9P_RREAD: {
+        uint16_t count;
+
+        if (frame.payload_len >= 2u) {
+            count = (uint16_t)frame.payload[0] | (uint16_t)((uint16_t)frame.payload[1] << 8);
+            pc_log_detail_indent(indent_width);
+            printf(
+                "mini9p %s tag=%u count=%u\n",
+                mini9p_type_name(frame.type),
+                frame.tag,
+                count);
+        }
+        break;
+    }
+    case M9P_TWRITE: {
+        struct m9p_write_request request;
+
+        if (m9p_parse_twrite(&frame, &request)) {
+            pc_log_detail_indent(indent_width);
+            printf(
+                "mini9p %s tag=%u fid=%u offset=%lu count=%u\n",
+                mini9p_type_name(frame.type),
+                frame.tag,
+                request.fid,
+                (unsigned long)request.offset,
+                request.count);
+        }
+        break;
+    }
+    case M9P_RWRITE: {
+        uint16_t count = 0u;
+
+        if (m9p_parse_rwrite(&frame, &count)) {
+            pc_log_detail_indent(indent_width);
+            printf(
+                "mini9p %s tag=%u count=%u\n",
+                mini9p_type_name(frame.type),
+                frame.tag,
+                count);
+        }
+        break;
+    }
+    case M9P_TSTAT: {
+        uint16_t fid = 0u;
+
+        if (m9p_parse_tstat(&frame, &fid)) {
+            pc_log_detail_indent(indent_width);
+            printf("mini9p %s tag=%u fid=%u\n", mini9p_type_name(frame.type), frame.tag, fid);
+        }
+        break;
+    }
+    case M9P_RSTAT: {
+        struct m9p_stat stat;
+
+        if (m9p_parse_rstat(&frame, &stat)) {
+            pc_log_detail_indent(indent_width);
+            printf(
+                "mini9p %s tag=%u name=%s size=%lu flags=0x%02x\n",
+                mini9p_type_name(frame.type),
+                frame.tag,
+                stat.name,
+                (unsigned long)stat.size,
+                stat.flags);
+        }
+        break;
+    }
+    case M9P_TCLUNK: {
+        uint16_t fid = 0u;
+
+        if (m9p_parse_tclunk(&frame, &fid)) {
+            pc_log_detail_indent(indent_width);
+            printf("mini9p %s tag=%u fid=%u\n", mini9p_type_name(frame.type), frame.tag, fid);
+        }
+        break;
+    }
+    case M9P_RCLUNK:
+        pc_log_detail_indent(indent_width);
+        printf("mini9p %s tag=%u\n", mini9p_type_name(frame.type), frame.tag);
+        break;
+    case M9P_RERROR: {
+        struct m9p_error error;
+
+        if (m9p_parse_rerror(&frame, &error)) {
+            pc_log_detail_indent(indent_width);
+            printf(
+                "mini9p %s tag=%u code=%u (%s) msg=%s\n",
+                mini9p_type_name(frame.type),
+                frame.tag,
+                error.code,
+                m9p_error_name(error.code),
+                error.msg);
+        }
+        break;
+    }
+    default:
+        pc_log_detail_indent(indent_width);
+        printf(
+            "mini9p %s tag=%u payload=%u\n",
+            mini9p_type_name(frame.type),
+            frame.tag,
+            frame.payload_len);
+        break;
+    }
+}
+
+static void pc_mesh_log_frame_details_ex(
+    const char *prefix,
+    const struct mesh_frame_view *view,
+    const char *suffix)
 {
     struct mesh_link_state_payload link_state;
     struct mesh_route_update_payload route_update;
@@ -619,20 +875,33 @@ static void pc_mesh_log_frame_details(const char *prefix, const struct mesh_fram
         return;
     }
 
+    printf("%s %s src=0x%02x dst=0x%02x seq=%u payload=%u",
+           prefix,
+           mesh_type_name(view->type),
+           view->src,
+           view->dst,
+           view->seq,
+           view->payload_len);
+    if (suffix != NULL) {
+        printf(" %s", suffix);
+    }
+    putchar('\n');
+
     switch (view->type) {
+    case MESH_TYPE_MINI9P:
+        pc_mini9p_log_frame_details(pc_log_prefix_width(prefix), view);
+        break;
     case MESH_TYPE_LINK_STATE:
         if (mesh_parse_link_state(view, &link_state)) {
-            printf("%s LINK_STATE neighbor=0x%02x link_up=%u quality=%u\n",
-                   prefix,
-                   link_state.neighbor,
-                   link_state.link_up,
-                   link_state.quality);
+            pc_log_detail_indent(pc_log_prefix_width(prefix));
+            printf("LINK_STATE neighbor=0x%02x link_up=%u quality=%u\n",
+                   link_state.neighbor, link_state.link_up, link_state.quality);
         }
         break;
     case MESH_TYPE_ROUTE_UPDATE:
         if (mesh_parse_route_update(view, &route_update)) {
-            printf("%s ROUTE_UPDATE dst=0x%02x next_hop=0x%02x metric=%u version=%u action=%u\n",
-                   prefix,
+            pc_log_detail_indent(pc_log_prefix_width(prefix));
+            printf("ROUTE_UPDATE dst=0x%02x next_hop=0x%02x metric=%u version=%u action=%u\n",
                    route_update.dst,
                    route_update.next_hop,
                    route_update.metric,
@@ -641,14 +910,21 @@ static void pc_mesh_log_frame_details(const char *prefix, const struct mesh_fram
         }
         break;
     case MESH_TYPE_NEIGHBOR_PROBE_REQUEST:
-        printf("%s NEIGHBOR_PROBE_REQUEST\n", prefix);
+        pc_log_detail_indent(pc_log_prefix_width(prefix));
+        printf("NEIGHBOR_PROBE_REQUEST\n");
         break;
     case MESH_TYPE_NEIGHBOR_PROBE_RESPONSE:
-        printf("%s NEIGHBOR_PROBE_RESPONSE\n", prefix);
+        pc_log_detail_indent(pc_log_prefix_width(prefix));
+        printf("NEIGHBOR_PROBE_RESPONSE\n");
         break;
     default:
         break;
     }
+}
+
+static void pc_mesh_log_frame_details(const char *prefix, const struct mesh_frame_view *view)
+{
+    pc_mesh_log_frame_details_ex(prefix, view, NULL);
 }
 
 /**
@@ -672,15 +948,13 @@ static int pc_mesh_send_frame(void *transport_ctx, uint8_t next_hop, const uint8
         return -(int)MESH_ERR_INVALID_STATE;
     }
 
-    printf("[PC→mesh] next_hop=0x%02x %zu bytes\n", next_hop, tx_len);
     if (mesh_decode_frame(tx_data, tx_len, &view)) {
-        printf("[PC→mesh] %s src=0x%02x dst=0x%02x seq=%u payload=%u\n",
-               mesh_type_name(view.type),
-               view.src,
-               view.dst,
-               view.seq,
-               view.payload_len);
-        pc_mesh_log_frame_details("[PC→mesh]", &view);
+        char suffix[48];
+
+        (void)snprintf(suffix, sizeof(suffix), "next_hop=0x%02x bytes=%zu", next_hop, tx_len);
+        pc_mesh_log_frame_details_ex("[PC→mesh]", &view, suffix);
+    } else {
+        printf("[PC→mesh] next_hop=0x%02x bytes=%zu decode=failed\n", next_hop, tx_len);
     }
     return write_all(transport->fd, tx_data, tx_len);
 }
@@ -990,13 +1264,7 @@ static int pc_mesh_receive_frame(
         return 0;
     }
 
-    printf("[mesh→PC] %s src=0x%02x dst=0x%02x seq=%u payload=%u\n",
-           mesh_type_name(view.type),
-           view.src,
-           view.dst,
-           view.seq,
-           view.payload_len);
-    pc_mesh_log_frame_details("[mesh→PC]", &view);
+        pc_mesh_log_frame_details("[mesh→PC]", &view);
 
     if (view.type == MESH_TYPE_REGISTER &&
         view.src == MESH_ADDR_UNASSIGNED &&
