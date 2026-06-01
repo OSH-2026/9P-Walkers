@@ -156,12 +156,21 @@ static size_t find_tx_frame_type(const struct fake_transport *transport, uint8_t
 
 static void init_runtime(
     struct mesh_node_runtime *runtime,
-    struct fake_transport *transport,
+    struct fake_transport *transports,
+    const uint8_t *port_ids,
+    size_t port_count,
+    struct fake_transport *wifi_transport,
+    bool wifi_supported,
     struct fake_server_ctx *server_ctx,
     const uint8_t uid[MESH_UID_LEN],
     bool auto_register_on_init)
 {
     struct mesh_node_runtime_config config;
+    struct mesh_node_runtime_port_config port_configs[MESH_NODE_RUNTIME_MAX_PORTS];
+    struct mesh_wifi_config wifi_config;
+    size_t i;
+
+    assert(port_count <= MESH_NODE_RUNTIME_MAX_UART_PORTS);
 
     mesh_node_runtime_get_default_config(&config);
     config.send_frame = fake_send_frame;
@@ -174,30 +183,43 @@ static void init_runtime(
     memcpy(config.local_uid, uid, MESH_UID_LEN);
     config.boot_nonce = 0x12345678u;
     config.capability_bits = 0x0001u;
-    config.port_bitmap = 0x02u;
-    config.bootstrap_next_hop = 0x31u;
+    config.port_bitmap = 0u;
     config.auto_register_on_init = auto_register_on_init;
 
-    assert(mesh_node_runtime_init(runtime, &config) == 0);
+    if (wifi_supported) {
+        assert(wifi_transport != NULL);
+        wifi_config.send_frame = fake_wifi_send_frame;
+        wifi_config.receive_frame = fake_wifi_receive_frame;
+        wifi_config.io_ctx = wifi_transport;
+        config.wifi_config = &wifi_config;
+    }
+
+    assert(mesh_node_runtime_init(runtime, &config, port_count, wifi_supported) == 0);
 }
 
-static void test_auto_register_on_init_sends_uid_to_current_link(void)
+static void test_auto_register_on_init_sends_uid_to_every_bound_port(void)
 {
     struct mesh_node_runtime runtime;
-    struct fake_transport transport;
+    struct fake_transport transports[2];
     struct fake_server_ctx server_ctx;
     struct mesh_frame_view view;
     struct mesh_register_payload payload;
     const uint8_t uid[MESH_UID_LEN] = {0x11u, 0x22u, 0x33u, 0x44u, 0x55u, 0x66u, 0x77u, 0x88u};
+    const uint8_t port_ids[2] = {0u, 1u};
+    size_t i;
 
     memset(&server_ctx, 0, sizeof(server_ctx));
-    fake_transport_reset(&transport);
+    for (i = 0u; i < 2u; ++i) {
+        fake_transport_reset(&transports[i]);
+    }
 
-    init_runtime(&runtime, &transport, &server_ctx, uid, true);
+    init_runtime(&runtime, transports, port_ids, 2u, NULL, false, &server_ctx, uid, true);
 
-    assert(transport.tx_count == 1u);
-    assert(transport.tx_next_hop[0] == 0x31u);
-    assert(mesh_decode_frame(transport.tx_queue[0].data, transport.tx_queue[0].len, &view));
+    assert(transports[0].tx_count == 1u);
+    assert(transports[1].tx_count == 1u);
+    assert(transports[0].tx_next_hop[0] == 0u);
+    assert(transports[1].tx_next_hop[0] == 1u);
+    assert(mesh_decode_frame(transports[1].tx_queue[0].data, transports[1].tx_queue[0].len, &view));
     assert(view.type == MESH_TYPE_REGISTER);
     assert(view.src == MESH_ADDR_UNASSIGNED);
     assert(view.dst == MESH_ADDR_UNASSIGNED);
@@ -205,7 +227,7 @@ static void test_auto_register_on_init_sends_uid_to_current_link(void)
     assert(memcmp(payload.uid, uid, sizeof(uid)) == 0);
     assert(payload.boot_nonce == 0x12345678u);
     assert(payload.capability_bits == 0x0001u);
-    assert(payload.port_bitmap == 0x02u);
+    assert(payload.port_bitmap == 0x03u);
 
     mesh_node_runtime_deinit(&runtime);
 }
@@ -213,9 +235,10 @@ static void test_auto_register_on_init_sends_uid_to_current_link(void)
 static void test_assign_updates_local_addr_and_allows_server_reply(void)
 {
     struct mesh_node_runtime runtime;
-    struct fake_transport transport;
+    struct fake_transport transports[1];
     struct fake_server_ctx server_ctx;
     struct mesh_assign_payload assign_payload;
+    struct mesh_link_state_payload link_payload;
     struct mesh_frame_view view;
     struct m9p_frame_view mini9p_view;
     uint8_t assign_frame[160];
@@ -231,11 +254,12 @@ static void test_assign_updates_local_addr_and_allows_server_reply(void)
     size_t mini9p_tx_index;
     size_t tx_count_before_request;
     const uint8_t uid[MESH_UID_LEN] = {0xA1u, 0xA2u, 0xA3u, 0xA4u, 0xA5u, 0xA6u, 0xA7u, 0xA8u};
+    const uint8_t port_ids[1] = {1u};
 
     memset(&server_ctx, 0, sizeof(server_ctx));
-    fake_transport_reset(&transport);
+    fake_transport_reset(&transports[0]);
 
-    init_runtime(&runtime, &transport, &server_ctx, uid, false);
+    init_runtime(&runtime, transports, port_ids, 1u, NULL, false, &server_ctx, uid, false);
 
     memset(&assign_payload, 0, sizeof(assign_payload));
     memcpy(assign_payload.uid, uid, sizeof(uid));
@@ -319,18 +343,19 @@ static void test_assign_updates_local_addr_and_allows_server_reply(void)
 static void test_assign_with_foreign_uid_is_ignored(void)
 {
     struct mesh_node_runtime runtime;
-    struct fake_transport transport;
+    struct fake_transport transports[1];
     struct fake_server_ctx server_ctx;
     struct mesh_assign_payload assign_payload;
     uint8_t assign_frame[160];
     size_t assign_len = 0u;
     const uint8_t local_uid[MESH_UID_LEN] = {0xB1u, 0xB2u, 0xB3u, 0xB4u, 0xB5u, 0xB6u, 0xB7u, 0xB8u};
     const uint8_t foreign_uid[MESH_UID_LEN] = {0xC1u, 0xC2u, 0xC3u, 0xC4u, 0xC5u, 0xC6u, 0xC7u, 0xC8u};
+    const uint8_t port_ids[1] = {0u};
 
     memset(&server_ctx, 0, sizeof(server_ctx));
-    fake_transport_reset(&transport);
+    fake_transport_reset(&transports[0]);
 
-    init_runtime(&runtime, &transport, &server_ctx, local_uid, false);
+    init_runtime(&runtime, transports, port_ids, 1u, NULL, false, &server_ctx, local_uid, false);
 
     memset(&assign_payload, 0, sizeof(assign_payload));
     memcpy(assign_payload.uid, foreign_uid, sizeof(foreign_uid));
@@ -348,7 +373,7 @@ static void test_assign_with_foreign_uid_is_ignored(void)
         assign_frame,
         sizeof(assign_frame),
         &assign_len));
-    fake_transport_queue_rx(&transport, assign_frame, assign_len);
+    fake_transport_queue_rx(&transports[0], assign_frame, assign_len);
 
     assert(mesh_node_runtime_poll_once(&runtime) == 0);
     assert(runtime.cluster.config.local_addr == MESH_ADDR_UNASSIGNED);
@@ -424,7 +449,7 @@ static void test_neighbor_probe_request_learns_parent_and_reports_link(void)
 
 int main(void)
 {
-    test_auto_register_on_init_sends_uid_to_current_link();
+    test_auto_register_on_init_sends_uid_to_every_bound_port();
     test_assign_updates_local_addr_and_allows_server_reply();
     test_assign_with_foreign_uid_is_ignored();
     test_neighbor_probe_request_learns_parent_and_reports_link();

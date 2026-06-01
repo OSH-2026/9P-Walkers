@@ -27,9 +27,21 @@ static void clear_nodes(struct cluster *cluster)
 
     for (i = 0u; i < CLUSTER_MAX_NODES; ++i) {
         cluster->nodes[i].addr = CLUSTER_INVALID_ADDR;
+        cluster->nodes[i].capability_bits = 0u;
+        cluster->nodes[i].port_bitmap = 0u;
         cluster->nodes[i].online = false;
+        cluster->nodes[i].wifi_supported = false;
         cluster->nodes[i].valid = false;
     }
+}
+
+static uint8_t cluster_normalize_port_bitmap(uint8_t port_bitmap, bool wifi_supported)
+{
+    if (wifi_supported) {
+        return (uint8_t)(port_bitmap | CLUSTER_PORT_WIFI_MASK);
+    }
+
+    return (uint8_t)(port_bitmap & (uint8_t)~CLUSTER_PORT_WIFI_MASK);
 }
 
 static void clear_routes(struct cluster *cluster)
@@ -41,6 +53,7 @@ static void clear_routes(struct cluster *cluster)
         cluster->routes[i].next_hop = CLUSTER_INVALID_ADDR;
         cluster->routes[i].metric = 0u;
         cluster->routes[i].local = false;
+        cluster->routes[i].selector_is_port = false;
         cluster->routes[i].valid = false;
     }
 }
@@ -53,6 +66,8 @@ static void clear_links(struct cluster *cluster)
         cluster->links[i].from = CLUSTER_INVALID_ADDR;
         cluster->links[i].to = CLUSTER_INVALID_ADDR;
         cluster->links[i].metric = 0u;
+        cluster->links[i].from_port = CLUSTER_PORT_INVALID;
+        cluster->links[i].to_port = CLUSTER_PORT_INVALID;
         cluster->links[i].bidirectional = false;
         cluster->links[i].valid = false;
     }
@@ -88,7 +103,10 @@ static struct cluster_node *ensure_node(struct cluster *cluster, uint8_t addr)
         if (!cluster->nodes[i].valid) {
             cluster->nodes[i].valid = true;
             cluster->nodes[i].addr = addr;
+            cluster->nodes[i].capability_bits = 0u;
+            cluster->nodes[i].port_bitmap = 0u;
             cluster->nodes[i].online = false;
+            cluster->nodes[i].wifi_supported = false;
             return &cluster->nodes[i];
         }
     }
@@ -129,6 +147,7 @@ static struct cluster_route *ensure_route(struct cluster *cluster, uint8_t dst)
             cluster->routes[i].next_hop = dst;
             cluster->routes[i].metric = 1u;
             cluster->routes[i].local = false;
+            cluster->routes[i].selector_is_port = false;
             return &cluster->routes[i];
         }
     }
@@ -156,7 +175,14 @@ static struct cluster_link *find_link(struct cluster *cluster, uint8_t from, uin
     return NULL;
 }
 
-static struct cluster_link *ensure_link(struct cluster *cluster, uint8_t from, uint8_t to, uint8_t metric, bool bidirectional)
+static struct cluster_link *ensure_link(
+    struct cluster *cluster,
+    uint8_t from,
+    uint8_t to,
+    uint8_t metric,
+    bool bidirectional,
+    uint8_t from_port,
+    uint8_t to_port)
 {
     size_t i;
     struct cluster_link *link;
@@ -164,6 +190,8 @@ static struct cluster_link *ensure_link(struct cluster *cluster, uint8_t from, u
     link = find_link(cluster, from, to, bidirectional);
     if (link != NULL) {
         link->metric = metric;
+        link->from_port = from_port;
+        link->to_port = to_port;
         return link;
     }
 
@@ -173,6 +201,8 @@ static struct cluster_link *ensure_link(struct cluster *cluster, uint8_t from, u
             cluster->links[i].from = from;
             cluster->links[i].to = to;
             cluster->links[i].metric = (metric == 0u) ? 1u : metric;
+            cluster->links[i].from_port = from_port;
+            cluster->links[i].to_port = to_port;
             cluster->links[i].bidirectional = bidirectional;
             return &cluster->links[i];
         }
@@ -210,6 +240,31 @@ static int remove_link_by_key(struct cluster *cluster, uint8_t from, uint8_t to,
     return 0;
 }
 
+static int cluster_update_register_metadata(
+    struct cluster *cluster,
+    uint8_t addr,
+    const struct mesh_register_payload *payload)
+{
+    struct cluster_node *node;
+
+    if (cluster == NULL || payload == NULL) {
+        return -(int)MESH_ERR_BAD_FRAME;
+    }
+    if (addr == CLUSTER_INVALID_ADDR) {
+        return 0;
+    }
+
+    node = ensure_node(cluster, addr);
+    if (node == NULL) {
+        return -(int)MESH_ERR_BUSY;
+    }
+
+    node->capability_bits = payload->capability_bits;
+    node->port_bitmap = cluster_normalize_port_bitmap(payload->port_bitmap, payload->wifi_supported);
+    node->wifi_supported = payload->wifi_supported;
+    return 0;
+}
+
 static void remove_routes_using_addr(struct cluster *cluster, uint8_t addr)
 {
     size_t i;
@@ -222,12 +277,148 @@ static void remove_routes_using_addr(struct cluster *cluster, uint8_t addr)
         if (!cluster->routes[i].valid) {
             continue;
         }
-        if (cluster->routes[i].dst == addr || cluster->routes[i].next_hop == addr) {
+        if (cluster->routes[i].dst == addr ||
+            (!cluster->routes[i].selector_is_port && cluster->routes[i].next_hop == addr)) {
             memset(&cluster->routes[i], 0, sizeof(cluster->routes[i]));
             cluster->routes[i].dst = CLUSTER_INVALID_ADDR;
             cluster->routes[i].next_hop = CLUSTER_INVALID_ADDR;
         }
     }
+}
+
+static bool cluster_link_step_from(
+    const struct cluster_link *link,
+    uint8_t current_addr,
+    uint8_t *out_next_addr,
+    uint8_t *out_egress_port)
+{
+    if (link == NULL || out_next_addr == NULL || out_egress_port == NULL) {
+        return false;
+    }
+
+    if (link->from == current_addr) {
+        *out_next_addr = link->to;
+        *out_egress_port = link->from_port;
+        return true;
+    }
+    if (link->bidirectional && link->to == current_addr) {
+        *out_next_addr = link->from;
+        *out_egress_port = link->to_port;
+        return true;
+    }
+
+    return false;
+}
+
+static int cluster_compute_paths_from_source(
+    struct cluster *cluster,
+    uint8_t source_addr,
+    uint8_t node_addrs[CLUSTER_MAX_NODES],
+    size_t *out_node_count,
+    uint8_t dist[CLUSTER_MAX_NODES],
+    uint8_t first_hop[CLUSTER_MAX_NODES],
+    uint8_t first_port[CLUSTER_MAX_NODES])
+{
+    bool visited[CLUSTER_MAX_NODES];
+    size_t node_count = 0u;
+    size_t i;
+    size_t j;
+
+    if (cluster == NULL || out_node_count == NULL || dist == NULL ||
+        first_hop == NULL || first_port == NULL) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+    if (!cluster->initialized) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    if (ensure_node(cluster, source_addr) == NULL) {
+        return -(int)MESH_ERR_BUSY;
+    }
+
+    for (i = 0u; i < CLUSTER_MAX_NODES; ++i) {
+        if (cluster->nodes[i].valid) {
+            node_addrs[node_count++] = cluster->nodes[i].addr;
+        }
+    }
+
+    for (i = 0u; i < node_count; ++i) {
+        dist[i] = CLUSTER_INF_COST;
+        first_hop[i] = CLUSTER_INVALID_ADDR;
+        first_port[i] = CLUSTER_PORT_INVALID;
+        visited[i] = false;
+    }
+
+    for (i = 0u; i < node_count; ++i) {
+        if (node_addrs[i] == source_addr) {
+            dist[i] = 0u;
+            first_hop[i] = source_addr;
+            break;
+        }
+    }
+
+    for (i = 0u; i < node_count; ++i) {
+        size_t u_index = node_count;
+        uint8_t best_dist = CLUSTER_INF_COST;
+
+        for (j = 0u; j < node_count; ++j) {
+            if (!visited[j] && dist[j] < best_dist) {
+                best_dist = dist[j];
+                u_index = j;
+            }
+        }
+
+        if (u_index == node_count) {
+            break;
+        }
+
+        visited[u_index] = true;
+
+        for (j = 0u; j < CLUSTER_MAX_LINKS; ++j) {
+            struct cluster_link *link;
+            size_t v_index = node_count;
+            uint8_t u_addr;
+            uint8_t v_addr = CLUSTER_INVALID_ADDR;
+            uint8_t edge_port = CLUSTER_PORT_INVALID;
+            uint8_t cost;
+            uint8_t candidate;
+
+            if (!cluster->links[j].valid) {
+                continue;
+            }
+
+            link = &cluster->links[j];
+            u_addr = node_addrs[u_index];
+            cost = (link->metric == 0u) ? 1u : link->metric;
+            if (!cluster_link_step_from(link, u_addr, &v_addr, &edge_port)) {
+                continue;
+            }
+
+            for (v_index = 0u; v_index < node_count; ++v_index) {
+                if (node_addrs[v_index] == v_addr) {
+                    break;
+                }
+            }
+            if (v_index == node_count || visited[v_index]) {
+                continue;
+            }
+
+            candidate = (uint8_t)(dist[u_index] + cost);
+            if (candidate < dist[v_index]) {
+                dist[v_index] = candidate;
+                if (u_addr == source_addr) {
+                    first_hop[v_index] = v_addr;
+                    first_port[v_index] = edge_port;
+                } else {
+                    first_hop[v_index] = first_hop[u_index];
+                    first_port[v_index] = first_port[u_index];
+                }
+            }
+        }
+    }
+
+    *out_node_count = node_count;
+    return 0;
 }
 
 static void remove_links_using_addr(struct cluster *cluster, uint8_t addr)
@@ -255,10 +446,10 @@ static int cluster_rebuild_routes_from_topology(struct cluster *cluster)
     uint8_t node_addrs[CLUSTER_MAX_NODES];
     uint8_t dist[CLUSTER_MAX_NODES];
     uint8_t first_hop[CLUSTER_MAX_NODES];
-    bool visited[CLUSTER_MAX_NODES];
+    uint8_t first_port[CLUSTER_MAX_NODES];
     size_t node_count = 0u;
     size_t i;
-    size_t j;
+    int rc;
 
     if (cluster == NULL || !cluster->initialized) {
         return -(int)MESH_ERR_INVALID_STATE;
@@ -270,102 +461,16 @@ static int cluster_rebuild_routes_from_topology(struct cluster *cluster)
 
     clear_routes(cluster);
 
-    /* 收集所有出现过的节点地址。 */
-    if (ensure_node(cluster, cluster->config.local_addr) == NULL) {
-        return -(int)MESH_ERR_BUSY;
-    }
-    for (i = 0u; i < CLUSTER_MAX_NODES; ++i) {
-        if (cluster->nodes[i].valid) {
-            node_addrs[node_count++] = cluster->nodes[i].addr;
-        }
-    }
-
-    for (i = 0u; i < node_count; ++i) {
-        dist[i] = CLUSTER_INF_COST;
-        first_hop[i] = CLUSTER_INVALID_ADDR;
-        visited[i] = false;
-    }
-
-    /* 本机到本机的距离为 0。 */
-    for (i = 0u; i < node_count; ++i) {
-        if (node_addrs[i] == cluster->config.local_addr) {
-            dist[i] = 0u;
-            first_hop[i] = cluster->config.local_addr;
-            break;
-        }
-    }
-
-    /*
-     * 简化版 Dijkstra：
-     * - 节点数量很小（<= 16），使用数组扫描就足够。
-     * - metric 越小越优先。
-     */
-    for (i = 0u; i < node_count; ++i) {
-        size_t u_index = node_count;
-        uint8_t best_dist = CLUSTER_INF_COST;
-
-        for (j = 0u; j < node_count; ++j) {
-            if (!visited[j] && dist[j] < best_dist) {
-                best_dist = dist[j];
-                u_index = j;
-            }
-        }
-
-        if (u_index == node_count) {
-            break;
-        }
-
-        visited[u_index] = true;
-
-        for (j = 0u; j < CLUSTER_MAX_LINKS; ++j) {
-            struct cluster_link *link;
-            size_t v_index = node_count;
-            uint8_t u_addr;
-            uint8_t v_addr;
-            uint8_t cost;
-            uint8_t candidate;
-
-            if (!cluster->links[j].valid) {
-                continue;
-            }
-
-            link = &cluster->links[j];
-            u_addr = node_addrs[u_index];
-            v_addr = CLUSTER_INVALID_ADDR;
-            cost = (link->metric == 0u) ? 1u : link->metric;
-
-            if (link->from == u_addr) {
-                v_addr = link->to;
-            } else if (link->bidirectional && link->to == u_addr) {
-                v_addr = link->from;
-            }
-
-            if (v_addr == CLUSTER_INVALID_ADDR) {
-                continue;
-            }
-
-            for (v_index = 0u; v_index < node_count; ++v_index) {
-                if (node_addrs[v_index] == v_addr) {
-                    break;
-                }
-            }
-            if (v_index == node_count) {
-                continue;
-            }
-            if (visited[v_index]) {
-                continue;
-            }
-
-            candidate = (uint8_t)(dist[u_index] + cost);
-            if (candidate < dist[v_index]) {
-                dist[v_index] = candidate;
-                if (u_addr == cluster->config.local_addr) {
-                    first_hop[v_index] = v_addr;
-                } else {
-                    first_hop[v_index] = first_hop[u_index];
-                }
-            }
-        }
+    rc = cluster_compute_paths_from_source(
+        cluster,
+        cluster->config.local_addr,
+        node_addrs,
+        &node_count,
+        dist,
+        first_hop,
+        first_port);
+    if (rc != 0) {
+        return rc;
     }
 
     /* 将最短路结果写回 routes 表。 */
@@ -394,6 +499,7 @@ static int cluster_rebuild_routes_from_topology(struct cluster *cluster)
         route->next_hop = first_hop[i];
         route->metric = dist[i];
         route->local = false;
+        route->selector_is_port = false;
     }
 
     cluster->routes_dirty = false;
@@ -556,6 +662,7 @@ void cluster_get_default_config(struct cluster_config *out_config)
 
     out_config->local_addr = CLUSTER_INVALID_ADDR;
     out_config->mode = CLUSTER_MODE_DIRECT_TABLE;
+    out_config->direct_routes_use_port_selectors = false;
 }
 
 /*
@@ -670,10 +777,14 @@ int cluster_get_node_online(struct cluster *cluster, uint8_t addr, bool *out_onl
 int cluster_add_route(struct cluster *cluster, uint8_t dst, uint8_t next_hop, uint8_t metric)
 {
     struct cluster_route *route;
+    bool selector_is_port;
 
     if (cluster == NULL || !cluster->initialized) {
         return -(int)MESH_ERR_INVALID_STATE;
     }
+
+    selector_is_port = cluster->config.mode == CLUSTER_MODE_DIRECT_TABLE &&
+                       cluster->config.direct_routes_use_port_selectors;
 
     route = ensure_route(cluster, dst);
     if (route == NULL) {
@@ -684,9 +795,12 @@ int cluster_add_route(struct cluster *cluster, uint8_t dst, uint8_t next_hop, ui
     route->next_hop = next_hop;
     route->metric = (metric == 0u) ? 1u : metric;
     route->local = (dst == cluster->config.local_addr);
+    route->selector_is_port = selector_is_port;
     route->valid = true;
     ensure_node(cluster, dst);
-    ensure_node(cluster, next_hop);
+    if (!selector_is_port) {
+        ensure_node(cluster, next_hop);
+    }
     return 0;
 }
 
@@ -707,13 +821,32 @@ int cluster_remove_route(struct cluster *cluster, uint8_t dst)
  */
 int cluster_add_link(struct cluster *cluster, uint8_t from, uint8_t to, uint8_t metric, bool bidirectional)
 {
+    return cluster_add_link_with_ports(
+        cluster,
+        from,
+        to,
+        metric,
+        bidirectional,
+        CLUSTER_PORT_INVALID,
+        CLUSTER_PORT_INVALID);
+}
+
+int cluster_add_link_with_ports(
+    struct cluster *cluster,
+    uint8_t from,
+    uint8_t to,
+    uint8_t metric,
+    bool bidirectional,
+    uint8_t from_port,
+    uint8_t to_port)
+{
     struct cluster_link *link;
 
     if (cluster == NULL || !cluster->initialized) {
         return -(int)MESH_ERR_INVALID_STATE;
     }
 
-    link = ensure_link(cluster, from, to, metric, bidirectional);
+    link = ensure_link(cluster, from, to, metric, bidirectional, from_port, to_port);
     if (link == NULL) {
         return -(int)MESH_ERR_BUSY;
     }
@@ -850,6 +983,103 @@ int cluster_can_reach(struct cluster *cluster, uint8_t dst, bool *out_reachable)
     return rc;
 }
 
+int cluster_lookup_remote_egress_port(
+    struct cluster *cluster,
+    uint8_t source,
+    uint8_t dst,
+    uint8_t *out_egress_port,
+    bool *out_is_local)
+{
+    uint8_t node_addrs[CLUSTER_MAX_NODES];
+    uint8_t dist[CLUSTER_MAX_NODES];
+    uint8_t first_hop[CLUSTER_MAX_NODES];
+    uint8_t first_port[CLUSTER_MAX_NODES];
+    size_t node_count = 0u;
+    size_t i;
+    int rc;
+
+    if (cluster == NULL || out_egress_port == NULL || out_is_local == NULL) {
+        return -(int)MESH_ERR_BAD_FRAME;
+    }
+    if (!cluster->initialized || cluster->config.mode != CLUSTER_MODE_TOPOLOGY) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    rc = cluster_compute_paths_from_source(
+        cluster,
+        source,
+        node_addrs,
+        &node_count,
+        dist,
+        first_hop,
+        first_port);
+    if (rc != 0) {
+        return rc;
+    }
+
+    for (i = 0u; i < node_count; ++i) {
+        if (node_addrs[i] != dst) {
+            continue;
+        }
+
+        if (dst == source) {
+            *out_egress_port = CLUSTER_PORT_INVALID;
+            *out_is_local = true;
+            return 0;
+        }
+        if (dist[i] == CLUSTER_INF_COST || first_port[i] == CLUSTER_PORT_INVALID) {
+            return -(int)MESH_ERR_NO_ROUTE;
+        }
+
+        *out_egress_port = first_port[i];
+        *out_is_local = false;
+        return 0;
+    }
+
+    return -(int)MESH_ERR_NO_ROUTE;
+}
+
+int cluster_build_remote_route_update(
+    struct cluster *cluster,
+    uint8_t source,
+    uint8_t dst,
+    uint16_t route_version,
+    uint8_t action,
+    struct mesh_route_update_payload *out_payload)
+{
+    uint8_t egress_port = CLUSTER_PORT_INVALID;
+    bool is_local = false;
+    int rc;
+
+    if (cluster == NULL || out_payload == NULL) {
+        return -(int)MESH_ERR_BAD_FRAME;
+    }
+    if (action != MESH_ROUTE_SET && action != MESH_ROUTE_DELETE) {
+        return -(int)MESH_ERR_UNSUPPORTED_TYPE;
+    }
+
+    memset(out_payload, 0, sizeof(*out_payload));
+    out_payload->dst = dst;
+    out_payload->route_version = route_version;
+    out_payload->action = action;
+
+    if (action == MESH_ROUTE_DELETE) {
+        return 0;
+    }
+
+    rc = cluster_lookup_remote_egress_port(cluster, source, dst, &egress_port, &is_local);
+    if (rc != 0) {
+        return rc;
+    }
+    if (is_local) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    out_payload->next_hop = egress_port;
+    out_payload->metric = 1u;
+    return 0;
+}
+
 /*
  * ROUTE_UPDATE 落地入口。
  *
@@ -913,9 +1143,14 @@ int cluster_processor_control_handler(
     switch (frame->type) {
         case MESH_TYPE_REGISTER: {
             struct mesh_register_payload payload;
+            int rc;
 
             if (!mesh_parse_register(frame, &payload)) {
                 return -(int)MESH_ERR_BAD_FRAME;
+            }
+            rc = cluster_update_register_metadata(cluster, frame->src, &payload);
+            if (rc != 0) {
+                return rc;
             }
             return cluster_set_node_online(cluster, frame->src, true);
         }
@@ -963,7 +1198,14 @@ int cluster_processor_control_handler(
                 if (rc != 0) {
                     return rc;
                 }
-                return cluster_add_link(cluster, frame->src, payload.neighbor, payload.quality, false);
+                return cluster_add_link_with_ports(
+                    cluster,
+                    frame->src,
+                    payload.neighbor,
+                    payload.quality,
+                    false,
+                    payload.local_port,
+                    CLUSTER_PORT_INVALID);
             }
 
             return cluster_remove_link(cluster, frame->src, payload.neighbor, false);

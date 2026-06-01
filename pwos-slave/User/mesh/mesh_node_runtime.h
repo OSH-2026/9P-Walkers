@@ -17,8 +17,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../cluster/cluster.h"
-#include "../processer/mesh_processer.h"
+#include "../../../pwos-shared/mesh/cluster/cluster.h"
+#include "../../../pwos-shared/mesh/processer/mesh_processer.h"
+#include "../../../pwos-shared/mesh/wifi/mesh_wifi.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -127,7 +128,9 @@ void mesh_node_runtime_get_default_config(struct mesh_node_runtime_config *out_c
  */
 int mesh_node_runtime_init(
     struct mesh_node_runtime *runtime,
-    const struct mesh_node_runtime_config *config);
+    const struct mesh_node_runtime_config *config,
+     size_t port_count,
+     bool wifi_supported);
 
 /**
  * @brief 反初始化 runtime，并清空内部状态。

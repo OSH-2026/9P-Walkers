@@ -86,6 +86,18 @@ static void fake_mesh_io_reset(struct fake_mesh_io *io)
     memset(io, 0, sizeof(*io));
 }
 
+static void fake_mesh_io_clear_tx(struct fake_mesh_io *io)
+{
+    if (io == NULL) {
+        return;
+    }
+
+    memset(io->tx_frames, 0, sizeof(io->tx_frames));
+    memset(io->tx_lens, 0, sizeof(io->tx_lens));
+    memset(io->tx_next_hops, 0, sizeof(io->tx_next_hops));
+    io->tx_count = 0u;
+}
+
 static int fake_send_frame(
     void *transport_ctx,
     uint8_t next_hop,
@@ -192,10 +204,32 @@ static void build_register_frame(
     }
 }
 
-static void build_link_state_frame(
+static void build_register_frame_with_wifi(
+    uint8_t src,
+    const uint8_t uid[MESH_UID_LEN],
+    bool wifi_supported,
+    uint8_t port_bitmap,
+    uint8_t *out_frame,
+    size_t *out_len)
+{
+    struct mesh_register_payload payload;
+
+    memset(&payload, 0, sizeof(payload));
+    memcpy(payload.uid, uid, MESH_UID_LEN);
+    payload.boot_nonce = 0x11223344u;
+    payload.capability_bits = 0x0001u;
+    payload.port_bitmap = port_bitmap;
+    payload.wifi_supported = wifi_supported;
+    if (!mesh_build_register(src, 0x1000u, 6u, &payload, out_frame, TEST_FRAME_CAP, out_len)) {
+        failf("build_register_frame", "mesh_build_register failed");
+    }
+}
+
+static void build_link_state_frame_with_port(
     uint8_t src,
     uint8_t neighbor,
     uint8_t link_up,
+    uint8_t local_port,
     uint8_t *out_frame,
     size_t *out_len)
 {
@@ -205,6 +239,7 @@ static void build_link_state_frame(
     payload.neighbor = neighbor;
     payload.link_up = link_up;
     payload.quality = 1u;
+    payload.local_port = local_port;
     if (!mesh_build_link_state(src, 0x00u, 0x2000u, 6u, &payload, out_frame, TEST_FRAME_CAP, out_len)) {
         failf("build_link_state_frame", "mesh_build_link_state failed");
     }
@@ -371,6 +406,59 @@ static void process_register(struct mesh_host_runtime *runtime, uint8_t src, uin
     expect_int("process register", mesh_host_runtime_process_frame(runtime, frame, frame_len), 0);
 }
 
+static void process_register_with_metadata(
+    struct mesh_host_runtime *runtime,
+    uint8_t src,
+    uint8_t seed,
+    bool wifi_supported,
+    uint8_t port_bitmap)
+{
+    uint8_t uid[MESH_UID_LEN];
+    uint8_t frame[TEST_FRAME_CAP];
+    size_t frame_len = 0u;
+
+    fill_uid(uid, seed);
+    build_register_frame_with_wifi(
+        src,
+        uid,
+        wifi_supported,
+        port_bitmap,
+        frame,
+        &frame_len);
+    expect_int("process register", mesh_host_runtime_process_frame(runtime, frame, frame_len), 0);
+}
+
+static void process_register_with_wifi(
+    struct mesh_host_runtime *runtime,
+    uint8_t src,
+    uint8_t seed,
+    bool wifi_supported)
+{
+    process_register_with_metadata(
+        runtime,
+        src,
+        seed,
+        wifi_supported,
+        wifi_supported ? CLUSTER_PORT_WIFI_MASK : 0x01u);
+}
+
+static const struct cluster_node *find_cluster_node(const struct cluster *cluster, uint8_t addr)
+{
+    size_t i;
+
+    if (cluster == NULL) {
+        return NULL;
+    }
+
+    for (i = 0u; i < CLUSTER_MAX_NODES; ++i) {
+        if (cluster->nodes[i].valid && cluster->nodes[i].addr == addr) {
+            return &cluster->nodes[i];
+        }
+    }
+
+    return NULL;
+}
+
 /*
  * bootstrap REGISTER 的 src 仍是 0xFF，host 此时不能把节点暴露给上层 VFS。
  * ASSIGN 成功后由调用方显式注册 UID/addr，二次 REGISTER 不再是必要条件。
@@ -406,6 +494,51 @@ static void process_link_state(
 
     build_link_state_frame(src, neighbor, link_up, frame, &frame_len);
     expect_int("process link_state", mesh_host_runtime_process_frame(runtime, frame, frame_len), 0);
+}
+
+static void process_link_state_with_port(
+    struct mesh_host_runtime *runtime,
+    uint8_t src,
+    uint8_t neighbor,
+    uint8_t link_up,
+    uint8_t local_port)
+{
+    uint8_t frame[TEST_FRAME_CAP];
+    size_t frame_len = 0u;
+
+    build_link_state_frame_with_port(src, neighbor, link_up, local_port, frame, &frame_len);
+    expect_int("process link_state", mesh_host_runtime_process_frame(runtime, frame, frame_len), 0);
+}
+
+static void expect_route_update_present(
+    struct fake_mesh_io *io,
+    uint8_t mesh_dst,
+    uint8_t route_dst,
+    uint8_t route_next_hop)
+{
+    size_t i;
+
+    for (i = 0u; i < io->tx_count; ++i) {
+        struct mesh_frame_view frame;
+        struct mesh_route_update_payload payload;
+
+        if (!mesh_decode_frame(io->tx_frames[i], io->tx_lens[i], &frame)) {
+            continue;
+        }
+        if (frame.type != MESH_TYPE_ROUTE_UPDATE || frame.dst != mesh_dst) {
+            continue;
+        }
+        if (!mesh_parse_route_update(&frame, &payload)) {
+            continue;
+        }
+        if (payload.action == MESH_ROUTE_SET &&
+            payload.dst == route_dst &&
+            payload.next_hop == route_next_hop) {
+            return;
+        }
+    }
+
+    failf("expect_route_update_present", "matching ROUTE_UPDATE not found");
 }
 
 static void decode_last_tx(
@@ -589,6 +722,7 @@ static void test_link_state_to_host_enables_attach_over_mesh_client(void)
     init_runtime(&runtime, &io);
     process_register(&runtime, 0x11u, 0x20u);
     process_link_state(&runtime, 0x11u, 0x00u, 1u);
+    fake_mesh_io_clear_tx(&io);
 
     expect_int("direct reachable rc", cluster_can_reach(cluster_config_mesh_cluster(), 0x11u, &reachable), 0);
     expect_int("direct reachable", reachable, 1);
@@ -638,7 +772,8 @@ static void test_routed_read_path_uses_cluster_next_hop(void)
     process_register(&runtime, 0x11u, 0x30u);
     process_link_state(&runtime, 0x11u, 0x00u, 1u);
     process_register(&runtime, 0x22u, 0x40u);
-    process_link_state(&runtime, 0x11u, 0x22u, 1u);
+    process_link_state_with_port(&runtime, 0x11u, 0x22u, 1u, 1u);
+    fake_mesh_io_clear_tx(&io);
 
     expect_int("route reachable rc", cluster_can_reach(cluster_config_mesh_cluster(), 0x22u, &reachable), 0);
     expect_int("route reachable", reachable, 1);

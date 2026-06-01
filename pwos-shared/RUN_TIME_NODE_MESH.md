@@ -59,8 +59,8 @@ mesh_host_service_start_default_task();
 
 1. `mesh_node_mini9p_init()` 先初始化 `node_vfs` 和 `mini9p_server`，再把 server handler/context 注入 `mesh_node_service_init(config)`。
 2. `mesh_node_service_init(config)` 初始化端口数组里的 raw mesh UART transport，并装配一个共享的 `mesh_node_runtime`。
-3. `mesh_node_runtime` 在 init 成功后，立即通过所有已启用端口发送一帧 REGISTER。
-4. REGISTER 里会携带当前板子的稳定硬件 UID、固定能力位，以及从启用端口派生出的端口位图。
+3. `mesh_node_runtime` 在 init 成功后，会通过所有已启用端口各发送一帧 REGISTER；若板级启用了 Wi-Fi，也会额外通过保留的 Wi-Fi 特殊端口发送一帧 REGISTER。
+4. REGISTER 里会携带当前板子的稳定硬件 UID、固定能力位、该 runtime 汇总后的端口位图，以及 `wifi_supported` 标记；Wi-Fi 启用时，端口位图最高位保留给 Wi-Fi。
 
 当前 STM32 实现里，8 字节 UID 由 96-bit 硬件唯一编号压缩得到：
 

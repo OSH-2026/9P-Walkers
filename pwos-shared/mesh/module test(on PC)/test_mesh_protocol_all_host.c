@@ -270,6 +270,7 @@ static void test_register_roundtrip(void)
     in_payload.boot_nonce = 0x01020304u;
     in_payload.capability_bits = 0x2233u;
     in_payload.port_bitmap = 0x5Au;
+    in_payload.wifi_supported = true;
 
     assert(mesh_build_register(0x10u, 0x2001u, 6u, &in_payload, frame, sizeof(frame), &frame_len));
     assert(mesh_decode_frame(frame, frame_len, &view));
@@ -279,6 +280,7 @@ static void test_register_roundtrip(void)
     assert(out_payload.boot_nonce == in_payload.boot_nonce);
     assert(out_payload.capability_bits == in_payload.capability_bits);
     assert(out_payload.port_bitmap == in_payload.port_bitmap);
+    assert(out_payload.wifi_supported == in_payload.wifi_supported);
 }
 
 static void test_assign_roundtrip_and_invalid_name_len(void)
@@ -482,6 +484,7 @@ static void test_link_state_roundtrip(void)
     in_payload.neighbor = 0x55u;
     in_payload.link_up = 1u;
     in_payload.quality = 80u;
+    in_payload.local_port = 2u;
 
     assert(mesh_build_link_state(0x11u, 0x22u, 0x0909u, 3u, &in_payload, frame, sizeof(frame), &frame_len));
     assert(mesh_decode_frame(frame, frame_len, &view));
@@ -489,6 +492,7 @@ static void test_link_state_roundtrip(void)
     assert(out_payload.neighbor == in_payload.neighbor);
     assert(out_payload.link_up == in_payload.link_up);
     assert(out_payload.quality == in_payload.quality);
+    assert(out_payload.local_port == in_payload.local_port);
 }
 
 static void test_error_roundtrip(void)
