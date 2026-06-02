@@ -19,7 +19,7 @@ volatile bool is_inferencing = false;
 // 回调函数：模型生成完毕后触发
 void generation_done(float tokens_ps) {
     // 这里直接使用标准的 Serial.printf 即可
-    Serial0.printf("\n\n[推理完毕! 生成速度: %.2f tokens/秒]\n", tokens_ps);
+    Serial0.printf("\n\n[calculate finish! %.2f tokens/second]\n", tokens_ps);
     Serial0.println("-----------------------------------");
     
     // 清空用户在模型推理期间胡乱敲入的“垃圾字符”，防止意外触发下一次生成
@@ -27,7 +27,7 @@ void generation_done(float tokens_ps) {
         Serial0.read(); 
     }
 
-    Serial0.println("\n请输入新的故事开头 (Prompt):");
+    Serial0.println("\nplease enter the beginning of the story (Prompt):");
     Serial0.printf("\x04");
     // 解锁状态，允许 loop() 接收下一次输入
     is_inferencing = false; 
@@ -40,17 +40,17 @@ void setup() {
 
     Serial0.begin(115200);
     delay(2000);
-    Serial0.println("\n--- 启动 ESP32-S3 交互式本地大模型 ---");
+    Serial0.println("\n--- start ESP32-S3 interactive local large model ---");
 
     // 1. 挂载 SPIFFS 文件系统
     if (!SPIFFS.begin(true)) {
-        Serial0.println("SPIFFS 挂载失败！");
+        Serial0.println("SPIFFS Mount Failed!");
         return;
     }
 
     // 2. 检查模型文件是否存在
     if (!SPIFFS.exists("/stories260K.bin") || !SPIFFS.exists("/tok512.bin")) {
-        Serial0.println("错误：找不到模型文件！请检查是否执行了 Upload Filesystem Image。");
+        Serial0.println("Error: Model files not found! Please check if you have executed Upload Filesystem Image.");
         return;
     }
 
@@ -59,18 +59,18 @@ void setup() {
     char *tokenizer_path  = (char *)"/spiffs/tok512.bin";
     unsigned long long rng_seed = esp_random(); // 获取初始硬件随机种子
 
-    Serial0.println("正在加载 Transformer 模型权重 (stories260K.bin)...");
+    Serial0.println("Loading Transformer Model (stories260K.bin)...");
     build_transformer(&transformer, checkpoint_path);
-    
-    Serial0.println("正在加载分词器 (tok512.bin)...");
+
+    Serial0.println("Loading Tokenizer (tok512.bin)...");
     build_tokenizer(&tokenizer, tokenizer_path, transformer.config.vocab_size);
 
-    Serial0.println("正在初始化采样器...");
+    Serial0.println("Loading Sampler...");
     build_sampler(&sampler, transformer.config.vocab_size, temperature, topp, rng_seed);
-    
-    Serial0.printf("PSRAM 总容量: %d 字节 | 剩余量: %d 字节\n", ESP.getPsramSize(), ESP.getFreePsram());
-    Serial0.println("\n大模型大脑加载完毕！");
-    Serial0.println("请输入故事开头 (Prompt) 并回车开始推理：");
+
+    Serial0.printf("PSRAM capacity: %d Bytes | Remaining: %d Bytes\n", ESP.getPsramSize(), ESP.getFreePsram());
+    Serial0.println("\nModel loaded successfully!");
+    Serial0.println("Please enter the beginning of the story (Prompt) and press Enter to start inference:");
 }
 
 void loop() {
@@ -92,8 +92,8 @@ void loop() {
             // 立刻上锁禁止在此期间接收任何新串口输入
             is_inferencing = true; 
 
-            Serial0.printf("\n> 收到新 Prompt: \"%s\"\n", input_prompt.c_str());
-            Serial0.println("--- 开始燃烧单片机算力！ ---\n");
+            Serial0.printf("\n> Get new Prompt: \"%s\"\n", input_prompt.c_str());
+            Serial0.println("--- Start burning MCU computing power! ---\n");
             Serial0.flush();
 
             // 刷新硬件随机数种子，确保相同的 Prompt 也能生成不同的故事
