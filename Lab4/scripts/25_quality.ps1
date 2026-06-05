@@ -30,9 +30,12 @@ Write-Host "配置[$Tag]  model=$(Split-Path $Model -Leaf)  temp=$Temp  n=$NPred
 
 foreach ($item in $prompts) {
     Write-Host "`n--- #$($item.id) [$($item.category)] ---" -ForegroundColor Yellow
-    $args = @("-m",$Model,"-p",$item.prompt,"-n","$NPredict",
-              "--temp","$Temp","--threads","8","-st","--no-display-prompt")
-    $r = Invoke-WithPeakMemory -FilePath $LlamaCli -Arguments $args
+    # 中文 prompt 必须经 UTF-8 文件用 -f 传入(命令行 -p 会乱码)
+    $pf = New-PromptFile $item.prompt
+    $cliArgs = @("-m",$Model,"-f",$pf,"-n","$NPredict",
+                 "--temp","$Temp","--threads","8","-st","--no-display-prompt")
+    $r = Invoke-WithPeakMemory -FilePath $LlamaCli -Arguments $cliArgs
+    Remove-Item $pf -ErrorAction SilentlyContinue
     $file = Join-Path $outDir ("p{0}_{1}.txt" -f $item.id, $item.category)
     @(
         "# Prompt $($item.id) [$($item.category)]  config=$Tag temp=$Temp model=$(Split-Path $Model -Leaf)",

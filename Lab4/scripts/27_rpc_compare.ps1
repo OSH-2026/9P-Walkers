@@ -31,9 +31,12 @@ function Test-Config($label, $extraBenchArgs, $extraCliArgs) {
     & $bench @benchArgs -o md 2>&1 | Tee-Object -FilePath (Join-Path $ResultsDir "27_${label}_bench_$stamp.md")
 
     Write-Host "-- llama-cli (加载时间/TTFT, 看日志中 RPC backend 注册) --"
-    $cliArgs = @("-m",$Model,"-p",$Prompt,"-n","$NPredict","--threads","8","-st","-v") + $extraCliArgs
+    # 中文 prompt 经 UTF-8 文件用 -f 传入(命令行 -p 会乱码)
+    $pf = New-PromptFile $Prompt
+    $cliArgs = @("-m",$Model,"-f",$pf,"-n","$NPredict","--threads","8","-st","-v") + $extraCliArgs
     $errLog = Join-Path $ResultsDir "27_${label}_cli_$stamp.err.log"
     $r = Invoke-WithPeakMemory -FilePath $cli -Arguments $cliArgs -ErrLog $errLog
+    Remove-Item $pf -ErrorAction SilentlyContinue
     $t = Parse-LlamaTimings $r.StdErr $r.Seconds
     [pscustomobject]@{ 配置=$label; 加载时间ms=$t.LoadMs; TTFTms=$t.PromptEvalMs; 峰值内存MB=$r.PeakMB }
 }

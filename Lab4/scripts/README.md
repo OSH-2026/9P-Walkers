@@ -101,3 +101,6 @@ python scripts\ray_dispatch.py --servers http://127.0.0.1:8080 http://127.0.0.1:
 - llama-bench 默认 `-r 5` 重复 5 次取均值±std，运行较慢属正常。
 - `-st`（--single-turn）让 llama-cli 单轮非交互运行后自动退出，便于脚本采集计时；本机实测 `-no-cnv` 会卡住等待输入，故统一改用 `-st`。
 - 峰值内存通过轮询进程 `WorkingSet64` 采集（见 `common.ps1` 的 `Invoke-WithPeakMemory`）。
+- **中文编码**：Windows 上有两处坑，已在 `common.ps1` 统一处理——
+  ① 读取 llama-cli 输出时强制按 UTF-8 解码（`ProcessStartInfo.StandardOutputEncoding`），否则会被系统 GBK 误解码成乱码；
+  ② 含中文的 prompt 不能用命令行 `-p` 传（argv 会被转成 GBK 而乱码），改用 `New-PromptFile` 写成 UTF-8 文件再用 `-f` 传入。25/27 已采用此方式。

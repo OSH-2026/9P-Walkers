@@ -36,34 +36,65 @@ function Invoke-WithPeakMemory {
         [string]$ErrLog
     )
     Assert-File $FilePath
-    if (-not $OutLog) { $OutLog = [System.IO.Path]::GetTempFileName() }
-    if (-not $ErrLog) { $ErrLog = [System.IO.Path]::GetTempFileName() }
 
-    # PowerShell 5.1 的 Start-Process -ArgumentList 不会给含空格的参数加引号，
-    # 这里手动给含空格/引号的参数补引号，避免 prompt 被拆成多个参数。
-    $quoted = $Arguments | ForEach-Object {
+    # 手动给含空格/引号的参数补引号(Windows 下 .NET 以 UTF-16 传给 CreateProcessW，
+    # 中文参数本身不会乱码)，拼成命令行字符串。
+    $argLine = ($Arguments | ForEach-Object {
         if ($_ -match '[\s"]') { '"' + ($_ -replace '"','\"') + '"' } else { $_ }
-    }
+    }) -join ' '
+
+    # 关键：用 ProcessStartInfo 显式指定 StandardOutput/ErrorEncoding = UTF-8，
+    # 否则 PowerShell 会用系统 GBK 代码页去解码 llama-cli 的 UTF-8 输出，导致中文乱码。
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName               = $FilePath
+    $psi.Arguments              = $argLine
+    $psi.UseShellExecute        = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError  = $true
+    $psi.StandardOutputEncoding = New-Object System.Text.UTF8Encoding $false
+    $psi.StandardErrorEncoding  = New-Object System.Text.UTF8Encoding $false
+
+    $p = New-Object System.Diagnostics.Process
+    $p.StartInfo = $psi
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $p = Start-Process -FilePath $FilePath -ArgumentList $quoted -PassThru `
-            -NoNewWindow -RedirectStandardOutput $OutLog -RedirectStandardError $ErrLog
+    [void]$p.Start()
+    # 异步读取两个流，避免缓冲区写满导致的死锁(verbose 输出可达上百 KB)。
+    $outTask = $p.StandardOutput.ReadToEndAsync()
+    $errTask = $p.StandardError.ReadToEndAsync()
+
     $peak = 0L
     while (-not $p.HasExited) {
         try { $p.Refresh(); if ($p.WorkingSet64 -gt $peak) { $peak = $p.WorkingSet64 } } catch {}
         Start-Sleep -Milliseconds 150
     }
-    $p.Refresh()
     try { if ($p.PeakWorkingSet64 -gt $peak) { $peak = $p.PeakWorkingSet64 } } catch {}
+    $p.WaitForExit()
     $sw.Stop()
+
+    $stdout = $outTask.Result
+    $stderr = $errTask.Result
+    # 落盘统一用 UTF-8(无 BOM)
+    $utf8 = New-Object System.Text.UTF8Encoding $false
+    if ($OutLog) { [System.IO.File]::WriteAllText($OutLog, $stdout, $utf8) }
+    if ($ErrLog) { [System.IO.File]::WriteAllText($ErrLog, $stderr, $utf8) }
 
     return [pscustomobject]@{
         ExitCode = $p.ExitCode
         PeakMB   = [math]::Round($peak / 1MB, 1)
         Seconds  = [math]::Round($sw.Elapsed.TotalSeconds, 2)
-        StdOut   = (Get-Content $OutLog -Raw -ErrorAction SilentlyContinue)
-        StdErr   = (Get-Content $ErrLog -Raw -ErrorAction SilentlyContinue)
+        StdOut   = $stdout
+        StdErr   = $stderr
     }
+}
+
+# 把(可能含中文的) prompt 写到 UTF-8(无 BOM) 临时文件，返回路径。
+# Windows 上 llama.cpp 用命令行 -p 传中文会因 argv 编码(GBK)而乱码，
+# 必须改用 -f <文件> 让其按 UTF-8 直接读取。用完记得 Remove-Item。
+function New-PromptFile($text) {
+    $f = [System.IO.Path]::GetTempFileName()
+    [System.IO.File]::WriteAllText($f, $text, (New-Object System.Text.UTF8Encoding $false))
+    return $f
 }
 
 # 运行一次 llama-bench：结果(md 表)同时打印到屏幕并保存到 $SaveAs。

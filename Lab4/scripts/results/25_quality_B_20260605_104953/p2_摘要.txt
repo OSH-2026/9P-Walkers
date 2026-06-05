@@ -1,0 +1,37 @@
+﻿# Prompt 2 [摘要]  config=B temp=0.2 model=qwen2.5-7b-instruct-q4_k_m.gguf
+## PROMPT
+请用不超过50字概括下面这段话：操作系统是管理计算机硬件与软件资源的系统软件，它负责进程调度、内存管理、文件系统和设备驱动等核心功能。现代操作系统还提供多用户、多任务、网络通信和安全隔离能力，使应用程序无需直接面对底层硬件即可高效稳定运行。
+
+## OUTPUT
+
+Loading model... 
+
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b9478-60130d18f
+model      : qwen2.5-7b-instruct-q4_k_m.gguf
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+> 请用不超过50字概括下面这段话：操作系统是管理计算机硬件与软件资源的系统软件，它负责进程调度、内存管理、文件系统和设备驱动等核心功能。现代操作系统还提供多用户、多任务、网络通信和安全隔离能力，使应用程序无需直接面对底层硬件即可高效稳定运行。
+
+操作系统管理硬件与软件资源，提供进程调度、内存管理等核心功能，支持多用户、多任务等现代需求，保障应用高效稳定运行。
+
+[ Prompt: 68.3 t/s | Generation: 12.7 t/s ]
+
+Exiting...
+

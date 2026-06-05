@@ -1,0 +1,41 @@
+﻿# Prompt 1 [中文问答]  config=A temp=0.7 model=qwen2.5-7b-instruct-q4_k_m.gguf
+## PROMPT
+请解释什么是“虚拟内存”，并举一个操作系统中的实际例子。
+
+## OUTPUT
+
+Loading model... 
+
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b9478-60130d18f
+model      : qwen2.5-7b-instruct-q4_k_m.gguf
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+> 请解释什么是“虚拟内存”，并举一个操作系统中的实际例子。
+
+虚拟内存是计算机操作系统提供的一种技术，它允许操作系统为运行的程序分配比实际物理内存更多的内存空间。虚拟内存使得程序能够像使用实际物理内存那样使用虚拟地址空间，而不需要担心物理内存的限制。当程序访问一个不在物理内存中的地址时，操作系统会自动将该地址空间所对应的磁盘空间加载到物理内存中，这种技术能够使内存管理更加高效，也使得单个程序可以使用比实际物理内存更多的内存空间。
+
+在实际操作系统的实现中，Linux是一个很好的例子。在Linux操作系统中，虚拟内存的实现依赖于页表（Page Table）机制。每个进程都有自己的页表，页表中记录了虚拟地址和物理地址之间的映射关系。当一个进程访问一个虚拟地址时，处理器会使用这个页表进行地址转换。如果该地址对应的页已经加载到物理内存中，处理器会直接访问该页；如果该页还没有加载到物理内存中，处理器会触发一个中断，操作系统会根据页表中的信息将磁盘上的该页加载到物理内存中，然后继续执行。
+
+为了管理虚拟内存，Linux内核中引入了多种机制，如页置换（Page Replacement）策略、页面
+
+[ Prompt: 68.9 t/s | Generation: 13.5 t/s ]
+
+Exiting...
+

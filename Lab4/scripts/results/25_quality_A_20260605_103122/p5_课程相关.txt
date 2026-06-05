@@ -1,0 +1,52 @@
+﻿# Prompt 5 [课程相关]  config=A temp=0.7 model=qwen2.5-7b-instruct-q4_k_m.gguf
+## PROMPT
+在 llama.cpp 中，GGUF 量化（如 Q4_K_M）相比 FP16 为什么能加速推理、又会带来什么代价？
+
+## OUTPUT
+
+Loading model... 
+
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b9478-60130d18f
+model      : qwen2.5-7b-instruct-q4_k_m.gguf
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+> 在 llama.cpp 中，GGUF 量化（如 Q4_K_M）相比 FP16 为什么能加速推理、又会带来什么代价？
+
+在 llama.cpp 中，GGUF 量化（如 Q4_K_M）相比 FP16 量化，确实可以带来推理速度的提升，但同时也伴随着一定的性能损失和其他潜在的代价。下面我会详细解释这些方面：
+
+### 加速推理的原因
+
+1. **内存效率**：
+   - **Q4_K_M** 等量化方法使用较少的位数来表示权重和激活值，因此可以显著减少内存使用。这不仅减少了模型在内存中的占用空间，还减少了从内存中读取数据的延迟。
+   - **FP16** 使用16位，而**Q4_K_M** 使用4位，这使得在相同硬件上可以加载更多的权重和激活值，从而提高了并行处理的能力。
+
+2. **计算效率**：
+   - **Q4_K_M** 量化后的权重和激活值可以使用更简单的数学运算，如移位和加减，这些操作通常比浮点运算更快。
+   - 计算量的减少有助于提高推理速度，尤其是在计算资源有限的情况下。
+
+### 所带来的代价
+
+1. **模型精度损失**：
+   - 量化过程会带来模型精度的损失。虽然**Q4_K_M**
+
+[ Prompt: 68.0 t/s | Generation: 13.1 t/s ]
+
+Exiting...
+
