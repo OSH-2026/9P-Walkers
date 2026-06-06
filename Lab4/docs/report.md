@@ -68,18 +68,18 @@ modelscope download --model Qwen/Qwen2.5-7B-Instruct-GGUF qwen2.5-7b-instruct-q4
 **测试任务设计**：固定模型（Qwen2.5-7B-Instruct，Q4_K_M）、固定 prompt 与生成长度，分两路测量：
 
 - **吞吐类（prefill / decode）**：用 `llama-bench`，它默认跑 `pp512`（预填充 512 token）与 `tg128`（生成 128 token），并自动重复 5 次输出均值 ± 标准差，结果稳定可比。
-- **延迟 / 资源类（加载时间 / TTFT / 峰值内存）**：用 `llama-cli` 单轮（`-st -v`）跑一次固定 prompt，从其计时输出解析 `prompt eval time`（即 TTFT），用脚本轮询进程 `WorkingSet64` 记录峰值物理内存；本机这套 build 不直接打印 `load time`，故用 **墙钟耗时 − 推理总时长** 近似加载时间。
+- **延迟 / 资源类（加载时间 / TTFT / 峰值内存）**：用 `llama-cli` 单轮（`-st -v`）跑一次固定 prompt，从其计时输出解析 `prompt eval time`（即 TTFT），用脚本轮询进程 RSS 记录峰值物理内存；本机这套 build 不直接打印 `load time`，故用 **墙钟耗时 − 推理总时长** 近似加载时间。
 
 从指标列表中选取 **≥3 个**（实际覆盖 5 个）：①输出速度(decode)、②预填充速度(prefill)、③加载时间、④首 Token 延迟、⑤峰值内存。
 
-**测量命令**：上述流程封装在脚本 `scripts/23_metrics.ps1`（一条命令完成 bench + cli + 内存采集，结果写入 `scripts/results/`）：
+**测量命令**：上述流程封装在脚本 `scripts/23_metrics.sh`（一条命令完成 bench + cli + 内存采集，结果写入 `scripts/results/`）：
 
-```powershell
-# 一键测量（线程数默认 8，可用 -Threads / -NPredict 调整）
-.\scripts\23_metrics.ps1 -Threads 8 -NPredict 128
+```bash
+# 一键测量（线程数默认 8，可用 --threads / --n-predict 调整）
+./scripts/23_metrics.sh --threads 8 --n-predict 128
 
 # 其中 llama-bench 等价于：
-.\llama.cpp\build\bin\Release\llama-bench.exe -m .\llama.cpp\models\qwen2.5-7b-instruct-q4_k_m.gguf -t 8
+./llama.cpp/build/bin/llama-bench -m ./llama.cpp/models/qwen2.5-7b-instruct-q4_k_m.gguf -t 8
 ```
 
 **测量结果**：
@@ -97,7 +97,7 @@ llama-bench 在不同线程数下的吞吐（默认 24 线程 vs 脚本所用 8 
 build: 60130d18f (9478)
 ```
 
-`23_metrics.ps1`（8 线程，prompt≈9 token）实测指标汇总：
+`23_metrics.sh`（8 线程，prompt≈9 token）实测指标汇总：
 
 | 指标                 | 测量值                                            | 来源                                          |
 | -------------------- | ------------------------------------------------- | --------------------------------------------- |
@@ -105,7 +105,7 @@ build: 60130d18f (9478)
 | 首 Token 延迟 (TTFT) | **≈ 656 ms**                                      | llama-cli `prompt eval time`（`-v`）        |
 | Prefill 吞吐 (pp512) | **71.7 ± 3.3 t/s**（8 线程）/ 83.9 ± 3.1（24 线程） | llama-bench                                   |
 | Decode 吞吐 (tg128)  | **13.5 ± 0.1 t/s**（8 线程）/ 14.0 ± 0.4（24 线程） | llama-bench                                   |
-| 峰值内存             | **≈ 14399 MB（≈14.1 GiB）**                       | 脚本轮询进程 WorkingSet64                      |
+| 峰值内存             | **≈ 14399 MB（≈14.1 GiB）**                       | 脚本轮询进程 RSS                               |
 
 **结果分析**：
 
@@ -117,12 +117,12 @@ build: 60130d18f (9478)
 
 ### 2.4 基于部署参数的分析、测试与优化
 
-以 llama.cpp 配置参数为主进行调优。固定模型与 prompt，单独改变一个参数观察影响。各项由脚本 `scripts/24_tune.ps1 -Test <项>` 测得，结果存于 `scripts/results/24_*`。
+以 llama.cpp 配置参数为主进行调优。固定模型与 prompt，单独改变一个参数观察影响。各项由脚本 `scripts/24_tune.sh --test <项>` 测得，结果存于 `scripts/results/24_*`。
 
 **(1) 线程数 `--threads`**
 
-```powershell
-.\scripts\24_tune.ps1 -Test threads     # 等价 llama-bench -t 4,8,16,24,32
+```bash
+./scripts/24_tune.sh --test threads     # 等价 llama-bench -t 4,8,16,24,32
 ```
 
 | --threads             | 4     | 8     | 16    | 24        | 32        |
@@ -134,8 +134,8 @@ build: 60130d18f (9478)
 
 **(2) 批大小 `--batch-size` / `-b`**（threads=24）
 
-```powershell
-.\scripts\24_tune.ps1 -Test batch        # 等价 llama-bench -b 128,256,512,1024
+```bash
+./scripts/24_tune.sh --test batch        # 等价 llama-bench -b 128,256,512,1024
 ```
 
 | -b                  | 128         | 256   | 512   | 1024  |
@@ -147,8 +147,8 @@ build: 60130d18f (9478)
 
 **(3) 上下文长度 `--ctx-size` / `-c`**（观察对峰值内存的影响）
 
-```powershell
-.\scripts\24_tune.ps1 -Test ctx          # llama-cli -c 512/2048/8192/16384，脚本记录峰值内存
+```bash
+./scripts/24_tune.sh --test ctx          # llama-cli -c 512/2048/8192/16384，脚本记录峰值内存
 ```
 
 | -c (ctx)      | 512    | 2048   | 8192   | 16384  |
@@ -161,8 +161,8 @@ build: 60130d18f (9478)
 
 **(4) 内存映射 `--no-mmap`**（threads=24，对比开启/关闭）
 
-```powershell
-.\scripts\24_tune.ps1 -Test mmap         # 等价 llama-bench -mmp 0,1
+```bash
+./scripts/24_tune.sh --test mmap         # 等价 llama-bench -mmp 0,1
 ```
 
 | mmap                | 关闭（`--no-mmap`, 0） | 开启（默认, 1） |
@@ -192,8 +192,8 @@ build: 60130d18f (9478)
 
 **测量方式**：用同一模型（Q4_K_M）、同一组 prompt、相同生成长度（n=256），仅改变 **temperature** 做两组对照：
 
-- **配置 A**：`temp=0.7`（较随机，偏发散）—— `scripts/25_quality.ps1 -Tag A -Temp 0.7`
-- **配置 B**：`temp=0.2`（较确定，偏收敛）—— `scripts/25_quality.ps1 -Tag B -Temp 0.2`
+- **配置 A**：`temp=0.7`（较随机，偏发散）—— `scripts/25_quality.sh --tag A --temp 0.7`
+- **配置 B**：`temp=0.2`（较确定，偏收敛）—— `scripts/25_quality.sh --tag B --temp 0.2`
 
 输出分别存于 `scripts/results/25_quality_A_<时间戳>/` 与 `25_quality_B_<时间戳>/`（每个 prompt 一个 `pN_类别.txt`）。中文 prompt 通过 UTF-8 文件以 `-f` 传入，避免 Windows 命令行编码乱码。
 
@@ -229,10 +229,10 @@ build: 60130d18f (9478)
 
 | 角色          | 机器     | 局域网 IP        | 需要的产物                              | 是否需要模型文件 |
 | ------------- | -------- | ---------------- | --------------------------------------- | ---------------- |
-| 主机 (head)   | 本机     | 【待填，如 192.168.1.10】 | RPC 版 `llama-cli.exe` / `llama-bench.exe` | **需要**（由主机加载并下发） |
-| 从机 (worker) | 第二台机 | 【待填，如 192.168.1.20】 | `rpc-server.exe`                        | 不需要           |
+| 主机 (head)   | 本机     | 【待填，如 192.168.1.10】 | RPC 版 `llama-cli` / `llama-bench` | **需要**（由主机加载并下发） |
+| 从机 (worker) | 第二台机 | 【待填，如 192.168.1.20】 | `rpc-server`                        | 不需要           |
 
-> 在 llama.cpp 的 RPC 方案里，GGUF 由**主机**加载，再把各层张量经 RPC 通道下发给从机的 `rpc-server`；因此**模型文件只需放在主机**，从机仅需 `rpc-server.exe`。
+> 在 llama.cpp 的 RPC 方案里，GGUF 由**主机**加载，再把各层张量经 RPC 通道下发给从机的 `rpc-server`；因此**模型文件只需放在主机**，从机仅需 `rpc-server`。
 
 **第 0 步——前置条件（两台机器都要满足）**
 
@@ -258,24 +258,24 @@ build: 60130d18f (9478)
 
 **第 1 步——启用 RPC 重新构建（两台机器都执行）**
 
-```powershell
+```bash
 cd llama.cpp
-cmake -B build-rpc -DGGML_RPC=ON
+cmake -B build-rpc -DGGML_RPC=ON -DGGML_RPC_RDMA=OFF -DGGML_CCACHE=OFF
 cmake --build build-rpc --config Release -j
 ```
 
-构建产物在 `llama.cpp\build-rpc\bin\Release\`（含 `rpc-server.exe`、支持 `--rpc` 的 `llama-cli.exe` / `llama-bench.exe`）。封装脚本：`scripts/26_build_rpc.ps1`（两机各跑一次；从机至少要产出 `rpc-server.exe`）。
+构建产物在 `llama.cpp/build-rpc/bin/`（含 `rpc-server`、支持 `--rpc` 的 `llama-cli` / `llama-bench`）。封装脚本：`scripts/26_build_rpc.sh`（两机各跑一次；从机至少要产出 `rpc-server`）。普通局域网实验建议关闭 RDMA，走纯 TCP。
 
 **第 2 步——从机（worker）启动 rpc-server**
 
 在**从机**执行（`-H 0.0.0.0` 表示监听所有网卡，局域网才连得进来）：
 
-```powershell
+```bash
 # 推荐：用脚本，会自动打印本机局域网 IP，方便填到主机命令里
-pwsh -File .\scripts\26_rpc_worker.ps1 -Port 50052
+./scripts/26_rpc_worker.sh --port 50052
 
 # 等价的原始命令：
-.\llama.cpp\build-rpc\bin\Release\rpc-server.exe -H 0.0.0.0 -p 50052
+./llama.cpp/build-rpc/bin/rpc-server -H 0.0.0.0 -p 50052
 ```
 
 启动后窗口保持运行、等待主机连接。记下脚本打印的从机 IP（如 `192.168.1.20`）。
@@ -284,10 +284,10 @@ pwsh -File .\scripts\26_rpc_worker.ps1 -Port 50052
 
 在**主机**执行，把 `--rpc` 指向从机的 `IP:端口`：
 
-```powershell
-.\llama.cpp\build-rpc\bin\Release\llama-cli.exe `
-  -m .\llama.cpp\models\qwen2.5-7b-instruct-q4_k_m.gguf `
-  -f prompt.txt -n 128 -st `
+```bash
+./llama.cpp/build-rpc/bin/llama-cli \
+  -m ./llama.cpp/models/qwen2.5-7b-instruct-q4_k_m.gguf \
+  -f prompt.txt -n 128 -st \
   --rpc 192.168.1.20:50052
 ```
 
@@ -310,9 +310,9 @@ load_tensors: layer  1 assigned to device RPC0, is_swa = 0
 
 **测量命令（主机执行）**：
 
-```powershell
+```bash
 # 把 IP 换成第 2 步打印的从机局域网 IP
-pwsh -File .\scripts\27_rpc_compare.ps1 -Rpc 192.168.1.20:50052 -Mode both
+./scripts/27_rpc_compare.sh --rpc 192.168.1.20:50052 --mode both
 ```
 
 **测量结果（待实测填写）**：
@@ -335,8 +335,8 @@ pwsh -File .\scripts\27_rpc_compare.ps1 -Rpc 192.168.1.20:50052 -Mode both
 
 **选做方向**：同一模型 Qwen2.5-7B-Instruct 的三种量化 **Q4_K_M / Q5_K_M / Q8_0**，对比体积、prefill、decode、峰值内存。
 
-- 下载：`modelscope download --model Qwen/Qwen2.5-7B-Instruct-GGUF qwen2.5-7b-instruct-q5_k_m.gguf --local_dir .\llama.cpp\models`（Q8_0 同理）。
-- 测量：`scripts/28_quant_compare.ps1`（threads=8，每项 llama-bench 取 5 次均值，结果存 `scripts/results/28_*`）。下述 prefill/decode 已复测一次，数值可复现。
+- 下载：`modelscope download --model Qwen/Qwen2.5-7B-Instruct-GGUF qwen2.5-7b-instruct-q5_k_m.gguf --local_dir ./llama.cpp/models`（Q8_0 同理）。
+- 测量：`scripts/28_quant_compare.sh`（threads=8，每项 llama-bench 取 5 次均值，结果存 `scripts/results/28_*`）。下述 prefill/decode 已复测一次，数值可复现。
 
 | 量化格式 | 名义位宽 | 体积 (GiB) | Prefill pp512 (t/s) | Decode tg128 (t/s) | 峰值内存 (MB) |
 | -------- | -------- | ---------- | ------------------- | ------------------ | ------------- |
@@ -349,8 +349,8 @@ pwsh -File .\scripts\27_rpc_compare.ps1 -Rpc 192.168.1.20:50052 -Mode both
 1. **体积随量化位宽单调增大**（4.36 → 5.07 → 7.54 GiB），与每权重比特数一致——这是量化最直接的收益：Q4 体积仅为 Q8 的 58%。
 2. **Decode（生成）吞吐：Q4 ≈ Q5（≈13 t/s）> Q8（9.2 t/s）**。decode 是内存带宽受限型，模型越大、每生成一个 token 需要读取的权重字节越多，故 **Q8 最慢**；Q4 与 Q5 体积接近，decode 几乎无差。这正体现"量化越激进、生成越快"。
 3. **Prefill（预填充）吞吐并非单调：Q4（72.9）> Q8（38.3）> Q5（25.8）**。这反映 CPU 上不同量化的**反量化内核优化程度不同**，而非单纯由数据量决定：Q4_K_M 有高度优化的 AVX 内核；Q8_0 反量化简单（int8 × scale）也较快；**Q5_K_M 的 K-quant 解包更复杂且 CPU 内核优化不足，反而最慢**。说明 prefill 速度同时取决于"读多少"和"解包多复杂"。
-4. **峰值内存**用进程 WorkingSet 轮询测得，受 mmap 按需分页与采样时刻影响、噪声较大（表中 Q5 反低于 Q4、Q8 与 Q4 接近，并不严格随体积单调）；**更可靠的内存占用代理是模型文件体积**（4.36 / 5.07 / 7.54 GiB，单调）。
-5. **质量维度**：2.5 节已验证 Q4_K_M 在 5 类任务上质量良好；理论上保真度 Q8_0 ≥ Q5_K_M ≥ Q4_K_M，但对 7B 规模差异通常很小。如需逐量化打分，可运行 `25_quality.ps1 -Model .\llama.cpp\models\qwen2.5-7b-instruct-q8_0.gguf -Tag Q8`（本次聚焦体积/速度/内存）。
+4. **峰值内存**用进程 RSS 轮询测得，受 mmap 按需分页与采样时刻影响、噪声较大（表中 Q5 反低于 Q4、Q8 与 Q4 接近，并不严格随体积单调）；**更可靠的内存占用代理是模型文件体积**（4.36 / 5.07 / 7.54 GiB，单调）。
+5. **质量维度**：2.5 节已验证 Q4_K_M 在 5 类任务上质量良好；理论上保真度 Q8_0 ≥ Q5_K_M ≥ Q4_K_M，但对 7B 规模差异通常很小。如需逐量化打分，可运行 `./scripts/25_quality.sh --model ./llama.cpp/models/qwen2.5-7b-instruct-q8_0.gguf --tag Q8`（本次聚焦体积/速度/内存）。
 
 **选型结论**：在**纯 CPU**部署下，**Q4_K_M 综合最优**——体积最小、prefill 最快、decode 最快，且质量已足够可用，故本组主线选用 Q4_K_M 是合理的。Q8_0 保真度最高但体积大、decode 最慢，适合质量敏感且内存充裕的场景；Q5_K_M 在本机 CPU 上因反量化内核劣化导致 prefill 明显偏慢，性价比不及 Q4_K_M，其"质量介于 Q4 与 Q8 之间"的定位在 GPU（有对应优化 kernel）上更有意义。
 
@@ -364,20 +364,20 @@ pwsh -File .\scripts\27_rpc_compare.ps1 -Rpc 192.168.1.20:50052 -Mode both
 
 **安装**：
 
-```powershell
+```bash
 pip install "ray[default]"
 ```
 
 **Head 节点**（主机）：
 
-```powershell
+```bash
 ray start --head --port=6379 --dashboard-host=0.0.0.0
 # 记录输出的 ray://<ip>:<port> 与集群地址
 ```
 
 **Worker 节点**（从机，资源受限时可在同机用多进程模拟）：
 
-```powershell
+```bash
 ray start --address='192.168.x.A:6379'
 ```
 
@@ -390,9 +390,9 @@ ray start --address='192.168.x.A:6379'
 
 在每个节点用 `llama-server` 起 HTTP 服务：
 
-```powershell
-.\llama.cpp\build\bin\Release\llama-server.exe `
-  -m .\llama.cpp\models\qwen2.5-7b-instruct-q4_k_m.gguf `
+```bash
+./llama.cpp/build/bin/llama-server \
+  -m ./llama.cpp/models/qwen2.5-7b-instruct-q4_k_m.gguf \
   --host 0.0.0.0 --port 8080 -t 8
 ```
 
@@ -413,11 +413,11 @@ ray start --address='192.168.x.A:6379'
 | 推理     | 3    | 16–18 | "按 Amdahl 定律，90% 可并行、无限核数下的最大加速比" |
 | 自定义   | 4    | 19–22 | "用比喻解释分布式系统"；"写一个判断回文的 Python 函数" |
 
-完整列表见 `scripts/prompts.json`（每条含 `id` / `category` / `prompt`），由 `ray_dispatch.py` 读取后分发。
+完整列表见 `scripts/prompts.json`（每条含 `id` / `category` / `prompt`），由 `ray_dispatch.sh` 读取后分发。
 
 ### 3.4 Ray 分发与指标采集（4 分）
 
-用 Ray Task / Actor 把 prompt 分发到各 server，记录每个请求的开始时间、结束时间、总耗时、输出长度。建议脚本：`Lab4/scripts/ray_dispatch.py`。
+用 Ray Task / Actor 把 prompt 分发到各 server，记录每个请求的开始时间、结束时间、总耗时、输出长度。建议脚本：`Lab4/scripts/ray_dispatch.sh`。
 
 ```python
 import ray, requests, time
@@ -469,13 +469,13 @@ results = ray.get(futures)
 ## 四、附录
 
 - 实验脚本：`Lab4/scripts/`（详见该目录 `README.md`），主要包括：
-  - `common.ps1`：公共路径与辅助函数（峰值内存采集、计时解析、bench 封装）
-  - `23_metrics.ps1`：2.3 核心指标（加载/TTFT/prefill/decode/内存）
-  - `24_tune.ps1`：2.4 参数扫描（threads / batch / ctx / mmap / ngl）
-  - `prompts_5.json` + `25_quality.ps1`：2.5 五个 prompt 质量评估
-  - `26_build_rpc.ps1` / `26_rpc_worker.ps1` / `27_rpc_compare.ps1`：2.6–2.7 RPC 分布式
-  - `28_quant_compare.ps1`：2.8 量化格式对比
-  - `prompts.json` / `ray_start_servers.ps1` / `ray_dispatch.py`：第三部分 Ray 批量调度
+  - `common.sh`：公共路径与辅助函数（峰值内存采集、计时解析、bench 封装）
+  - `23_metrics.sh`：2.3 核心指标（加载/TTFT/prefill/decode/内存）
+  - `24_tune.sh`：2.4 参数扫描（threads / batch / ctx / mmap / ngl）
+  - `prompts_5.json` + `25_quality.sh`：2.5 五个 prompt 质量评估
+  - `26_build_rpc.sh` / `26_rpc_worker.sh` / `27_rpc_compare.sh`：2.6–2.7 RPC 分布式
+  - `28_quant_compare.sh`：2.8 量化格式对比
+  - `prompts.json` / `ray_start_servers.sh` / `ray_dispatch.sh`：第三部分 Ray 批量调度
 - 测量结果原始文件：`Lab4/scripts/results/`（各脚本运行后自动生成的 CSV / md / 日志）
 - 命令记录与配置：见各节命令块
 - 结果截图：`Lab4/docs/img/`（【待补充】）
