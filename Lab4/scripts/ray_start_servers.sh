@@ -56,7 +56,7 @@ assert_file "$model"
 
 printf '%s本机局域网 IP:%s\n' "$color_cyan" "$color_reset"
 if command -v ip >/dev/null 2>&1; then
-    ip -4 addr show scope global | awk '/inet / { sub(/\/.*/, "", $2); print "  " $2 }'
+    ip -4 addr show scope global 2>/dev/null | awk '/inet / { sub(/\/.*/, "", $2); print "  " $2 }' || true
 else
     hostname -I 2>/dev/null | tr ' ' '\n' | awk 'NF { print "  " $0 }' || true
 fi

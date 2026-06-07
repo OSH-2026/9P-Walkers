@@ -7,12 +7,9 @@
 | CPU            | Intel Core i9-14900HX（24 核：8 P-core + 16 E-core，共 32 逻辑线程）                    |
 | 内存           | 32 GB（约 31.7 GB 可用）                                                                |
 | GPU            | NVIDIA GeForce RTX 4060 Laptop（8 GB 显存） + Intel UHD Graphics（核显）                |
-| 操作系统       | Windows 11 Home China（10.0.26200）                                                     |
-| llama.cpp 版本 | build 9478（commit `60130d18f`），MSVC 19.51 x64                                      |
+| 操作系统       | Windows 11 Home China（10.0.26200）/ GNU/Linux Debian 13 (6.12.90-2)                   |
+| llama.cpp 版本 | build 9478（commit `60130d18f`），MSVC 19.51 x64 / GCC 14.2.0                       |
 | 构建方式       | CMake + MSVC，`-B build`，`--config Release`（CPU 后端）                            |
-| 二进制位置     | `llama.cpp\build\bin\Release\`（llama-cli.exe、llama-bench.exe、llama-server.exe 等） |
-
-> RPC 与 GPU offload 任务需要重新构建（见第六节、第四节优化部分）。
 
 ---
 
@@ -234,17 +231,17 @@ build: 60130d18f (9478)
 
 > 在 llama.cpp 的 RPC 方案里，GGUF 由**主机**加载，再把各层张量经 RPC 通道下发给从机的 `rpc-server`；因此**模型文件只需放在主机**，从机仅需 `rpc-server`。
 
-**第 0 步——前置条件（两台机器都要满足）**
+**第 0 步——前置条件**
 
 1. 两台机器接入**同一局域网**（同一路由器 / 热点），互相能 `ping` 通：
 
    ```powershell
-   ping 192.168.50.2   # 在主机上 ping 从机；反向也测一次
+   ping 192.168.50.2
    ```
 2. 记录各自的局域网 IPv4（从机启动脚本会自动打印，也可手动查）：
 
    ```powershell
-   ipconfig   # 看“无线局域网适配器 / 以太网适配器”里的 IPv4 地址
+   ipconfig
    ```
 3. **从机放行入站端口 50052**（Windows 防火墙默认拦截，不放行会导致主机连接超时）。在**从机**用管理员 PowerShell 执行一次：
 
@@ -253,7 +250,6 @@ build: 60130d18f (9478)
      -Protocol TCP -LocalPort 50052 -Action Allow
    ```
 
-   > 安全提示：`rpc-server` **没有任何鉴权**，任何能连到该端口的机器都可让本机算任意张量。务必只在**可信局域网**内使用，实验结束后可删除该规则：
    > `Remove-NetFirewallRule -DisplayName "llama-rpc-50052"`。
 
 **第 1 步——启用 RPC 重新构建（两台机器都执行）**
@@ -371,8 +367,6 @@ GGML_RPC_DEBUG=1 ./llama.cpp/build-rpc/bin/llama-bench \
 
 ## 三、Ray：多机批量推理任务调度（选择性必做，20 分）
 
-> 本组选择 **Ray** 方向（非 Ceph）。所有任务围绕 llama.cpp 主线展开。
-
 ### 3.1 Ray 环境部署（3 分）
 
 **安装**：
@@ -385,7 +379,6 @@ pip install "ray[default]"
 
 ```bash
 ray start --head --port=6379 --dashboard-host=0.0.0.0
-# 记录输出的 ray://<ip>:<port> 与集群地址
 ```
 
 **Worker 节点**（从机，资源受限时可在同机用多进程模拟）：
@@ -396,8 +389,8 @@ ray start --address='192.168.x.A:6379'
 
 | 节点  | 角色   | IP   | 说明                             |
 | ----- | ------ | ---- | -------------------------------- |
-| 节点1 | head   | 【】 |                                  |
-| 节点2 | worker | 【】 | 资源受限时说明单机多进程模拟方案 |
+| 节点1 | head   | `127.0.0.1` / 本机局域网 IP | 本机 Ray local 模式，负责提交任务 |
+| 节点2 | worker | `127.0.0.1:18080` | 资源受限时用本机 `llama-server` 模拟 worker 服务 |
 
 ### 3.2 多节点 llama.cpp 推理服务（4 分）
 
@@ -411,8 +404,8 @@ ray start --address='192.168.x.A:6379'
 
 | 节点  | 模型 | 量化 | 启动命令 | 端口 |
 | ----- | ---- | ---- | -------- | ---- |
-| 节点1 | 【】 | 【】 | 【】     | 8080 |
-| 节点2 | 【】 | 【】 | 【】     | 8081 |
+| 节点1 | Qwen2.5-7B-Instruct | Q4_K_M | `./scripts/ray_start_servers.sh --port 18080 --threads 4 --ctx-size 512` | 18080 |
+| 节点2 | 故障注入节点 | — | 不启动服务，用于失败重试实验 | 18081 |
 
 ### 3.3 批量推理任务集（≥20 个 prompt，3 分）
 
@@ -455,27 +448,105 @@ futures = [infer.remote(SERVERS[i % len(SERVERS)], p)
 results = ray.get(futures)
 ```
 
-**采集结果**：【待填写：每请求的 start/end/dur/out_len 表格或汇总 CSV】
+**采集结果**：实际请求明细已由脚本写入 CSV，字段包括 `concurrency / idx / server / start / end / dur / out_len / err`。
+
+- 并发压力明细：`scripts/results/ray_pressure_detail_20260608_031530.csv`
+- 并发压力汇总：`scripts/results/ray_pressure_summary_20260608_031530.csv`
+- 失败重试明细：`scripts/results/ray_retry_detail_20260608_032210.csv`
+- 失败重试汇总：`scripts/results/ray_retry_summary_20260608_032210.csv`
 
 ### 3.5 至少两种执行方式对比（4 分）
 
-对比 **串行 / 单机并行 / 多机并行**（或固定分配 vs 轮询）：
+对比 **串行近似（并发 1）/ 单服务并行（并发 2）/ 单服务更高并发（并发 4）**。由于本次使用单机 CPU 环境模拟 Ray worker，重点观察 Ray 调度和 `llama-server` 常驻模型下的并发效果。
 
 | 执行方式 | 总耗时 (s) | 平均延迟 (s) | 吞吐 (req/s) |
 | -------- | ---------- | ------------ | ------------ |
-| 串行     | 【】       | 【】         | 【】         |
-| 单机并行 | 【】       | 【】         | 【】         |
-| 多机并行 | 【】       | 【】         | 【】         |
+| 并发 1   | 167.70     | 27.78        | 0.04         |
+| 并发 2   | 106.23     | 33.97        | 0.06         |
+| 并发 4   | 71.49      | 34.76        | 0.08         |
 
 ### 3.6 实验现象分析（2 分）
 
-**【待填写】**：分析 Ray 调度开销、模型加载复用（server 常驻避免重复加载）、节点性能差异、网络开销、请求粒度（短 prompt 时调度开销占比更高）对结果的影响。
+**实验现象分析**：Ray 本身只负责请求调度，模型加载由常驻 `llama-server` 完成，因此每个请求不需要重复加载 4.36 GiB 的 GGUF 模型，这是批量推理服务化的主要收益。并发度从 1 提高到 4 时，总耗时明显下降，说明 Ray task 能把多个请求同时压到服务端，提升整体吞吐；但平均延迟和 P95 延迟上升，说明纯 CPU 推理时多个请求会竞争同一批 CPU 核和内存带宽。短 prompt / 短输出场景下，Ray 调度、HTTP 请求和 slot 排队等固定开销占比更高，因此吞吐提升不会线性随并发度增加。
 
 ### 3.7（Ray 选做加分，最高 10 分）
 
-任选：负载均衡调度 / 失败重试 / 异构节点分析 / 并发压力测试。
+本组完成两个 Ray 加分项：**并发压力测试** 与 **失败重试**。测试均围绕 `llama-server` HTTP 推理服务展开，使用 Ray task 并发发送 `/completion` 请求。由于纯 CPU 生成速度较慢，为保证实验可在有限时间内完成，统一使用轻量生成长度。
 
-**【待填写：选做方向 + 实现说明 + 运行命令 + 数据 + 分析】**
+#### 3.7.1 并发压力测试（5 分）
+
+**实现说明**：新增脚本 `scripts/ray_pressure.sh`，对同一组 prompt 分别设置并发度 `1 / 2 / 4`，使用 Ray task 控制同时在飞请求数量。每个请求记录开始时间、结束时间、耗时、输出长度和错误信息；汇总时计算平均延迟、P95 延迟、吞吐量和失败请求数。
+
+**服务启动命令**：
+
+```bash
+./scripts/ray_start_servers.sh --port 18080 --threads 4 --ctx-size 512
+```
+
+**压测命令**：
+
+```bash
+./scripts/ray_pressure.sh \
+  --servers http://127.0.0.1:18080 \
+  --limit 6 \
+  --n-predict 4 \
+  --concurrency 1,2,4 \
+  --ray-address local
+```
+
+输出文件：
+
+- 明细：`scripts/results/ray_pressure_detail_20260608_031530.csv`
+- 汇总：`scripts/results/ray_pressure_summary_20260608_031530.csv`
+
+**测试结果**：
+
+| 并发度 | 请求数 | 成功数 | 失败数 | 总耗时 (s) | 平均延迟 (s) | P95 延迟 (s) | 吞吐 (req/s) |
+| ------ | ------ | ------ | ------ | ---------- | ------------ | ------------ | ------------ |
+| 1      | 6      | 6      | 0      | 167.70     | 27.78        | 28.69        | 0.04         |
+| 2      | 6      | 6      | 0      | 106.23     | 33.97        | 35.30        | 0.06         |
+| 4      | 6      | 6      | 0      | 71.49      | 34.76        | 37.09        | 0.08         |
+
+**结果分析**：并发度从 1 提高到 4 后，总耗时从 167.70 s 降到 71.49 s，吞吐从 0.04 req/s 提升到 0.08 req/s，说明 `llama-server` 常驻模型后可以同时处理多个轻量请求，Ray 的并发调度能提高整体吞吐。但平均延迟从 27.78 s 增加到 34.76 s，P95 延迟也从 28.69 s 增加到 37.09 s，说明 CPU 资源被多个请求竞争，单个请求等待和计算时间变长。该现象符合 CPU 推理服务的典型权衡：提高并发可以提升总吞吐，但会牺牲单请求延迟。
+
+#### 3.7.2 失败重试（5 分）
+
+**实现说明**：新增脚本 `scripts/ray_retry.sh`。每个请求先按轮询顺序选择 server；如果请求失败，立即尝试下一个 server，直到成功或所有 server 都失败。脚本记录每次尝试的 server、是否成功、耗时和错误信息，并统计最终成功率。
+
+**故障注入方式**：将 `18081` 端口作为被停止的 `llama-server` 节点。测试时该端口不启动服务，等价于推理过程中该 worker 已被手动停止；请求打到该端口时会得到 `Connection refused`，随后脚本将请求转发到正常的 `18080` 节点。
+
+**运行命令**：
+
+```bash
+./scripts/ray_retry.sh \
+  --servers http://127.0.0.1:18081 http://127.0.0.1:18080 \
+  --limit 4 \
+  --n-predict 1 \
+  --timeout 20 \
+  --ray-address local
+```
+
+输出文件：
+
+- 明细：`scripts/results/ray_retry_detail_20260608_032210.csv`
+- 汇总：`scripts/results/ray_retry_summary_20260608_032210.csv`
+
+**重试日志要点**：
+
+```text
+[request 0] attempts=2 success=1 server=http://127.0.0.1:18080
+[request 1] attempts=1 success=1 server=http://127.0.0.1:18080
+[request 2] attempts=2 success=1 server=http://127.0.0.1:18080
+[request 3] attempts=1 success=1 server=http://127.0.0.1:18080
+```
+
+**测试结果**：
+
+| 请求数 | 总尝试次数 | 失败尝试数 | 发生重试次数 | 最终成功数 | 成功率 | 总耗时 (s) |
+| ------ | ---------- | ---------- | ------------ | ---------- | ------ | ---------- |
+| 4      | 6          | 2          | 2            | 4          | 100%   | 27.65      |
+
+**结果分析**：请求 0 和请求 2 首次被分配到故障端口 `18081`，立即收到 `Connection refused`，随后成功转发到正常端口 `18080`；请求 1 和请求 3 首次就分配到正常节点。最终 4 个请求全部成功，成功率为 100%。这说明 Ray 调度层可以通过捕获 HTTP 请求异常实现基础容错，把失败请求转移到其它健康 `llama-server` 节点。实际多机环境中，还可以进一步加入健康检查、节点黑名单和最大重试次数，避免持续向故障节点发送请求。
 
 ---
 
@@ -489,6 +560,7 @@ results = ray.get(futures)
   - `26_build_rpc.sh` / `26_rpc_worker.sh` / `27_rpc_compare.sh`：2.6–2.7 RPC 分布式
   - `28_quant_compare.sh`：2.8 量化格式对比
   - `prompts.json` / `ray_start_servers.sh` / `ray_dispatch.sh`：第三部分 Ray 批量调度
+  - `ray_pressure.sh` / `ray_retry.sh`：Ray 加分项（并发压力测试、失败重试）
 - 测量结果原始文件：`Lab4/scripts/results/`（各脚本运行后自动生成的 CSV / md / 日志）
 - 命令记录与配置：见各节命令块
-- 结果截图：`Lab4/docs/img/`（【待补充】）
+- 结果截图：`Lab4/docs/img/`

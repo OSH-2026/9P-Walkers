@@ -1,0 +1,4 @@
+concurrency,requests,success,failures,total_s,avg_latency_s,p95_latency_s,throughput_req_s
+1,6,6,0,167.7,27.78,28.69,0.04
+2,6,6,0,106.23,33.97,35.3,0.06
+4,6,6,0,71.49,34.76,37.09,0.08

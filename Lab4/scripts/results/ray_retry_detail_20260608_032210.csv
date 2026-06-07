@@ -1,0 +1,7 @@
+idx,attempt,server,success,dur,out_len,err
+0,1,http://127.0.0.1:18081,0,0.001,0,"HTTPConnectionPool(host='127.0.0.1', port=18081): Max retries exceeded with url: /completion (Caused by NewConnectionError(""HTTPConnection(host='127.0.0.1', port=18081): Failed to establish a new connection: [Errno 111] Connection refused""))"
+0,2,http://127.0.0.1:18080,1,7.27,2,
+1,1,http://127.0.0.1:18080,1,6.675,2,
+2,1,http://127.0.0.1:18081,0,0.032,0,"HTTPConnectionPool(host='127.0.0.1', port=18081): Max retries exceeded with url: /completion (Caused by NewConnectionError(""HTTPConnection(host='127.0.0.1', port=18081): Failed to establish a new connection: [Errno 111] Connection refused""))"
+2,2,http://127.0.0.1:18080,1,6.568,2,
+3,1,http://127.0.0.1:18080,1,6.507,1,

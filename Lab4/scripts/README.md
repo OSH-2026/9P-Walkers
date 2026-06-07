@@ -28,6 +28,8 @@
 | `prompts.json` | 3.3 | Ray 批量推理用的 22 个 prompt |
 | `ray_start_servers.sh` | 3.2 | 启动 `llama-server` HTTP 服务（每节点/每端口一个） |
 | `ray_dispatch.sh` | 3.4 / 3.5 | Ray 分发请求 + 采集指标 + 串行/单机并行/多机并行对比 |
+| `ray_pressure.sh` | 3.7 | Ray 并发压力测试，输出平均延迟 / P95 / 吞吐 / 失败数 |
+| `ray_retry.sh` | 3.7 | Ray 失败重试测试，故障节点失败后转发到健康节点 |
 
 ---
 
@@ -94,6 +96,15 @@ pip install "ray[default]" requests
 ./scripts/ray_dispatch.sh --servers http://127.0.0.1:8080 http://127.0.0.1:8081 --mode all
 ```
 单机自测可加 `--ray-address local`。输出：`results/ray_detail_*.csv`（逐请求 start/end/dur/out_len）、`results/ray_summary_*.csv`（串行/单机并行/多机并行的总耗时/平均延迟/吞吐）。
+
+### Ray 加分项
+```bash
+# 并发压力测试
+./scripts/ray_pressure.sh --servers http://127.0.0.1:18080 --limit 6 --n-predict 4 --concurrency 1,2,4 --ray-address local
+
+# 失败重试测试：18081 模拟故障节点，18080 为健康节点
+./scripts/ray_retry.sh --servers http://127.0.0.1:18081 http://127.0.0.1:18080 --limit 4 --n-predict 1 --timeout 20 --ray-address local
+```
 
 ---
 
