@@ -1088,7 +1088,7 @@ CONFIG_BOOTLOADER_LOG_MODE_TEXT=y
 # end of Log
 
 # default:
-CONFIG_BOOTLOADER_CPU_CLK_FREQ_MHZ=90
+CONFIG_BOOTLOADER_CPU_CLK_FREQ_MHZ=100
 
 #
 # Serial Flash Configurations
@@ -1232,8 +1232,11 @@ CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
 CONFIG_ESPTOOLPY_FLASH_SAMPLE_MODE_STR=y
 # default:
 CONFIG_ESPTOOLPY_FLASHMODE="dio"
+# default:
 CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+# default:
 # CONFIG_ESPTOOLPY_FLASHFREQ_40M is not set
+# default:
 # CONFIG_ESPTOOLPY_FLASHFREQ_20M is not set
 # default:
 CONFIG_ESPTOOLPY_FLASHFREQ_VAL=80
@@ -1407,6 +1410,13 @@ CONFIG_EFUSE_MAX_BLK_LEN=256
 # end of eFuse Bit Manager
 
 #
+# Wireless Coexistence
+#
+# default:
+# CONFIG_ESP_COEX_GPIO_DEBUG is not set
+# end of Wireless Coexistence
+
+#
 # Common ESP-related
 #
 # default:
@@ -1417,7 +1427,7 @@ CONFIG_ESP_ERR_TO_NAME_LOOKUP=y
 # GDMA Configurations
 #
 # default:
-CONFIG_GDMA_CTRL_FUNC_IN_IRAM=y
+# CONFIG_GDMA_CTRL_FUNC_IN_IRAM is not set
 # default:
 CONFIG_GDMA_ISR_HANDLER_IN_IRAM=y
 # default:
@@ -1450,17 +1460,6 @@ CONFIG_GDMA_OBJ_DRAM_SAFE=y
 # end of ESP-Driver:GPIO Configurations
 
 #
-# ESP-Driver:SPI Configurations
-#
-# default:
-CONFIG_SPI_MASTER_ISR_IN_IRAM=y
-# default:
-# CONFIG_SPI_SLAVE_IN_IRAM is not set
-# default:
-CONFIG_SPI_SLAVE_ISR_IN_IRAM=y
-# end of ESP-Driver:SPI Configurations
-
-#
 # ESP-Driver:UART Configurations
 #
 # default:
@@ -1486,31 +1485,6 @@ CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=y
 # end of ESP-Driver:USB Serial/JTAG Configuration
 
 #
-# Ethernet
-#
-# default:
-CONFIG_ETH_ENABLED=y
-# default:
-CONFIG_ETH_USE_ESP32_EMAC=y
-# default:
-CONFIG_ETH_DMA_BUFFER_SIZE=512
-# default:
-CONFIG_ETH_DMA_RX_BUFFER_NUM=20
-# default:
-CONFIG_ETH_DMA_TX_BUFFER_NUM=10
-# default:
-# CONFIG_ETH_SOFT_FLOW_CONTROL is not set
-# default:
-# CONFIG_ETH_IRAM_OPTIMIZATION is not set
-# default:
-CONFIG_ETH_USE_SPI_ETHERNET=y
-# default:
-# CONFIG_ETH_USE_OPENETH is not set
-# default:
-# CONFIG_ETH_TRANSMIT_MUTEX is not set
-# end of Ethernet
-
-#
 # Event Loop Library
 #
 # default:
@@ -1534,6 +1508,7 @@ CONFIG_HTTPD_ERR_RESP_NO_DELAY=y
 CONFIG_HTTPD_PURGE_BUF_LEN=32
 # default:
 # CONFIG_HTTPD_LOG_PURGE_DATA is not set
+# default:
 CONFIG_HTTPD_WS_SUPPORT=y
 # default:
 # CONFIG_HTTPD_QUEUE_WORK_BLOCKING is not set
@@ -1560,22 +1535,24 @@ CONFIG_ESP_HW_SUPPORT_FUNC_IN_IRAM=y
 #
 # Read the help text of the option below for explanation
 #
-CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
-# CONFIG_ESP32P4_REV_MIN_0 is not set
-# CONFIG_ESP32P4_REV_MIN_1 is not set
-CONFIG_ESP32P4_REV_MIN_100=y
 # default:
-CONFIG_ESP32P4_REV_MIN_FULL=100
+# CONFIG_ESP32P4_SELECTS_REV_LESS_V3 is not set
 # default:
-CONFIG_ESP_REV_MIN_FULL=100
+# CONFIG_ESP32P4_REV_MIN_300 is not set
+# default:
+CONFIG_ESP32P4_REV_MIN_301=y
+# default:
+CONFIG_ESP32P4_REV_MIN_FULL=301
+# default:
+CONFIG_ESP_REV_MIN_FULL=301
 
 #
-# Maximum Supported ESP32-P4 Revision (Rev v1.99)
+# Maximum Supported ESP32-P4 Revision (Rev v3.99)
 #
 # default:
-CONFIG_ESP32P4_REV_MAX_FULL=199
+CONFIG_ESP32P4_REV_MAX_FULL=399
 # default:
-CONFIG_ESP_REV_MAX_FULL=199
+CONFIG_ESP_REV_MAX_FULL=399
 # default:
 CONFIG_ESP_EFUSE_BLOCK_REV_MIN_FULL=0
 # default:
@@ -1728,8 +1705,6 @@ CONFIG_ESP_BROWNOUT_USE_INTR=y
 # end of Power Supplier
 
 # default:
-CONFIG_ESP_SPI_BUS_LOCK_ISR_FUNCS_IN_IRAM=y
-# default:
 CONFIG_ESP_ENABLE_PVT=y
 # default:
 CONFIG_ESP_INTR_IN_IRAM=y
@@ -1816,6 +1791,11 @@ CONFIG_ESP_NETIF_RECEIVE_REPORT_ERRORS=y
 # end of Partition API Configuration
 
 #
+# PHY
+#
+# end of PHY
+
+#
 # Power Management
 #
 # default:
@@ -1825,7 +1805,15 @@ CONFIG_ESP_NETIF_RECEIVE_REPORT_ERRORS=y
 # default:
 # CONFIG_PM_SLP_IRAM_OPT is not set
 # default:
+CONFIG_PM_POWER_DOWN_CPU_IN_LIGHT_SLEEP=y
+# default:
+CONFIG_PM_CPU_RETENTION_DYNAMIC=y
+# default:
+# CONFIG_PM_CPU_RETENTION_STATIC is not set
+# default:
 # CONFIG_PM_POWER_DOWN_PERIPHERAL_IN_LIGHT_SLEEP is not set
+# default:
+CONFIG_PM_ESP_SLEEP_POWER_DOWN_CPU=y
 # end of Power Management
 
 #
@@ -1889,11 +1877,9 @@ CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
 # ESP System Settings
 #
 # default:
-CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_360=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_400=y
 # default:
-# CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_400 is not set
-# default:
-CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=360
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=400
 
 #
 # Cache config
@@ -2031,6 +2017,13 @@ CONFIG_ESP_TIMER_ISR_AFFINITY_CPU0=y
 # default:
 CONFIG_ESP_TIMER_IMPL_SYSTIMER=y
 # end of ESP Timer (High Resolution Timer)
+
+#
+# Wi-Fi
+#
+# default:
+# CONFIG_ESP_HOST_WIFI_ENABLED is not set
+# end of Wi-Fi
 
 #
 # FreeRTOS
@@ -3060,6 +3053,8 @@ CONFIG_SPI_FLASH_HPM_DC_AUTO=y
 # default:
 CONFIG_SPI_FLASH_SUSPEND_TSUS_VAL_US=50
 # default:
+CONFIG_SPI_FLASH_SUSPEND_TRS_VAL_US=50
+# default:
 # CONFIG_SPI_FLASH_FORCE_ENABLE_XMC_C_SUSPEND is not set
 # default:
 # CONFIG_SPI_FLASH_FORCE_ENABLE_C6_H2_SUSPEND is not set
@@ -3210,6 +3205,7 @@ CONFIG_NEWLIB_TIME_SYSCALL_USE_RTC_HRT=y
 # CONFIG_NEWLIB_TIME_SYSCALL_USE_RTC is not set
 # CONFIG_NEWLIB_TIME_SYSCALL_USE_HRT is not set
 # CONFIG_NEWLIB_TIME_SYSCALL_USE_NONE is not set
+CONFIG_ESP_SYSTEM_PM_POWER_DOWN_CPU=y
 CONFIG_CONSOLE_UART_DEFAULT=y
 # CONFIG_CONSOLE_UART_CUSTOM is not set
 # CONFIG_CONSOLE_UART_NONE is not set

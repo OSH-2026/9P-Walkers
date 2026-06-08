@@ -10,7 +10,7 @@
 #include "mesh_host_service.h"
 #include "sdkconfig.h"
 #include "shell.h"
-#include "wifi_softap.h"
+#include "lan_init.h"
 
 // 打印系统初始信息
 static void print_chip_banner(void)
@@ -52,9 +52,9 @@ void app_main(void)
         return;
     }
 
-    /* Bring up WiFi SoftAP so browsers can reach the web server.
-     * SSID: 9P-Walkers  Password: pwos1234  IP: 192.168.4.1 */
-    wifi_softap_init();
+    /* Bring up Ethernet (internal EMAC + RMII PHY) so browsers can reach
+     * the web server.  IP is obtained via DHCP and logged on link-up. */
+    lan_init();
 
     /* Start HTTP + WebSocket server (port 80). */
     web_server_start();

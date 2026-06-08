@@ -1,5 +1,8 @@
 #include "mesh_host_runtime.h"
-
+#ifdef ESP_PLATFORM
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#endif
 #include <string.h>
 
 /*

@@ -273,28 +273,6 @@ static int l_vfs_detach(lua_State *L)
     return 1;
 }
 
-/* vfs.route_state(target) -> "empty"|"ready"|"attached"|"offline" | nil,err */
-static int l_vfs_route_state(lua_State *L)
-{
-    const char *target = luaL_checkstring(L, 1);
-    enum cluster_vfs_route_state state;
-    int rc = cluster_vfs_get_route_state(target, &state);
-    if (rc < 0) {
-        return push_vfs_error(L, rc);
-    }
-
-    const char *name;
-    switch (state) {
-    case CLUSTER_VFS_ROUTE_EMPTY:    name = "empty";    break;
-    case CLUSTER_VFS_ROUTE_READY:    name = "ready";    break;
-    case CLUSTER_VFS_ROUTE_ATTACHED: name = "attached"; break;
-    case CLUSTER_VFS_ROUTE_OFFLINE:  name = "offline";  break;
-    default:                         name = "unknown";  break;
-    }
-    lua_pushstring(L, name);
-    return 1;
-}
-
 /* ------------------------------------------------------------------ */
 /* 注册                                                                 */
 /* ------------------------------------------------------------------ */
@@ -315,7 +293,6 @@ void pw_lua_register_vfs_bindings(lua_State *L)
         /* 路由管理 */
         {"attach",      l_vfs_attach},
         {"detach",      l_vfs_detach},
-        {"route_state", l_vfs_route_state},
         {NULL, NULL},
     };
 

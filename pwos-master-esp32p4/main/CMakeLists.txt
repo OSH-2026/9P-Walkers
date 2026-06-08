@@ -33,7 +33,7 @@ idf_component_register(
         "../shell/shell.c"
         "../web/http_server.c"
         "../web/websocket_shell.c"
-        "../web/wifi_softap.c"
+        "../web/lan_init.c"
         ${LUA_SRCS}
     EMBED_FILES
         "../web/index.html"
@@ -41,10 +41,11 @@ idf_component_register(
         esp_timer
         spi_flash
         esp_http_server
-        esp_wifi
+        esp_eth
         esp_event
         esp_netif
         nvs_flash
+        esp_driver_uart
     INCLUDE_DIRS
         "."
         "../lua"
