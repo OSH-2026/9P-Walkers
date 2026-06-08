@@ -1,3 +1,4 @@
 [submodule "Lab4/llama.cpp"]
 	path = Lab4/llama.cpp
 	url = https://github.com/ggerganov/llama.cpp.git
+	ignore = all
