@@ -73,6 +73,12 @@
 /** 健康检查路径格式，先 walk 再 open read。 */
 #define PC_MASTER_HEALTH_PATH_FMT "/%s/sys/health"
 
+/** SD-backed littlefs smoke test path. */
+#define PC_MASTER_FS_SMOKE_PATH_FMT "/%s/fs/pc_master_smoke.txt"
+
+/** SD-backed littlefs smoke test payload. */
+#define PC_MASTER_FS_SMOKE_PAYLOAD "pc_master_emulator sd smoke\n"
+
 /** 从机 mesh 路由诊断路径。 */
 #define PC_MASTER_ROUTES_PATH_FMT "/%s/sys/routes"
 
@@ -1420,6 +1426,47 @@ static int read_health_path(const char *target)
     return 0;
 }
 
+static int write_read_fs_smoke_path(const char *target)
+{
+    char fs_path[80];
+    const uint8_t payload[] = PC_MASTER_FS_SMOKE_PAYLOAD;
+    uint8_t readback[sizeof(payload)];
+    uint16_t written = 0u;
+    uint16_t len = (uint16_t)(sizeof(readback) - 1u);
+    int rc;
+
+    rc = snprintf(fs_path, sizeof(fs_path), PC_MASTER_FS_SMOKE_PATH_FMT, target);
+    if (rc < 0 || (size_t)rc >= sizeof(fs_path)) {
+        fprintf(stderr, "fs smoke path too long for %s\n", target);
+        return -(int)M9P_ERR_EINVAL;
+    }
+
+    rc = cluster_vfs_write_path(fs_path, payload, (uint16_t)(sizeof(payload) - 1u), &written);
+    if (rc != 0) {
+        fprintf(stderr, "cluster_vfs_write_path(%s) failed: %d\n", fs_path, rc);
+        return rc;
+    }
+    if (written != (uint16_t)(sizeof(payload) - 1u)) {
+        fprintf(stderr, "short write to %s: %u\n", fs_path, (unsigned)written);
+        return -(int)M9P_ERR_EIO;
+    }
+
+    memset(readback, 0, sizeof(readback));
+    rc = cluster_vfs_read_path(fs_path, readback, &len);
+    if (rc != 0) {
+        fprintf(stderr, "cluster_vfs_read_path(%s) failed: %d\n", fs_path, rc);
+        return rc;
+    }
+    if (len != (uint16_t)(sizeof(payload) - 1u) ||
+        memcmp(readback, payload, sizeof(payload) - 1u) != 0) {
+        fprintf(stderr, "unexpected %s readback\n", fs_path);
+        return -(int)M9P_ERR_EIO;
+    }
+
+    printf("write/read %s: %.*s", fs_path, (int)len, (const char *)readback);
+    return 0;
+}
+
 static int read_routes_path(const char *target)
 {
     char routes_path[64];
@@ -1600,6 +1647,11 @@ static int run_dynamic_sequence(
         }
 
         rc = read_health_path(target);
+        if (rc != 0) {
+            return rc;
+        }
+
+        rc = write_read_fs_smoke_path(target);
         if (rc != 0) {
             return rc;
         }

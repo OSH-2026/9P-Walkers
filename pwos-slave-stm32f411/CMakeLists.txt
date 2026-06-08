@@ -33,6 +33,11 @@ option(PWOS_ENABLE_MINI9P_SERIAL "Enable STM32F411 Mini9P mesh serial bring-up" 
 option(PWOS_ENABLE_LFS_SELFTEST "Populate littlefs debug fixtures on boot" ON)
 option(PWOS_SKIP_LFS_MOUNT "Skip lfs_vfs mount during Mini9P board bring-up" OFF)
 option(PWOS_ENABLE_MESH_DIAG "Enable blocking mesh diagnostic text output on USART1" OFF)
+option(PWOS_ENABLE_SECOND_MESH_UART "Enable USART1 as mesh port1 for relay bring-up" OFF)
+
+if(PWOS_ENABLE_SECOND_MESH_UART AND PWOS_ENABLE_MESH_DIAG)
+    message(FATAL_ERROR "PWOS_ENABLE_SECOND_MESH_UART and PWOS_ENABLE_MESH_DIAG both use USART1")
+endif()
 
 # Enable CMake support for ASM, C and C++ languages
 enable_language(C CXX ASM)
@@ -61,6 +66,7 @@ set(PWOS_SHARED_MESH_CLUSTER_DIR ${PWOS_SHARED_MESH_DIR}/cluster)
 set(PWOS_SHARED_MESH_ENVELOPE_DIR ${PWOS_SHARED_MESH_DIR}/envelope)
 set(PWOS_SHARED_MESH_PROCESSER_DIR ${PWOS_SHARED_MESH_DIR}/processer)
 set(PWOS_SHARED_MESH_TRANSPORT_DIR ${PWOS_SHARED_MESH_DIR}/transport)
+set(PWOS_SHARED_MESH_WIFI_DIR ${PWOS_SHARED_MESH_DIR}/wifi)
 
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
@@ -129,6 +135,9 @@ if(PWOS_SKIP_LFS_MOUNT)
 endif()
 if(PWOS_ENABLE_MESH_DIAG)
     target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE PWOS_ENABLE_MESH_DIAG)
+endif()
+if(PWOS_ENABLE_SECOND_MESH_UART)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE PWOS_ENABLE_SECOND_MESH_UART)
 endif()
 
 # Remove wrong libob.a library dependency when using cpp files

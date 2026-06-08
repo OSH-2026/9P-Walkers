@@ -304,6 +304,28 @@ static int write_open_flags(uint8_t mode)
     return (mode & 0x03u) == M9P_ORDWR ? LFS_O_RDWR : LFS_O_WRONLY;
 }
 
+static int create_file_for_write(struct lfs_vfs *vfs, const char *path, uint8_t mode)
+{
+    lfs_file_t file;
+    int flags = write_open_flags(mode) | LFS_O_CREAT;
+    int rc;
+
+    if ((mode & M9P_OTRUNC) != 0u) {
+        flags |= LFS_O_TRUNC;
+    }
+
+    rc = lfs_file_open(vfs->lfs, &file, path, flags);
+    if (rc < 0) {
+        return lfs_error_to_m9p(rc);
+    }
+
+    rc = lfs_file_close(vfs->lfs, &file);
+    if (rc < 0) {
+        return lfs_error_to_m9p(rc);
+    }
+    return 0;
+}
+
 static int lfs_stat_cb(void *ctx, const char *path, struct m9p_stat *out_stat)
 {
     return stat_path((struct lfs_vfs *)ctx, path, out_stat);
@@ -325,6 +347,13 @@ static int lfs_open_cb(void *ctx,
     }
 
     rc = stat_path(vfs, path, &stat);
+    if (rc == -(int)M9P_ERR_ENOENT && access != M9P_OREAD) {
+        rc = create_file_for_write(vfs, path, mode);
+        if (rc != 0) {
+            return rc;
+        }
+        rc = stat_path(vfs, path, &stat);
+    }
     if (rc != 0) {
         return rc;
     }

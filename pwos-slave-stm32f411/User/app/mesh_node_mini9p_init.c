@@ -8,7 +8,9 @@
 
 #include <string.h>
 
+#ifdef PWOS_ENABLE_SECOND_MESH_UART
 extern UART_HandleTypeDef huart1;
+#endif
 extern UART_HandleTypeDef huart2;
 
 static struct node_vfs g_node_vfs;
@@ -68,16 +70,17 @@ int mesh_node_mini9p_init(void)
         return rc;
     }
 
-    memset(&mesh_config, 0, sizeof(mesh_config));
-    mesh_config.port_count = 2u;
-    mesh_config.ports[0].enabled = true;
+    mesh_node_service_get_default_config(&mesh_config);
     mesh_uart_transport_get_default_config(&mesh_config.ports[0].uart_config);
     mesh_config.ports[0].uart_config.uart = &huart2;
     mesh_config.ports[0].uart_config.io_timeout_ms = 1u;
+#ifdef PWOS_ENABLE_SECOND_MESH_UART
+    mesh_config.port_count = 2u;
     mesh_config.ports[1].enabled = true;
     mesh_uart_transport_get_default_config(&mesh_config.ports[1].uart_config);
     mesh_config.ports[1].uart_config.uart = &huart1;
     mesh_config.ports[1].uart_config.io_timeout_ms = 1u;
+#endif
     mesh_config.mini9p_server_handler = m9p_server_handle_frame;
     mesh_config.mini9p_server_ctx = &g_mini9p_server;
     rc = mesh_node_service_init(&mesh_config);

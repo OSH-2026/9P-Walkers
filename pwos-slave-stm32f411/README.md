@@ -60,15 +60,17 @@ pwos-slave-stm32f411/
 
 ### F411 板级初始化重点
 
-`User/app/mesh_node_mini9p_init.c` 是 F411 独立于 pwos-slave 的核心文件，负责把 STM32CubeMX 生成的 `UART_HandleTypeDef huart1/huart2` 注入到 mesh service：
+`User/app/mesh_node_mini9p_init.c` 是 F411 独立于 pwos-slave 的核心文件，负责把 STM32CubeMX 生成的 `UART_HandleTypeDef huart2` 注入到 mesh service；需要 relay 时再通过 `PWOS_ENABLE_SECOND_MESH_UART=ON` 加入 `huart1`：
 
 ```c
-extern UART_HandleTypeDef huart1;  // 由 CubeMX 生成在 main.c
 extern UART_HandleTypeDef huart2;
 
-mesh_config.port_count = 2u;
 mesh_config.ports[0].uart_config.uart = &huart2;  // 上游/PC 通信口
+#ifdef PWOS_ENABLE_SECOND_MESH_UART
+extern UART_HandleTypeDef huart1;  // 由 CubeMX 生成在 main.c
+mesh_config.port_count = 2u;
 mesh_config.ports[1].uart_config.uart = &huart1;  // 下游从机通信口
+#endif
 ```
 
 两个文件差异对照：
@@ -78,7 +80,7 @@ mesh_config.ports[1].uart_config.uart = &huart1;  // 下游从机通信口
 | mesh init 文件 | `User/app/mesh_node_mini9p_init.c` | 同左（F411 独立版本） |
 | mesh_diag | `User/app/mesh_diag.c/h` 引用 | **不引用**，mesh_diag 来自 pwos-slave 共享 |
 | node_vfs 回调 | `routes_text_fn` + `log_text_fn` | `routes_text_fn` + `log_text_fn` |
-| UART 配置 | 注释掉 USART1 init | 启用 USART1/USART2 双端口 |
+| UART 配置 | USART2 默认单端口,开关启用 USART1 | USART2 默认单端口,开关启用 USART1 |
 | LFS backend | SD 卡 | RAM backed（`PWOS_LFS_PORT_USE_RAM`） |
 | 时钟树 | HSI PLL（默认） | **HSE PLL**（SYSCLK 96MHz，APB1 48MHz） |
 
@@ -175,6 +177,6 @@ pwos-slave-stm32f411/
 
 - F411 固件不支持 SD 卡存储，littlefs 使用 RAM backed（`PWOS_LFS_PORT_USE_RAM`）
 - F411 不使用 F407 板级联调 preset;构建时只使用本文档列出的 Debug/Release 命令
-- USART2（PA2=TX, PA3=RX）是与 PC/host 通信的 mesh 主口，USART1 是下游级联口
+- USART2（PA2=TX, PA3=RX）是与 PC/host 通信的 mesh 主口，`PWOS_ENABLE_SECOND_MESH_UART=ON` 时 USART1 是下游级联口
 - 两个串口均运行在 **1000000 baud**，只传 Mini9P/mesh 二进制帧，不混入 VOFA 文本；时钟树必须配置为 HSE PLL 以保证精度
 - 共用代码变更后，F411 和 F407 固件会同时生效；建议先在 F407 验证后再烧录 F411

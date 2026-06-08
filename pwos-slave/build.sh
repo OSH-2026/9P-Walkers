@@ -4,8 +4,9 @@ set -euo pipefail
 ACTION="${1:-build}"
 PC_SERIAL_DEV="${PC_SERIAL_DEV:-/dev/ttyUSB0}"
 PC_SERIAL_BAUD="${PC_SERIAL_BAUD:-1000000}"
-PC_NODE_COUNT="${PC_NODE_COUNT:-2}"
-PRESET="${PRESET:-ZGT6Debug}"
+PC_NODE_COUNT="${PC_NODE_COUNT:-1}"
+PWOS_ENABLE_UART5_MESH="${PWOS_ENABLE_UART5_MESH:-OFF}"
+PRESET="${PRESET:-F407Debug}"
 OPENOCD_INTERFACE="${OPENOCD_INTERFACE:-interface/stlink.cfg}"
 OPENOCD_TARGET="${OPENOCD_TARGET:-target/stm32f4x.cfg}"
 
@@ -17,17 +18,19 @@ usage() {
 usage: $0 [build|flash|test|flash-test]
 
 env:
-  PRESET             CMake preset, default: ZGT6Debug
+  PRESET             CMake preset, default: F407Debug
   OPENOCD_INTERFACE  OpenOCD interface config, default: interface/stlink.cfg
   OPENOCD_TARGET     OpenOCD target config, default: target/stm32f4x.cfg
   PC_SERIAL_DEV      serial device for pc_master_emulator, default: /dev/ttyUSB0
   PC_SERIAL_BAUD     serial baud for pc_master_emulator, default: 1000000
   PC_NODE_COUNT      number of nodes to wait for, default: 1
+  PWOS_ENABLE_UART5_MESH
+                      enable UART5 mesh port and disable SDIO VFS, default: OFF
 EOF
 }
 
 build_firmware() {
-    cmake --preset "$PRESET"
+    cmake --preset "$PRESET" -DPWOS_ENABLE_UART5_MESH="$PWOS_ENABLE_UART5_MESH"
     cmake --build --preset "$PRESET"
 }
 

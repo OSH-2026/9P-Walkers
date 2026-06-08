@@ -57,8 +57,8 @@
 HAL_SD_CardInfoTypeDef SDCardInfo;
 FS_SelfTestReport g_fs_report;
 #endif
-#if defined(PWOS_ENABLE_MINI9P_SERIAL) && defined(PWOS_BOARD_ZGT6)
-static uint32_t g_led_last_toggle_ms;
+#ifdef PWOS_ENABLE_MINI9P_SERIAL
+static uint32_t g_register_retry_last_ms;
 #endif
 /* USER CODE END PV */
 
@@ -128,17 +128,23 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+#ifdef PWOS_ENABLE_MINI9P_SERIAL
+  MX_USART1_UART_Init();
+  MX_USART2_UART_Init();
+#ifndef PWOS_ENABLE_UART5_MESH
+  MX_SDIO_SD_Init();
+#endif
+  MX_USART3_UART_Init();
+  MX_UART4_UART_Init();
+#ifdef PWOS_ENABLE_UART5_MESH
+  MX_UART5_UART_Init();
+#endif
+  MX_USART6_UART_Init();
+#else
   MX_USART2_UART_Init();
   MX_SDIO_SD_Init();
-  MX_USART1_UART_Init();
+#endif
   /* USER CODE BEGIN 2 */
-#ifdef PWOS_BOARD_ZGT6
-  MX_GPIO_PF9_LED_Init();
-  MX_GPIO_PF10_LED_Init();
-#ifdef PWOS_ENABLE_MINI9P_SERIAL
-  HAL_GPIO_WritePin(GPIOF, GPIO_PIN_9, GPIO_PIN_SET);
-#endif
-#endif
 #ifdef PWOS_ENABLE_MINI9P_SERIAL
   if (mesh_node_mini9p_init() != 0) {
     Error_Handler();
@@ -162,15 +168,16 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 #ifdef PWOS_ENABLE_MINI9P_SERIAL
-#ifdef PWOS_BOARD_ZGT6
     {
+      struct mesh_node_runtime *runtime = mesh_node_service_runtime();
       uint32_t now = HAL_GetTick();
-      if ((uint32_t)(now - g_led_last_toggle_ms) >= 100U) {
-        HAL_GPIO_TogglePin(GPIOF, GPIO_PIN_9);  // PF9 接绿色 LED
-        g_led_last_toggle_ms = now;
+      if (runtime != NULL &&
+          runtime->processor.config.local_addr == MESH_ADDR_UNASSIGNED &&
+          (uint32_t)(now - g_register_retry_last_ms) >= 1000U) {
+        (void)mesh_node_service_notify_link_up();
+        g_register_retry_last_ms = now;
       }
     }
-#endif
     (void)mesh_node_service_poll_once();
 #else
     (void)vofa_firewater_send_fs_report(&g_fs_report, HAL_GetTick());
@@ -236,12 +243,6 @@ void SystemClock_Config(void)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-#if defined(PWOS_ENABLE_MINI9P_SERIAL) && defined(PWOS_BOARD_ZGT6)
-  while (1) {
-    HAL_GPIO_TogglePin(GPIOF, GPIO_PIN_9);
-    HAL_Delay(50);
-  }
-#endif
 #ifndef PWOS_ENABLE_MINI9P_SERIAL
   /* User can add his own implementation to report the HAL error return state */
   {

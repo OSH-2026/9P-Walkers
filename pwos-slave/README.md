@@ -45,16 +45,16 @@ cmake --build --preset Debug
 
 `Debug` 是正常本地固件配置,默认不启动 Mini9P mesh 串口服务。
 
-ZGT6 开发板 Mini9P/mesh bring-up:
+F407 Mini9P/mesh bring-up:
 
 ```sh
-cmake --preset ZGT6Debug
-cmake --build --preset ZGT6Debug
+cmake --preset F407Debug
+cmake --build --preset F407Debug
 ```
 
-`ZGT6Debug` 启用 `PWOS_BOARD_ZGT6=ON`、`PWOS_ENABLE_MINI9P_SERIAL=ON`、`PWOS_SKIP_LFS_MOUNT=ON`。
+`F407Debug` 启用 `PWOS_ENABLE_MINI9P_SERIAL=ON`。Mini9P mesh 模式会正常初始化 SDIO 并尝试挂载 SD-backed littlefs 到 `/fs`。
 
-辅助脚本默认使用 `ZGT6Debug`:
+辅助脚本默认使用 `F407Debug`:
 
 ```sh
 pwos-slave/build.sh build
@@ -70,21 +70,31 @@ pwos-slave/build.sh flash-test
 
 ```c
 MX_GPIO_Init();
+MX_USART1_UART_Init();
 MX_USART2_UART_Init();
+MX_SDIO_SD_Init();
+MX_USART3_UART_Init();
+MX_UART4_UART_Init();
+MX_USART6_UART_Init();
 mesh_node_mini9p_init();
 while (1) {
     mesh_node_service_poll_once();
 }
 ```
 
-正常 VOFA/firewater 和 fs 自检循环在该模式下被禁用。USART2 只承载 Mini9P 二进制帧,不输出 VOFA 文本或 fs report,避免污染协议流。
+正常 VOFA/firewater 和 fs 自检循环在该模式下被禁用。所有启用的 mesh UART 只承载 Mini9P/mesh 二进制帧,不输出 VOFA 文本或 fs report,避免污染协议流。
 
 当前 F407 mesh UART 配置:
 
-- `port0`:`USART2`,`PA2=TX`,`PA3=RX`,用于主机 / PC 上行链路
-- `port1`:`USART1`,`PA9=TX`,`PA10=RX`,用于下行从机链路
+- `USART1`: `PA9=TX`, `PA10=RX`
+- `USART2`: `PA2=TX`, `PA3=RX`
+- `USART3`: `PB10=TX`, `PB11=RX`
+- `UART4`: `PA0=TX`, `PA1=RX`
+- `USART6`: `PC6=TX`, `PC7=RX`
 
-两个端口均运行在 `1000000` 波特率。单节点 PC 冒烟测试时,把 PC USB-UART 适配器接到 `USART2`。
+这些端口均运行在 `1000000` 波特率。`mesh_node_mini9p_init()` 会根据 HAL UART 初始化状态自动把已启用端口加入 mesh service。master 或另一块 slave 可以接到上面任意一个端口,bootstrap REGISTER 会广播到全部已启用端口,收到 ASSIGN 的端口会成为当前上游 control-plane 端口。
+
+`UART5` 的固定引脚是 `PC12=TX`、`PD2=RX`,与 SDIO 的 `SDIO_CK/CMD` 冲突。默认为了挂载 SD-backed `/fs` 不启用 UART5；如果确实要测试六串口 mesh,可以用 `PWOS_ENABLE_UART5_MESH=ON`,这会跳过 SDIO 初始化并使 `/fs` 不可用。
 
 ## PC 主控模拟器
 
@@ -95,17 +105,6 @@ tools/pc_master_emulator/build/pc_master_emulator /dev/ttyUSB0 1000000 1
 ```
 
 第三个参数是等待的节点数量,测试双从机链路时使用 `2`。
-
-## Mesh 诊断
-
-`PWOS_ENABLE_MESH_DIAG` 默认关闭,仅调试板级 bring-up 时启用:
-
-```sh
-cmake --preset ZGT6Debug -DPWOS_ENABLE_MESH_DIAG=ON
-cmake --build --preset ZGT6Debug
-```
-
-诊断信息通过 `USART1` 阻塞式打印。因为 `USART1` 同时是 `mesh port1`,这会干扰时序并在二进制 mesh 帧中混入文本。正常 mesh 测试和链路中继测试请保持 `PWOS_ENABLE_MESH_DIAG=OFF`。
 
 ## 注意事项
 

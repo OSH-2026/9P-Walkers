@@ -30,7 +30,7 @@ extern "C" {
 #define MESH_NODE_SERVICE_FRAME_CAP M9P_SERVER_DEFAULT_MSIZE
 
 /** 一个节点服务实例最多管理的 UART mesh 端口数量。 */
-#define MESH_NODE_SERVICE_MAX_PORTS 4u
+#define MESH_NODE_SERVICE_MAX_PORTS 6u
 
 /**
  * @brief 发送到所有已启用 UART 端口的特殊 next_hop selector。

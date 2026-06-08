@@ -5,6 +5,7 @@ ACTION="${1:-build}"
 PC_SERIAL_DEV="${PC_SERIAL_DEV:-/dev/ttyUSB0}"
 PC_SERIAL_BAUD="${PC_SERIAL_BAUD:-1000000}"
 PC_NODE_COUNT="${PC_NODE_COUNT:-1}"
+PWOS_ENABLE_SECOND_MESH_UART="${PWOS_ENABLE_SECOND_MESH_UART:-OFF}"
 
 cd "$(dirname "$0")"
 REPO_ROOT="$(cd .. && pwd)"
@@ -17,11 +18,13 @@ env:
   PC_SERIAL_DEV   serial device for pc_master_emulator, default: /dev/ttyUSB0
   PC_SERIAL_BAUD  serial baud for pc_master_emulator, default: 1000000
   PC_NODE_COUNT   number of nodes to wait for, default: 1
+  PWOS_ENABLE_SECOND_MESH_UART
+                  enable USART1 as mesh port1, default: OFF
 EOF
 }
 
 build_firmware() {
-    cmake --preset Debug
+    cmake --preset Debug -DPWOS_ENABLE_SECOND_MESH_UART="$PWOS_ENABLE_SECOND_MESH_UART"
     cmake --build --preset Debug
 }
 

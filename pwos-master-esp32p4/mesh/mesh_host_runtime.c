@@ -16,8 +16,6 @@
  *    换取一个真正可运行、可调试的 runtime 闭环。
  */
 
-#define MESH_HOST_RUNTIME_WIFI_LINK_METRIC 1u
-
 static bool m9p_type_is_response(uint8_t type)
 {
     return (type & 0x80u) != 0u;
@@ -26,15 +24,6 @@ static bool m9p_type_is_response(uint8_t type)
 static bool m9p_type_is_request(uint8_t type)
 {
     return (type & 0x80u) == 0u;
-}
-
-static uint8_t mesh_host_runtime_normalize_register_port_bitmap(uint8_t port_bitmap, bool wifi_supported)
-{
-    if (wifi_supported) {
-        return (uint8_t)(port_bitmap | CLUSTER_PORT_WIFI_MASK);
-    }
-
-    return (uint8_t)(port_bitmap & (uint8_t)~CLUSTER_PORT_WIFI_MASK);
 }
 
 static uint16_t mesh_host_runtime_next_seq(struct mesh_host_runtime *runtime)
@@ -584,8 +573,7 @@ out:
 int mesh_host_runtime_register_assigned_node(
     struct mesh_host_runtime *runtime,
     uint8_t mesh_addr,
-    const struct mesh_register_payload *payload,
-    bool *out_topology_changed)
+    const uint8_t uid[MESH_UID_LEN])
 {
     struct m9p_client *client = NULL;
     int rc;
@@ -597,7 +585,7 @@ int mesh_host_runtime_register_assigned_node(
         return 0;
     }
 
-    rc = mesh_host_runtime_prepare_registered_client(runtime, mesh_addr, payload->uid, &client);
+    rc = mesh_host_runtime_prepare_registered_client(runtime, mesh_addr, uid, &client);
     if (rc != 0) {
         return rc;
     }
@@ -609,26 +597,7 @@ int mesh_host_runtime_register_assigned_node(
      */
     client->transport = mesh_host_runtime_client_request;
 
-    if (payload->wifi_supported &&
-        (mesh_host_runtime_normalize_register_port_bitmap(payload->port_bitmap, payload->wifi_supported) &
-         CLUSTER_PORT_WIFI_MASK) != 0u) {
-        rc = cluster_add_link_with_ports(
-            runtime->config.mesh_cluster,
-            runtime->config.local_addr,
-            mesh_addr,
-            MESH_HOST_RUNTIME_WIFI_LINK_METRIC,
-            true,
-            CLUSTER_PORT_WIFI_ID,
-            CLUSTER_PORT_WIFI_ID);
-        if (rc != 0) {
-            return rc;
-        }
-        if (out_topology_changed != NULL) {
-            *out_topology_changed = true;
-        }
-    }
-
-    return cluster_config_on_mesh_node_registered(mesh_addr, payload->uid, client, NULL, NULL);
+    return cluster_config_on_mesh_node_registered(mesh_addr, uid, client, NULL, NULL);
 }
 
 static int mesh_host_runtime_apply_host_local_link(
@@ -688,7 +657,6 @@ static int mesh_host_runtime_control_handler(
     switch (frame->type) {
     case MESH_TYPE_REGISTER: {
         struct mesh_register_payload payload;
-        bool topology_changed = false;
 
         if (!mesh_parse_register(frame, &payload)) {
             return -(int)MESH_ERR_BAD_FRAME;
@@ -742,7 +710,7 @@ static int mesh_host_runtime_control_handler(
         if (rc != 0) {
             return rc;
         }
-        return mesh_host_runtime_sync_all_remote_route_tables(runtime);
+        return mesh_host_runtime_sync_controller_routes(runtime);
 
     case MESH_TYPE_PING:
     case MESH_TYPE_PONG:

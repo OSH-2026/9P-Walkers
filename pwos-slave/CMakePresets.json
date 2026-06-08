@@ -17,13 +17,11 @@
             }
         },
         {
-            "name": "ZGT6Debug",
+            "name": "F407Debug",
             "inherits": "default",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug",
-                "PWOS_BOARD_ZGT6": "ON",
-                "PWOS_ENABLE_MINI9P_SERIAL": "ON",
-                "PWOS_SKIP_LFS_MOUNT": "ON"
+                "PWOS_ENABLE_MINI9P_SERIAL": "ON"
             }
         },
         {
@@ -40,8 +38,8 @@
             "configurePreset": "Debug"
         },
         {
-            "name": "ZGT6Debug",
-            "configurePreset": "ZGT6Debug"
+            "name": "F407Debug",
+            "configurePreset": "F407Debug"
         },
         {
             "name": "Release",

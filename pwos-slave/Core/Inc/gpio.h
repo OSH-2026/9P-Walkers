@@ -39,10 +39,6 @@ extern "C" {
 void MX_GPIO_Init(void);
 
 /* USER CODE BEGIN Prototypes */
-#ifdef PWOS_BOARD_ZGT6
-void MX_GPIO_PF9_LED_Init(void);
-void MX_GPIO_PF10_LED_Init(void);
-#endif
 
 /* USER CODE END Prototypes */
 

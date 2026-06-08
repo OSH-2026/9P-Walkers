@@ -57,8 +57,9 @@ tools/pc_master_emulator/build/pc_master_emulator /dev/ttyUSB0 1000000 2
 4. 接收从机上报的 `LINK_STATE`，由 host runtime 计算并下发 `ROUTE_UPDATE`
 5. 对每个目标节点执行 `cluster_vfs_attach("mcuN")`
 6. 读取 `/mcuN/sys/health`
+7. 写入并读回 `/mcuN/fs/pc_master_smoke.txt`
 
-成功标准是每个目标节点的 `/sys/health` 都读到 `ok\n`，并打印：
+成功标准是每个目标节点的 `/sys/health` 都读到 `ok\n`，`/fs` 写读回环一致，并打印：
 
 ```text
 pc_master_emulator: ok
@@ -68,24 +69,23 @@ pc_master_emulator: ok
 
 当前默认从机集成：
 
-- `pwos-slave/User/app/mesh_node_mini9p_init.c` 默认只把 `huart2` 加入 `mesh_node_service`。
-- 当前 F407/F411 的 `USART2` 均为 `1000000 8N1`。
-- `USART2 TX = PA2`，`USART2 RX = PA3`。
+- F407 `pwos-slave` 会把所有已初始化的 mesh UART 加入 `mesh_node_service`。
+- 默认 F407 mesh UART 为 `USART1/USART2/USART3/UART4/USART6`，均为 `1000000 8N1`。
+- UART5 与 SDIO 引脚冲突，默认不启用，以保留 SD-backed `/fs`。
 
-因此单板直连可以直接使用默认固件；两从机串联时，slave A 必须先改成多端口 mesh 配置，把第二个 UART 也加入 `mesh_config.ports[]`，否则 A 没有下游端口可以接 slave B。
+因此单板直连可以直接使用默认固件，并把 PC USB-UART 适配器接到任意已启用 F407 mesh UART。
 
 直连 smoke test：
 
-- USB-TTL TX -> STM32 Mini9P UART RX；当前 F407/F411 联调口为 `USART2 RX = PA3`
-- USB-TTL RX -> STM32 Mini9P UART TX；当前 F407/F411 联调口为 `USART2 TX = PA2`
+- USB-TTL TX -> STM32 任意已启用 mesh UART RX
+- USB-TTL RX -> STM32 同一个 mesh UART TX
 - GND -> GND
 - 使用 3.3V TTL 电平
 
 两从机串联联调：
 
-- PC USB-TTL 接 slave A 的上游 mesh UART，默认可用 `USART2 PA2/PA3`。
-- slave A 的另一个已启用 mesh UART 接 slave B 的上游 mesh UART。
-- slave A/B 固件需要启用多 UART mesh node service。
+- PC USB-TTL 接 slave A 的任意已启用 mesh UART。
+- slave A 的另一个已启用 mesh UART 接 slave B 的任意已启用 mesh UART。
 - slave A/B 负责完成邻居 probe、动态 `addr -> port` 学习和 `LINK_STATE` 上报；PC emulator 只作为 host/controller。
 
 从机固件需要开启 Mini9P 串口联调模式，例如使用 `PWOS_ENABLE_MINI9P_SERIAL` 构建。该模式下对应 USART 应由 Mini9P 二进制帧独占，不应混入 VOFA 或其他文本日志。
