@@ -57,7 +57,7 @@ tools/pc_master_emulator/build/pc_master_emulator /dev/ttyUSB0 1000000 2
 4. 接收从机上报的 `LINK_STATE`，由 host runtime 计算并下发 `ROUTE_UPDATE`
 5. 对每个目标节点执行 `cluster_vfs_attach("mcuN")`
 6. 读取 `/mcuN/sys/health`
-7. 写入并读回 `/mcuN/fs/pc_master_smoke.txt`
+7. 写入并读回 `/mcuN/fs/verify/debug/pc_master_smoke.txt`
 
 成功标准是每个目标节点的 `/sys/health` 都读到 `ok\n`，`/fs` 写读回环一致，并打印：
 

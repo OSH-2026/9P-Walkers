@@ -690,7 +690,7 @@ static void test_write_path_helper(void)
     setup_attached_node(&ctx, &client);
     expect_int("write_path", cluster_vfs_write_path("/mcu1/dev/temp", data, (uint16_t)sizeof(data), &written), 0);
     expect_str("write_path mapped path", ctx.last_walk_path, "/dev/temp");
-    expect_int("write_path open mode", ctx.last_open_mode, M9P_OWRITE);
+    expect_int("write_path open mode", ctx.last_open_mode, M9P_OWRITE | M9P_OTRUNC);
     expect_u16("write_path count", written, (uint16_t)sizeof(data));
     expect_u16("write_path fid", ctx.last_write_fid, ctx.last_open_fid);
     expect_int("write_path clunk count", ctx.clunk_count, 1);

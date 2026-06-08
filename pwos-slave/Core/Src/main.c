@@ -128,22 +128,12 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-#ifdef PWOS_ENABLE_MINI9P_SERIAL
+  MX_USART2_UART_Init();
+  MX_SDIO_SD_Init();
   MX_USART1_UART_Init();
-  MX_USART2_UART_Init();
-#ifndef PWOS_ENABLE_UART5_MESH
-  MX_SDIO_SD_Init();
-#endif
+  MX_UART4_Init();
   MX_USART3_UART_Init();
-  MX_UART4_UART_Init();
-#ifdef PWOS_ENABLE_UART5_MESH
-  MX_UART5_UART_Init();
-#endif
   MX_USART6_UART_Init();
-#else
-  MX_USART2_UART_Init();
-  MX_SDIO_SD_Init();
-#endif
   /* USER CODE BEGIN 2 */
 #ifdef PWOS_ENABLE_MINI9P_SERIAL
   if (mesh_node_mini9p_init() != 0) {

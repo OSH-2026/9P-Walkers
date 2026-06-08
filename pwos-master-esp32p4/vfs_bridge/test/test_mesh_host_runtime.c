@@ -245,6 +245,22 @@ static void build_link_state_frame_with_port(
     }
 }
 
+static void build_link_state_frame(
+    uint8_t src,
+    uint8_t neighbor,
+    uint8_t link_up,
+    uint8_t *out_frame,
+    size_t *out_len)
+{
+    build_link_state_frame_with_port(
+        src,
+        neighbor,
+        link_up,
+        CLUSTER_PORT_INVALID,
+        out_frame,
+        out_len);
+}
+
 static void build_neighbor_probe_frame(
     uint8_t type,
     uint8_t src,

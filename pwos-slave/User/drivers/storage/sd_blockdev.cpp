@@ -42,6 +42,10 @@ static int sd_wait_ready(uint32_t timeout_ms) {
 int sd_blockdev_init(void) {
     HAL_SD_CardInfoTypeDef card_info;
 
+    if (!PWOS_SDIO_IsReady()) {
+        return -1;
+    }
+
     if (HAL_SD_GetCardInfo(&hsd, &card_info) != HAL_OK) {
         return -1;
     }

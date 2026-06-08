@@ -8,7 +8,7 @@
     "idf.customExtraVars": {
         "IDF_TARGET": "esp32p4"
     },
-    "idf.flashType": "UART",
+    "idf.flashType": "JTAG",
     "cmake.generator": "Ninja",
     "cmake.configureEnvironment": {
         "IDF_TARGET": "esp32p4"
@@ -16,5 +16,6 @@
     "cmake.environment": {
         "IDF_TARGET": "esp32p4"
     },
-    "idf.currentSetup": "/home/hb/.espressif/v6.0/esp-idf"
+    "idf.currentSetup": "/home/hb/.espressif/v6.0/esp-idf",
+    "idf.port": "/dev/ttyACM0"
 }

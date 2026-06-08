@@ -3,7 +3,6 @@ set(PWOS_SHARED_MINI9P_DIR "${CMAKE_CURRENT_LIST_DIR}/../../pwos-shared/mini9p")
 set(PWOS_SHARED_MESH_CLUSTER_DIR "${CMAKE_CURRENT_LIST_DIR}/../../pwos-shared/mesh/cluster")
 set(PWOS_SHARED_MESH_ENVELOPE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../pwos-shared/mesh/envelope")
 set(PWOS_SHARED_MESH_PROCESSER_DIR "${CMAKE_CURRENT_LIST_DIR}/../../pwos-shared/mesh/processer")
-set(PWOS_SHARED_MESH_NODE_RUNTIME_DIR "${CMAKE_CURRENT_LIST_DIR}/../../pwos-shared/mesh/node_runtime")
 set(PWOS_SHARED_MESH_TRANSPORT_DIR "${CMAKE_CURRENT_LIST_DIR}/../../pwos-shared/mesh/transport")
 
 list(REMOVE_ITEM LUA_SRCS
@@ -53,7 +52,6 @@ idf_component_register(
         "${PWOS_SHARED_MESH_CLUSTER_DIR}"
         "${PWOS_SHARED_MESH_ENVELOPE_DIR}"
         "${PWOS_SHARED_MESH_PROCESSER_DIR}"
-        "${PWOS_SHARED_MESH_NODE_RUNTIME_DIR}"
         "${PWOS_SHARED_MESH_TRANSPORT_DIR}"
         "../mesh"
         "../cluster"

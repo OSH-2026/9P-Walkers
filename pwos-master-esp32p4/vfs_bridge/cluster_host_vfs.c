@@ -608,6 +608,7 @@ int cluster_vfs_open(const char *path, uint8_t mode, uint16_t *out_fd)
     ret = m9p_client_open_path(route->client, remote_path, mode, &file->remote_fid, &result);
     if (ret < 0)
     {
+        memset(file, 0, sizeof(*file));
         return ret;
     }
     file->used = true;
@@ -711,7 +712,7 @@ int cluster_vfs_write_path(const char *path,
     int ret;
     int close_ret;
 
-    ret = cluster_vfs_open(path, M9P_OWRITE, &fd);
+    ret = cluster_vfs_open(path, M9P_OWRITE | M9P_OTRUNC, &fd);
     if (ret < 0)
     {
         return ret;

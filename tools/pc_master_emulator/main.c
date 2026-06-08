@@ -74,7 +74,7 @@
 #define PC_MASTER_HEALTH_PATH_FMT "/%s/sys/health"
 
 /** SD-backed littlefs smoke test path. */
-#define PC_MASTER_FS_SMOKE_PATH_FMT "/%s/fs/pc_master_smoke.txt"
+#define PC_MASTER_FS_SMOKE_PATH_FMT "/%s/fs/verify/debug/pc_master_smoke.txt"
 
 /** SD-backed littlefs smoke test payload. */
 #define PC_MASTER_FS_SMOKE_PAYLOAD "pc_master_emulator sd smoke\n"

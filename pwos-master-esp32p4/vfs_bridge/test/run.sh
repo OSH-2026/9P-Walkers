@@ -9,3 +9,9 @@ cmake --build "$BUILD_DIR"
 
 echo "=== Running cluster_vfs_test ==="
 "$BUILD_DIR/cluster_vfs_test"
+
+echo "=== Running mesh_host_service_test ==="
+"$BUILD_DIR/mesh_host_service_test"
+
+echo "=== Running mesh_host_runtime_test ==="
+"$BUILD_DIR/mesh_host_runtime_test"
