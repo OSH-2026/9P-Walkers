@@ -129,7 +129,7 @@ static void print_banner(void)
     shell_puts("pwos shell");
     shell_puts("  help      显示命令菜单(show commands)");
     shell_puts("  heap      打印可用堆内存信息(print free heap)");
-    shell_puts("  echo ...  回显输入文本(print text)");
+    shell_puts("  echo ...  回显文本或写入文件(print text / echo .. > path)");
     shell_puts("  ls [dir]  枚举集群目录节点内容(list cluster directory)");
     shell_puts("  cat <file>读取集群节点文件内容(read cluster file)");
     shell_puts("  lua       执行内置测试用Lua剧本(run built-in Lua demo)");
@@ -181,7 +181,12 @@ static int handle_m9p(const char *args)
 
 /**
  * @brief 输出(echo)命令处理器
- * 将用户敲入的文本原样输出，常用于测试 shell 解析行为是否正确包含空格。
+ *
+ * 支持两种用法：
+ *   echo <text>            将文本原样回显到终端
+ *   echo <text> > <path>   将文本写入集群路径对应文件（例如 echo 100 > /mcu1/motor/speed）
+ *
+ * 重定向时文本与路径都会去掉首尾空白；文本按原样写入，不追加换行。
  */
 static int handle_echo(const char *args)
 {
@@ -189,7 +194,56 @@ static int handle_echo(const char *args)
         shell_puts("");
         return 0;
     }
-    shell_puts(args);
+
+    /* 无重定向符时退回普通回显。 */
+    const char *redir = strchr(args, '>');
+    if (redir == NULL) {
+        shell_puts(args);
+        return 0;
+    }
+
+    /* 复制一份可修改副本，便于就地裁切文本与路径两侧空白。 */
+    char work[SHELL_LINE_CAP];
+    snprintf(work, sizeof(work), "%s", args);
+
+    char *sep = work + (redir - args);
+    *sep = '\0'; /* 在 '>' 处把文本与路径切开 */
+
+    char *text = work;
+    char *path = sep + 1;
+
+    /* 去掉文本尾部空白。 */
+    size_t text_len = strlen(text);
+    while (text_len > 0u && (text[text_len - 1u] == ' ' || text[text_len - 1u] == '\t')) {
+        text[--text_len] = '\0';
+    }
+
+    /* 跳过路径前可能多出的 '>'（容忍 ">>"，当前按覆盖写处理）与前导空白。 */
+    while (*path == '>') {
+        ++path;
+    }
+    path = skip_spaces(path);
+
+    /* 去掉路径尾部空白。 */
+    size_t path_len = strlen(path);
+    while (path_len > 0u && (path[path_len - 1u] == ' ' || path[path_len - 1u] == '\t')) {
+        path[--path_len] = '\0';
+    }
+
+    if (*path == '\0') {
+        shell_puts("usage: echo <text> > <path>");
+        return -1;
+    }
+
+    uint16_t written = 0u;
+    int rc = cluster_vfs_write_path(path, (const uint8_t *)text,
+                                    (uint16_t)text_len, &written);
+    if (rc != 0) {
+        shell_printf("echo: error %d (%s)\n", rc, m9p_error_name((uint16_t)(-rc)));
+        return rc;
+    }
+
+    shell_printf("wrote %u byte(s) to %s\n", (unsigned)written, path);
     return 0;
 }
 
