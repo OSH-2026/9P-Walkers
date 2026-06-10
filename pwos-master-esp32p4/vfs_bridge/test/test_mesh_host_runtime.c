@@ -475,28 +475,77 @@ static const struct cluster_node *find_cluster_node(const struct cluster *cluste
     return NULL;
 }
 
+/* 解析 io 中第 index 帧为 ASSIGN，并回填 payload。失败时计入 failure。 */
+static void expect_assign_tx(
+    struct fake_mesh_io *io,
+    size_t index,
+    struct mesh_assign_payload *out_assign)
+{
+    struct mesh_frame_view view;
+
+    if (index >= io->tx_count) {
+        failf("expect_assign_tx", "no such tx frame");
+        return;
+    }
+    if (!mesh_decode_frame(io->tx_frames[index], io->tx_lens[index], &view)) {
+        failf("expect_assign_tx", "decode failed");
+        return;
+    }
+    expect_int("assign tx type", (int)view.type, (int)MESH_TYPE_ASSIGN);
+    expect_int("assign tx dst is bootstrap", (int)view.dst, (int)MESH_ADDR_UNASSIGNED);
+    if (!mesh_parse_assign(&view, out_assign)) {
+        failf("expect_assign_tx", "parse assign failed");
+    }
+}
+
 /*
- * bootstrap REGISTER 的 src 仍是 0xFF，host 此时不能把节点暴露给上层 VFS。
- * ASSIGN 成功后由调用方显式注册 UID/addr，二次 REGISTER 不再是必要条件。
+ * bootstrap REGISTER（src=0xFF）：主机分配地址、回发 ASSIGN，并立即把节点注册进
+ * VFS。验证：
+ * 1. 发出一帧 ASSIGN，dst=0xFF、addr=0x11、UID 与 REGISTER 一致；
+ * 2. 占位地址 0xFF 不会被建成 cluster 节点（控制器在 shared cluster 处理器之前拦截）；
+ * 3. mcu1 随即可见（attach 返回 EAGAIN：已登记但尚未可达）；
+ * 4. 同一 UID 重复 bootstrap REGISTER 幂等——复发同一地址、不漂移；
+ * 5. 不同 UID 分配下一个地址 0x22。
  */
-static void test_unassigned_register_waits_for_assigned_registration(void)
+static void test_bootstrap_register_assigns_and_registers(void)
 {
     struct mesh_host_runtime runtime;
     struct fake_mesh_io io;
+    struct mesh_assign_payload assign;
     uint8_t uid[MESH_UID_LEN];
     bool online = true;
 
     init_runtime(&runtime, &io);
-    process_register(&runtime, MESH_ADDR_UNASSIGNED, 0x05u);
 
-    expect_int("bootstrap register hidden", cluster_vfs_attach("mcu1"), -(int)M9P_ERR_ENOENT);
-    expect_int("bootstrap unassigned online rc",
+    /* 1. 第一次 bootstrap REGISTER -> ASSIGN(addr=0x11) + 注册。 */
+    process_register(&runtime, MESH_ADDR_UNASSIGNED, 0x05u);
+    expect_int("first assign tx count", (int)io.tx_count, 1);
+    expect_assign_tx(&io, 0u, &assign);
+    expect_int("first assign addr", (int)assign.node_addr, 0x11);
+    fill_uid(uid, 0x05u);
+    expect_mem("first assign uid", assign.uid, uid, MESH_UID_LEN);
+
+    /* 2. 0xFF 不应被建成 cluster 节点。 */
+    expect_int("bootstrap addr not a node",
                cluster_get_node_online(cluster_config_mesh_cluster(), MESH_ADDR_UNASSIGNED, &online),
                -(int)MESH_ERR_NO_ROUTE);
 
-    fill_uid(uid, 0x05u);
-    expect_int("assign registers node", mesh_host_runtime_register_assigned_node(&runtime, 0x11u, uid), 0);
-    expect_int("assigned node visible", cluster_vfs_attach("mcu1"), -(int)M9P_ERR_EAGAIN);
+    /* 3. mcu1 已登记可见（EAGAIN：尚未可达）。 */
+    expect_int("mcu1 registered after assign", cluster_vfs_attach("mcu1"), -(int)M9P_ERR_EAGAIN);
+
+    /* 4. 同一 UID 重复 REGISTER：幂等复用 0x11。 */
+    fake_mesh_io_clear_tx(&io);
+    process_register(&runtime, MESH_ADDR_UNASSIGNED, 0x05u);
+    expect_int("re-register tx count", (int)io.tx_count, 1);
+    expect_assign_tx(&io, 0u, &assign);
+    expect_int("re-register reuses addr", (int)assign.node_addr, 0x11);
+
+    /* 5. 不同 UID -> 下一个地址 0x22。 */
+    fake_mesh_io_clear_tx(&io);
+    process_register(&runtime, MESH_ADDR_UNASSIGNED, 0x09u);
+    expect_int("second uid tx count", (int)io.tx_count, 1);
+    expect_assign_tx(&io, 0u, &assign);
+    expect_int("second uid gets 0x22", (int)assign.node_addr, 0x22);
 }
 
 static void process_link_state(
@@ -912,8 +961,8 @@ int main(void)
 {
     printf("mesh_host_runtime test runner start\n");
 
-    run_test("test_unassigned_register_waits_for_assigned_registration",
-             test_unassigned_register_waits_for_assigned_registration);
+    run_test("test_bootstrap_register_assigns_and_registers",
+             test_bootstrap_register_assigns_and_registers);
     run_test("test_register_broadcast_updates_vfs_without_direct_link",
              test_register_broadcast_updates_vfs_without_direct_link);
     run_test("test_neighbor_probe_request_gets_host_response_without_topology",

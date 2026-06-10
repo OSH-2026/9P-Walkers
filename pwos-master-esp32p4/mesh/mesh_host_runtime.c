@@ -3,7 +3,11 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #endif
+#include <stdio.h>
 #include <string.h>
+
+/* ASSIGN 租约时长（毫秒），与 PC emulator 对齐。 */
+#define MESH_HOST_RUNTIME_ASSIGN_LEASE_MS 60000u
 
 /*
  * 这个文件的核心思路是：
@@ -637,6 +641,115 @@ static int mesh_host_runtime_apply_host_local_link(
     return rc;
 }
 
+/*
+ * 在本运行期内为某个 UID 分配或复用 mesh 地址。
+ *
+ * 可靠性要点：从机在拿到地址前会不断重发 bootstrap REGISTER（见 6.10 日志中的
+ * 重传讨论），因此本函数必须对同一 UID 幂等——已知 UID 直接复用原地址，绝不
+ * 因为重传而分配新地址、产生地址漂移或重复 VFS 挂载。
+ *
+ * 地址方案沿用 PC emulator 与从机 /sys/routes 显示约定：第 n 个节点(1-based)
+ * 取 (n<<4)|n，即 0x11、0x22 … 0xee；0x00(主机) 与 0xff(未分配) 保留。
+ */
+static int mesh_host_runtime_alloc_or_reuse_addr(
+    struct mesh_host_runtime *runtime,
+    const uint8_t uid[MESH_UID_LEN],
+    uint8_t *out_addr)
+{
+    struct mesh_host_runtime_client_slot *slot;
+    size_t assigned_count = 0u;
+    size_t i;
+    uint8_t index;
+
+    if (runtime == NULL || uid == NULL || out_addr == NULL) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    slot = mesh_host_runtime_find_slot_by_uid(runtime, uid);
+    if (slot != NULL && slot->mesh_addr != MESH_HOST_RUNTIME_UNASSIGNED_ADDR) {
+        *out_addr = slot->mesh_addr;
+        return 0;
+    }
+
+    for (i = 0u; i < MESH_HOST_RUNTIME_MAX_CLIENTS; ++i) {
+        if (runtime->clients[i].used &&
+            runtime->clients[i].mesh_addr != MESH_HOST_RUNTIME_UNASSIGNED_ADDR) {
+            ++assigned_count;
+        }
+    }
+
+    index = (uint8_t)(assigned_count + 1u); /* 1-based 节点序号 */
+    if (index == 0u || index > 14u) {       /* 0xff 为未分配保留，最多 14 个节点 */
+        return -(int)MESH_ERR_BUSY;
+    }
+
+    *out_addr = (uint8_t)(((uint8_t)(index << 4)) | index);
+    return 0;
+}
+
+/*
+ * 处理 bootstrap REGISTER：分配/复用地址 -> 回发 ASSIGN -> 绑定 mesh-backed client。
+ *
+ * 关键点：
+ * - ASSIGN 的 dst 固定为 UNASSIGNED(0xff)。它没有路由，因此绝不能走 processer
+ *   的 out_reply_frame 回包路径（那会在 route_lookup 处被丢弃），必须用
+ *   config.send_frame 直接经 transport 发出。单口主机下 send_frame 对任意
+ *   next_hop 都落到唯一端口；中继从机据 UID 把 ASSIGN 转发到下游（relay 转发
+ *   逻辑已在从机侧实现）。
+ * - 整个流程对 REGISTER 重传幂等：地址复用 + register_assigned_node 幂等刷新，
+ *   因此从机重发 REGISTER 天然驱动了 ASSIGN 的重传，主机无需额外定时器。
+ */
+static int mesh_host_runtime_handle_bootstrap_register(
+    struct mesh_host_runtime *runtime,
+    const struct mesh_register_payload *reg_payload)
+{
+    struct mesh_assign_payload assign_payload;
+    uint8_t frame[MESH_PROCESSER_FRAME_CAP];
+    size_t frame_len = 0u;
+    uint8_t new_addr = MESH_HOST_RUNTIME_UNASSIGNED_ADDR;
+    int rc;
+
+    if (runtime == NULL || reg_payload == NULL || !runtime->initialized) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    rc = mesh_host_runtime_alloc_or_reuse_addr(runtime, reg_payload->uid, &new_addr);
+    if (rc != 0) {
+        return rc;
+    }
+
+    memset(&assign_payload, 0, sizeof(assign_payload));
+    memcpy(assign_payload.uid, reg_payload->uid, sizeof(assign_payload.uid));
+    assign_payload.node_addr = new_addr;
+    assign_payload.lease_ms = MESH_HOST_RUNTIME_ASSIGN_LEASE_MS;
+    assign_payload.epoch = 1u;
+    (void)snprintf(assign_payload.node_name, sizeof(assign_payload.node_name),
+                   "mcu%u", (unsigned)(new_addr & 0x0fu));
+
+    if (!mesh_build_assign(
+            runtime->config.local_addr,
+            MESH_ADDR_UNASSIGNED,
+            mesh_host_runtime_next_seq(runtime),
+            runtime->config.default_hop,
+            &assign_payload,
+            frame,
+            sizeof(frame),
+            &frame_len)) {
+        return -(int)MESH_ERR_BAD_FRAME;
+    }
+
+    rc = runtime->config.send_frame(
+        runtime->config.transport_ctx,
+        MESH_ADDR_UNASSIGNED,
+        frame,
+        frame_len);
+    if (rc != 0) {
+        return rc;
+    }
+
+    return mesh_host_runtime_register_assigned_node(runtime, new_addr, reg_payload->uid);
+}
+
 static int mesh_host_runtime_control_handler(
     void *handler_ctx,
     const struct mesh_frame_view *frame,
@@ -646,6 +759,20 @@ static int mesh_host_runtime_control_handler(
 {
     struct mesh_host_runtime *runtime = (struct mesh_host_runtime *)handler_ctx;
     int rc;
+
+    /*
+     * bootstrap REGISTER（src=UNASSIGNED）特判：必须在交给 shared cluster 控制
+     * 处理器之前拦截，否则 cluster_update_register_metadata 会为占位地址 0xff
+     * 建立无意义的节点元数据。这里完成"分配地址 + 回发 ASSIGN + 绑定 client"。
+     */
+    if (frame->type == MESH_TYPE_REGISTER && frame->src == MESH_ADDR_UNASSIGNED) {
+        struct mesh_register_payload payload;
+
+        if (!mesh_parse_register(frame, &payload)) {
+            return -(int)MESH_ERR_BAD_FRAME;
+        }
+        return mesh_host_runtime_handle_bootstrap_register(runtime, &payload);
+    }
 
     rc = cluster_processor_control_handler(
         runtime->config.mesh_cluster,
@@ -661,6 +788,11 @@ static int mesh_host_runtime_control_handler(
     case MESH_TYPE_REGISTER: {
         struct mesh_register_payload payload;
 
+        /*
+         * 走到这里只剩 confirm REGISTER（src=已分配地址）：旧固件二次注册或地址
+         * 确认，按 UID 幂等刷新 client/VFS 绑定即可。bootstrap REGISTER 已在函数
+         * 入口被拦截处理。
+         */
         if (!mesh_parse_register(frame, &payload)) {
             return -(int)MESH_ERR_BAD_FRAME;
         }
