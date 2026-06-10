@@ -5,6 +5,8 @@
 #ifdef ESP_PLATFORM
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+
+#include "mesh_wifi_link.h"
 #endif
 
 static struct mesh_host_service g_default_service;
@@ -277,6 +279,28 @@ int mesh_host_service_send_frame(
         return -(int)MESH_ERR_INVALID_STATE;
     }
 
+#ifdef ESP_PLATFORM
+    if (mesh_wifi_link_active()) {
+        /* 已学到的地址经 WiFi/TCP 链路单播。 */
+        if (mesh_wifi_link_owns_addr(next_hop)) {
+            return mesh_wifi_link_send_frame(tx_data, tx_len);
+        }
+        /* bootstrap 帧（如 ASSIGN，dst=0xFF）无法路由，向两类链路广播，
+         * 保证 WiFi 侧未分配节点也能收到地址分配。 */
+        if (next_hop == MESH_ADDR_UNASSIGNED) {
+            int wifi_rc = mesh_wifi_link_send_frame(tx_data, tx_len);
+            int uart_rc = -(int)MESH_ERR_NO_ROUTE;
+
+            port_index = mesh_host_service_find_port_for_next_hop(manager, next_hop);
+            if (port_index >= 0) {
+                uart_rc = mesh_uart_transport_send_frame(
+                    &manager->ports[port_index].transport, tx_data, tx_len);
+            }
+            return (uart_rc == 0 || wifi_rc == 0) ? 0 : uart_rc;
+        }
+    }
+#endif
+
     port_index = mesh_host_service_find_port_for_next_hop(manager, next_hop);
     if (port_index < 0) {
         return -(int)MESH_ERR_NO_ROUTE;
@@ -303,6 +327,20 @@ int mesh_host_service_receive_frame(
 
     *rx_len = 0u;
     *out_ingress_port = MESH_PROCESSER_INGRESS_PORT_NONE;
+
+#ifdef ESP_PLATFORM
+    /* WiFi/TCP 链路为非阻塞轮询，先于 UART 扫描以降低帧延迟。 */
+    if (mesh_wifi_link_active()) {
+        int wifi_rc = mesh_wifi_link_receive_frame(rx_data, rx_cap, rx_len);
+
+        if (wifi_rc == 0) {
+            *out_ingress_port = MESH_HOST_SERVICE_WIFI_INGRESS_PORT;
+            return 0;
+        }
+        /* WiFi 侧错误一律视为软错误，继续扫描 UART 端口。 */
+    }
+#endif
+
     for (checked = 0u; checked < manager->port_count; ++checked) {
         size_t index = (manager->next_rx_index + checked) % manager->port_count;
         int rc;

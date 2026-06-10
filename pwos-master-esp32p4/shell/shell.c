@@ -11,7 +11,9 @@
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "lan_init.h"
 #include "lua_port.h"
+#include "mesh_wifi_link.h"
 #include "mini9p_client.h"
 #include "mini9p_protocol.h"
 
@@ -137,6 +139,7 @@ static void print_banner(void)
     shell_puts("  m9p_attach 测试向客户端服务端发起链接(test mini9p attach)");
     shell_puts("  m9p_walk  测试根据路径分配ID(test mini9p walk)");
     shell_puts("  m9p N     查阅 mini9p 状态码名称(print mini9p error name)");
+    shell_puts("  wifi ...  WiFi mesh 链路管理(wifi status|start [port]|stop)");
     shell_puts("  reboot    系统重启(restart the board)");
     shell_puts("");
 }
@@ -329,6 +332,80 @@ static int handle_m9p_walk(const char *args)
 }
 
 /**
+ * @brief wifi 命令处理器：管理 WiFi/TCP mesh 链路。
+ *
+ * 用法：
+ *   wifi / wifi status      显示以太网 IP 与 WiFi mesh 链路状态
+ *   wifi start [tcp_port]   启动 TCP 监听（默认端口 9000）
+ *   wifi stop               停止监听并断开 client
+ *
+ * 主机经网线接入路由器；从机侧 WiFi 透传模块以 TCP client 模式
+ * 连接 <主机IP>:<端口>，mesh 帧在该连接上原样透传。
+ */
+static int handle_wifi(const char *args)
+{
+    char ip[16];
+    char status[256];
+
+    if (args == NULL || *args == '\0' || strcmp(args, "status") == 0) {
+        if (lan_get_ip_str(ip, sizeof(ip))) {
+            shell_printf("eth ip   : %s (http://" LAN_MDNS_HOSTNAME ".local)\n", ip);
+        } else {
+            shell_puts("eth ip   : (waiting for DHCP)");
+        }
+        if (mesh_wifi_link_format_status(status, sizeof(status)) > 0) {
+            shell_emit(status);
+        }
+        return 0;
+    }
+
+    if (strncmp(args, "start", 5u) == 0) {
+        const char *port_text = args + 5;
+        long port = (long)MESH_WIFI_LINK_DEFAULT_TCP_PORT;
+        int rc;
+
+        while (*port_text == ' ' || *port_text == '\t') {
+            ++port_text;
+        }
+        if (*port_text != '\0') {
+            char *end = NULL;
+
+            port = strtol(port_text, &end, 0);
+            if (end == port_text || port <= 0 || port > 65535) {
+                shell_puts("usage: wifi start [tcp_port]");
+                return -1;
+            }
+        }
+
+        rc = mesh_wifi_link_start((uint16_t)port);
+        if (rc != 0) {
+            shell_printf("wifi start failed: %d\n", rc);
+            return rc;
+        }
+
+        shell_printf("wifi mesh link listening on tcp port %ld\n", port);
+        if (lan_get_ip_str(ip, sizeof(ip))) {
+            shell_printf("slave transparent module should connect to %s:%ld\n", ip, port);
+        }
+        return 0;
+    }
+
+    if (strcmp(args, "stop") == 0) {
+        int rc = mesh_wifi_link_stop();
+
+        if (rc != 0) {
+            shell_printf("wifi stop failed: %d\n", rc);
+            return rc;
+        }
+        shell_puts("wifi mesh link stopped");
+        return 0;
+    }
+
+    shell_puts("usage: wifi [status|start [tcp_port]|stop]");
+    return -1;
+}
+
+/**
  * @brief shell 命令行执行入口
  * 解析一行字符串，将空格前的字段作为命令类型参数提取，同时保留空格后的原始字符串作为 args 传递至下层对应处理流内。
  * 能够满足基本单传参交互需求，若有需要也可以改为 argc/argv 更通用的形式。
@@ -395,6 +472,9 @@ int shell_execute_line(const char *line)
     }
     if (strcmp(command, "m9p") == 0) {
         return handle_m9p(args);
+    }
+    if (strcmp(command, "wifi") == 0) {
+        return handle_wifi(args);
     }
     if (strcmp(command, "reboot") == 0) {
         shell_puts("restarting...");

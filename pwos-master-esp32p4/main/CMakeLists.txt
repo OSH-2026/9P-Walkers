@@ -30,6 +30,7 @@ idf_component_register(
         "../vfs_bridge/cluster_host_vfs.c"
         "../mesh/mesh_host_runtime.c"
         "../mesh/mesh_host_service.c"
+        "../mesh/mesh_wifi_link.c"
         "../shell/shell.c"
         "../web/http_server.c"
         "../web/websocket_shell.c"
@@ -46,6 +47,7 @@ idf_component_register(
         esp_netif
         nvs_flash
         esp_driver_uart
+        lwip
     INCLUDE_DIRS
         "."
         "../lua"

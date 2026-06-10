@@ -223,38 +223,34 @@ print("Hello pwos-slave from Lua Web Shell!")
             
             <div class="settings-card">
                 <h3><i class="fa-solid fa-plug"></i> UART 串口连接</h3>
-                <div class="form-group text-sm">配置波特率以使用基于 UART 的串行数据流传 9P 数据包。</div>
-                <div class="form-group">
-                    <label>波特率 (Baudrate)</label>
-                    <select id="uart-baud">
-                        <option value="115200">115200</option>
-                        <option value="921600">921600</option>
-                    </select>
+                <div class="form-group text-sm">
+                    UART mesh 链路为编译期配置（当前固件 1,000,000 baud，引脚 TX17/RX18）。
+                    如需调整请修改 <code>MESH_UART_TRANSPORT_DEFAULT_BAUD_RATE</code> 后重新烧录。
                 </div>
-                <button onclick="sendCommand('set_transport uart ' + document.getElementById('uart-baud').value)">应用 UART 设置</button>
             </div>
 
             <div class="settings-card">
-                <h3><i class="fa-solid fa-microchip"></i> SPI 连接</h3>
-                <div class="form-group text-sm">选择 SPI 频道以获取更高吞吐量。</div>
-                <div class="form-group">
-                    <label>SPI 频率 (SPI Freq)</label>
-                    <select id="spi-freq">
-                        <option value="1mhz">1 MHz</option>
-                        <option value="10mhz">10 MHz</option>
-                    </select>
+                <h3><i class="fa-solid fa-wifi"></i> WiFi Mesh 链路 (TCP)</h3>
+                <div class="form-group text-sm">
+                    主机经网线接入路由器局域网，并在下方端口监听 TCP 连接；
+                    从机侧 WiFi 透传模块以 TCP Client 模式连接
+                    <strong id="wifi-master-addr">…</strong>，mesh 帧原样透传，
+                    注册 / 路由 / mini9P 流程与 UART 链路完全一致。
                 </div>
-                <button onclick="sendCommand('set_transport spi ' + document.getElementById('spi-freq').value)">应用 SPI 设置</button>
-            </div>
-
-            <div class="settings-card">
-                <h3><i class="fa-solid fa-wifi"></i> WiFi Mesh 连接</h3>
-                <div class="form-group text-sm">配置基于 IP/UDP 包的局域网 mini9P 链接。</div>
                 <div class="form-group">
-                    <label>目标 Slave IP</label>
-                    <input type="text" id="wifi-ip" value="192.168.4.2" placeholder="192.168.4.2">
+                    <label>监听端口 (TCP Port)</label>
+                    <input type="number" id="wifi-port" value="9000" min="1" max="65535"
+                           oninput="updateWifiAddrHint()">
                 </div>
-                <button onclick="sendCommand('set_transport wifi ' + document.getElementById('wifi-ip').value)">应用 WiFi 设置</button>
+                <button onclick="sendCommand('wifi start ' + document.getElementById('wifi-port').value)">
+                    <i class="fa-solid fa-play"></i> 启动监听
+                </button>
+                <button onclick="sendCommand('wifi status')" style="margin-left: 8px;">
+                    <i class="fa-solid fa-circle-info"></i> 查询状态
+                </button>
+                <button onclick="sendCommand('wifi stop')" style="margin-left: 8px; background: #8b2e2e;">
+                    <i class="fa-solid fa-stop"></i> 停止
+                </button>
             </div>
         </div>
 
@@ -293,7 +289,7 @@ print("Hello pwos-slave from Lua Web Shell!")
         // --- WebSocket Communication ---
         let ws;
         function connectWebSocket() {
-            const host = window.location.hostname || '192.168.4.1'; // fallback IP 
+            const host = window.location.hostname || 'pwos.local'; // mDNS fallback
             const wsUri = `ws://${host}/ws`;
             
             ws = new WebSocket(wsUri);
@@ -356,6 +352,14 @@ print("Hello pwos-slave from Lua Web Shell!")
                 alert("WebSocket 未连接 / Not Connected!");
             }
         }
+
+        // WiFi mesh link card — show where the slave transparent module should connect.
+        function updateWifiAddrHint() {
+            const host = window.location.hostname || 'pwos.local';
+            const port = document.getElementById('wifi-port').value || '9000';
+            document.getElementById('wifi-master-addr').textContent = host + ':' + port;
+        }
+        updateWifiAddrHint();
 
         // Lua Editor Execution
         function runLuaScript() {

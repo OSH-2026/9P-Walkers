@@ -32,6 +32,14 @@ extern "C" {
 #define MESH_HOST_SERVICE_NEIGHBOR_ANY 0xffu
 
 /**
+ * @brief WiFi/TCP mesh 链路的虚拟入口端口号。
+ *
+ * 不占用 UART 槽位 0..MESH_HOST_SERVICE_MAX_PORTS-1，且区别于
+ * MESH_PROCESSER_INGRESS_PORT_NONE(0xff)。
+ */
+#define MESH_HOST_SERVICE_WIFI_INGRESS_PORT 0x80u
+
+/**
  * @brief 一个受管 UART 传输端口的配置。
  *
  * `neighbor_addr` 是可通过该 UART 到达的直接下一跳 mesh 地址，

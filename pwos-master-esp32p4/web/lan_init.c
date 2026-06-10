@@ -1,5 +1,8 @@
 #include "lan_init.h"
 
+#include <stdio.h>
+#include <string.h>
+
 #include "esp_eth.h"
 #include "esp_eth_mac_esp.h"
 #include "esp_eth_netif_glue.h"
@@ -7,11 +10,15 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "mdns.h"
 
 static const char *TAG = "lan";
 
 static esp_eth_handle_t s_eth_handle;
 static esp_eth_netif_glue_handle_t s_eth_glue;
+
+/* Last DHCP-assigned IP as text; empty until IP_EVENT_ETH_GOT_IP fires. */
+static char s_ip_str[16];
 
 static void eth_event_handler(void *arg, esp_event_base_t base,
                                int32_t id, void *data)
@@ -43,7 +50,32 @@ static void got_ip_handler(void *arg, esp_event_base_t base,
                             int32_t id, void *data)
 {
     ip_event_got_ip_t *ev = (ip_event_got_ip_t *)data;
-    ESP_LOGI(TAG, "got IP " IPSTR, IP2STR(&ev->ip_info.ip));
+    snprintf(s_ip_str, sizeof(s_ip_str), IPSTR, IP2STR(&ev->ip_info.ip));
+    ESP_LOGI(TAG, "got IP %s — web shell at http://%s/ (http://" LAN_MDNS_HOSTNAME ".local)",
+             s_ip_str, s_ip_str);
+}
+
+bool lan_get_ip_str(char *buf, size_t cap)
+{
+    if (buf == NULL || cap == 0) {
+        return false;
+    }
+    snprintf(buf, cap, "%s", s_ip_str);
+    return s_ip_str[0] != '\0';
+}
+
+/* Announce the board on the LAN so browsers can use http://pwos.local. */
+static void mdns_setup(void)
+{
+    esp_err_t err = mdns_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "mDNS init failed: 0x%x", err);
+        return;
+    }
+    ESP_ERROR_CHECK(mdns_hostname_set(LAN_MDNS_HOSTNAME));
+    ESP_ERROR_CHECK(mdns_instance_name_set("9P-Walkers Master"));
+    ESP_ERROR_CHECK(mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0));
+    ESP_LOGI(TAG, "mDNS up — http://" LAN_MDNS_HOSTNAME ".local");
 }
 
 void lan_init(void)
@@ -85,6 +117,8 @@ void lan_init(void)
 
     /* Start driver — link negotiation and DHCP begin. */
     ESP_ERROR_CHECK(esp_eth_start(s_eth_handle));
+
+    mdns_setup();
 
     ESP_LOGI(TAG, "LAN init done — waiting for link and DHCP");
 }
