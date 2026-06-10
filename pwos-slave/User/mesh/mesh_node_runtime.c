@@ -8,6 +8,10 @@
 #define MESH_NODE_RUNTIME_NEIGHBOR_PROBE_RETRIES 5u
 #define MESH_NODE_RUNTIME_NEIGHBOR_PROBE_RETRY_MS 200u
 
+/* 未分配地址期间 REGISTER 重发：起始间隔与退避封顶（毫秒）。 */
+#define MESH_NODE_RUNTIME_REGISTER_RETRY_MS 250u
+#define MESH_NODE_RUNTIME_REGISTER_RETRY_MAX_MS 1000u
+
 static int mesh_node_runtime_send_register(
     struct mesh_node_runtime *runtime,
     uint8_t next_hop);
@@ -634,6 +638,54 @@ static int mesh_node_runtime_poll_neighbor_probe_retry(struct mesh_node_runtime 
     return rc;
 }
 
+/*
+ * 未分配地址期间按退避重发 bootstrap REGISTER。
+ *
+ * 这是 P0 可靠性的核心：在拿到地址（收到 ASSIGN）之前，链路上任意一帧 REGISTER
+ * 或 ASSIGN 丢失都不应让节点永久卡死。本函数与 neighbor probe 重试共用
+ * time_ms + 空闲轮询的模式：
+ * - 只在 local_addr 仍为 UNASSIGNED 时工作；一旦分配成功即自动停止；
+ * - 间隔从 REGISTER_RETRY_MS 起，每次翻倍至 REGISTER_RETRY_MAX_MS 封顶；
+ * - 不设次数上限：没有地址的节点没有意义，必须一直尝试。
+ *
+ * 主机侧 ASSIGN 控制器对同一 UID 幂等（见 6.10 日志），因此反复重发 REGISTER
+ * 不会造成主机地址漂移或重复挂载。
+ */
+static int mesh_node_runtime_poll_register_retry(struct mesh_node_runtime *runtime)
+{
+    uint32_t now;
+    int rc;
+
+    if (runtime == NULL || !runtime->initialized ||
+        runtime->config.time_ms == NULL) {
+        return -(int)MESH_ERR_BUSY;
+    }
+    if (runtime->processor.config.local_addr != MESH_ADDR_UNASSIGNED) {
+        return -(int)MESH_ERR_BUSY;
+    }
+
+    now = mesh_node_runtime_time_ms(runtime);
+    if ((int32_t)(now - runtime->next_register_ms) < 0) {
+        return -(int)MESH_ERR_BUSY;
+    }
+
+    rc = mesh_node_runtime_send_register(runtime, runtime->config.bootstrap_next_hop);
+    if (rc == 0) {
+        uint32_t interval = runtime->register_retry_interval_ms;
+
+        if (interval == 0u) {
+            interval = MESH_NODE_RUNTIME_REGISTER_RETRY_MS;
+        }
+        interval <<= 1;
+        if (interval > MESH_NODE_RUNTIME_REGISTER_RETRY_MAX_MS) {
+            interval = MESH_NODE_RUNTIME_REGISTER_RETRY_MAX_MS;
+        }
+        runtime->register_retry_interval_ms = interval;
+        runtime->next_register_ms = now + interval;
+    }
+    return rc;
+}
+
 void mesh_node_runtime_get_default_config(struct mesh_node_runtime_config *out_config)
 {
     if (out_config == NULL) {
@@ -702,6 +754,15 @@ int mesh_node_runtime_init(
     runtime->upstream_port = MESH_PROCESSER_INGRESS_PORT_NONE;
     runtime->control_plane_addr = MESH_ADDR_UNASSIGNED;
     runtime->upstream_peer_addr = MESH_ADDR_UNASSIGNED;
+
+    /*
+     * 安排未分配期间的首次 REGISTER 重发。init 里（auto_register_on_init）已经
+     * 立即发了一帧；这里把首次"重发"排在一个基础间隔之后。一旦收到 ASSIGN，
+     * local_addr 不再是 UNASSIGNED，重发分支自动停止。
+     */
+    runtime->register_retry_interval_ms = MESH_NODE_RUNTIME_REGISTER_RETRY_MS;
+    runtime->next_register_ms =
+        mesh_node_runtime_time_ms(runtime) + MESH_NODE_RUNTIME_REGISTER_RETRY_MS;
 
     if (runtime->config.auto_register_on_init) {
         rc = mesh_node_runtime_send_register(runtime, runtime->config.bootstrap_next_hop);
@@ -909,8 +970,15 @@ int mesh_node_runtime_poll_once(struct mesh_node_runtime *runtime)
         &ingress_port);
     if (rc != 0) {
         if (rc == -(int)MESH_ERR_BUSY) {
-            int retry_rc = mesh_node_runtime_poll_neighbor_probe_retry(runtime);
+            /*
+             * 空闲（无入站帧）时推进控制面重传：未分配则重发 REGISTER，已分配则
+             * 重试 neighbor probe。二者按 local_addr 互斥，至多一个真正动作。
+             */
+            int retry_rc = mesh_node_runtime_poll_register_retry(runtime);
 
+            if (retry_rc != 0) {
+                retry_rc = mesh_node_runtime_poll_neighbor_probe_retry(runtime);
+            }
             if (retry_rc == 0) {
                 return 0;
             }

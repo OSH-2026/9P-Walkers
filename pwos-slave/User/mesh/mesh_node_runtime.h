@@ -101,6 +101,10 @@ struct mesh_node_runtime {
     uint8_t neighbor_probe_retries_left;
     /** 下一次邻居探测重试的时间戳。 */
     uint32_t next_neighbor_probe_ms;
+    /** 未分配地址期间下一次 REGISTER 重发的时间戳。 */
+    uint32_t next_register_ms;
+    /** 当前 REGISTER 重发退避间隔（毫秒），随重发翻倍至上限。 */
+    uint32_t register_retry_interval_ms;
     /** 下游 bootstrap REGISTER 等待 ASSIGN 回转的临时表。 */
     struct mesh_node_runtime_bootstrap_pending pending_bootstrap[MESH_NODE_RUNTIME_MAX_BOOTSTRAP_PENDING];
 };
