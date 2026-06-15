@@ -138,12 +138,12 @@ cluster_config_refresh_node_connectivity(mesh_addr, &reachable);
 若 `reachable == true`：
 
 - 说明图上仍有其他路径通往该节点。
-- VFS 不应贸然把它踢回 OFFLINE。
+- VFS 不应贸然把它回退到 `NEW`。
 
 若 `reachable == false`：
 
 - 说明该节点当前对主机已不可达。
-- VFS 应回退到 OFFLINE + NEW。
+- VFS 应把 `m9p_state` 回退到 `NEW`，并清除当前 `mesh_addr` 绑定。
 
 ## 9. 关键接口清单
 
@@ -165,10 +165,11 @@ cluster_config_refresh_node_connectivity(mesh_addr, &reachable);
 
 VFS 节点管理接口：
 
+- `cluster_vfs_init`
 - `cluster_vfs_bind_mesh_cluster`
 - `cluster_vfs_discover_node`
-- `cluster_vfs_mark_node_offline`
 - `cluster_vfs_refresh_node_from_cluster`
+- `cluster_vfs_refresh_all_nodes_from_cluster`
 - `cluster_vfs_attach`
 - `cluster_vfs_detach`
 

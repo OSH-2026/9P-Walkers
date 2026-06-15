@@ -493,7 +493,6 @@ static int mesh_host_runtime_apply_register_ingress_link(
     const struct mesh_frame_view *frame,
     uint8_t ingress_port)
 {
-    bool reachable = false;
     int rc;
 
     if (runtime == NULL || frame == NULL) {
@@ -505,14 +504,12 @@ static int mesh_host_runtime_apply_register_ingress_link(
         return 0;
     }
 
-    rc = cluster_can_reach(runtime->config.mesh_cluster, frame->src, &reachable);
-    if (rc != 0) {
-        return rc;
-    }
-    if (reachable) {
-        return 0;
-    }
-
+    /*
+     * Assigned REGISTER is a direct heartbeat observed on a concrete ingress
+     * port. Always refresh this host->node edge; a transient downstream fault
+     * may have removed the route even though the node is still physically
+     * reachable and will re-announce every few seconds.
+     */
     rc = cluster_add_link_with_ports(
         runtime->config.mesh_cluster,
         runtime->config.local_addr,

@@ -103,8 +103,11 @@ int mesh_uart_transport_get_stats(
 #elif defined(MESH_UART_TRANSPORT_USE_STM32_HAL)
 
 #define MESH_UART_TRANSPORT_STM32_MAX_INSTANCES 8u
+#define MESH_UART_TRANSPORT_STM32_POLL_BYTE_BUDGET 128u
 
 static struct mesh_uart_transport *g_stm32_transports[MESH_UART_TRANSPORT_STM32_MAX_INSTANCES];
+
+static int stm32_start_dma_rx(struct mesh_uart_transport *transport);
 
 static uint32_t transport_timeout_ms(const struct mesh_uart_transport *transport)
 {
@@ -224,6 +227,37 @@ static uint16_t stm32_dma_current_pos(const struct mesh_uart_transport *transpor
         pos = 0u;
     }
     return (uint16_t)pos;
+}
+
+static uint16_t stm32_dma_distance(uint16_t from, uint16_t to)
+{
+    if (from > MESH_UART_TRANSPORT_STM32_DMA_RX_BUFFER_SIZE) {
+        from = 0u;
+    }
+    if (to > MESH_UART_TRANSPORT_STM32_DMA_RX_BUFFER_SIZE) {
+        to = MESH_UART_TRANSPORT_STM32_DMA_RX_BUFFER_SIZE;
+    }
+
+    if (to >= from) {
+        return (uint16_t)(to - from);
+    }
+
+    return (uint16_t)(MESH_UART_TRANSPORT_STM32_DMA_RX_BUFFER_SIZE - from + to);
+}
+
+static uint16_t stm32_dma_advance(uint16_t pos, uint16_t count)
+{
+    uint32_t next;
+
+    if (pos > MESH_UART_TRANSPORT_STM32_DMA_RX_BUFFER_SIZE) {
+        pos = 0u;
+    }
+
+    next = (uint32_t)pos + (uint32_t)count;
+    while (next > MESH_UART_TRANSPORT_STM32_DMA_RX_BUFFER_SIZE) {
+        next -= MESH_UART_TRANSPORT_STM32_DMA_RX_BUFFER_SIZE;
+    }
+    return (uint16_t)next;
 }
 
 static void stm32_reset_rx_state(struct mesh_uart_transport *transport)
@@ -401,28 +435,54 @@ static void stm32_poll_dma_rx(struct mesh_uart_transport *transport)
 {
     uint32_t primask;
     uint16_t pos;
+    uint16_t available;
+    uint16_t target;
 
-    if (transport == NULL || !transport->dma_running) {
+    if (transport == NULL || !transport->initialized) {
+        return;
+    }
+
+    if (!transport->dma_running) {
+        if (transport->config.uart != NULL) {
+            (void)HAL_UART_DMAStop(transport->config.uart);
+            __HAL_UART_CLEAR_OREFLAG(transport->config.uart);
+            transport->config.uart->ErrorCode = HAL_UART_ERROR_NONE;
+        }
+        transport->parse_len = 0u;
+        transport->dma_last_pos = 0u;
+        (void)stm32_start_dma_rx(transport);
+    }
+    if (!transport->dma_running) {
         return;
     }
 
     pos = stm32_dma_current_pos(transport);
+    available = stm32_dma_distance(transport->dma_last_pos, pos);
+    if (available == 0u) {
+        return;
+    }
+    target = available > MESH_UART_TRANSPORT_STM32_POLL_BYTE_BUDGET
+        ? stm32_dma_advance(transport->dma_last_pos, MESH_UART_TRANSPORT_STM32_POLL_BYTE_BUDGET)
+        : pos;
+
     primask = mesh_uart_transport_enter_critical();
-    stm32_dma_consume_until_from_isr(transport, pos);
+    stm32_dma_consume_until_from_isr(transport, target);
     mesh_uart_transport_exit_critical(primask);
 }
 
 static int stm32_start_dma_rx(struct mesh_uart_transport *transport)
 {
     HAL_StatusTypeDef status;
+    UART_HandleTypeDef *uart;
 
     if (transport == NULL || transport->config.uart == NULL) {
         return -(int)MESH_ERR_INVALID_STATE;
     }
 
+    uart = transport->config.uart;
     transport->dma_last_pos = 0u;
-    status = HAL_UARTEx_ReceiveToIdle_DMA(
-        transport->config.uart,
+    status = HAL_UART_Receive_DMA(
+        uart,
         transport->dma_rx_buffer,
         MESH_UART_TRANSPORT_STM32_DMA_RX_BUFFER_SIZE);
     if (status != HAL_OK) {
@@ -430,9 +490,13 @@ static int stm32_start_dma_rx(struct mesh_uart_transport *transport)
         return hal_status_to_mesh(status);
     }
 
-    if (transport->config.uart->hdmarx != NULL) {
-        __HAL_DMA_DISABLE_IT(transport->config.uart->hdmarx, DMA_IT_HT);
+    if (uart->hdmarx != NULL) {
+        __HAL_DMA_DISABLE_IT(uart->hdmarx, DMA_IT_HT);
+        __HAL_DMA_DISABLE_IT(uart->hdmarx, DMA_IT_TC);
     }
+    __HAL_UART_DISABLE_IT(uart, UART_IT_IDLE);
+    __HAL_UART_DISABLE_IT(uart, UART_IT_PE);
+    __HAL_UART_DISABLE_IT(uart, UART_IT_ERR);
     transport->dma_running = true;
     return 0;
 }
@@ -482,12 +546,8 @@ static int stm32_dequeue_frame(
 
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 {
-    struct mesh_uart_transport *transport = stm32_find_transport(huart);
-
-    if (transport == NULL) {
-        return;
-    }
-    stm32_dma_consume_until_from_isr(transport, Size);
+    (void)huart;
+    (void)Size;
 }
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
@@ -501,8 +561,8 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
     transport->dma_running = false;
     transport->parse_len = 0u;
     transport->dma_last_pos = 0u;
+    __HAL_UART_CLEAR_OREFLAG(huart);
     huart->ErrorCode = HAL_UART_ERROR_NONE;
-    (void)stm32_start_dma_rx(transport);
 }
 
 int mesh_uart_transport_init(

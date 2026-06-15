@@ -60,6 +60,10 @@ static bool route_is_reachable(const struct cluster_vfs_route *route)
         return false;
     }
 
+    if (route->client == NULL) {
+        return false;
+    }
+
     if (route->m9p_state == CLUSTER_VFS_M9P_EMPTY) {
         return false;
     }
@@ -76,6 +80,14 @@ static bool route_is_reachable(const struct cluster_vfs_route *route)
     }
 
     return true;
+}
+
+static bool route_needs_attach(const struct cluster_vfs_route *route)
+{
+    return route == NULL ||
+        route->m9p_state != CLUSTER_VFS_M9P_ATTACHED ||
+        route->client == NULL ||
+        !route->client->attached;
 }
 
 static void reset_client_session(struct m9p_client *client)
@@ -305,7 +317,7 @@ static int resolve_path(const char *path,
         }
 
         strcpy(remote_path, mapped_path);
-        if (g_routes[i].m9p_state != CLUSTER_VFS_M9P_ATTACHED)
+        if (route_needs_attach(&g_routes[i]))
         {
             int ret = cluster_vfs_attach(g_routes[i].target);
             if (ret < 0)
@@ -574,7 +586,7 @@ int cluster_vfs_attach(const char *target)
     {
         return -(int)M9P_ERR_EAGAIN;
     }
-    if (route->m9p_state == CLUSTER_VFS_M9P_ATTACHED)
+    if (!route_needs_attach(route))
     {
         return 0;
     }

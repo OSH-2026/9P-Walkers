@@ -1,14 +1,12 @@
-<!--过期TODO 
-
 # vfs_bridge TODO
 
-本文记录 `cluster_vfs` 后续待改进点。这里偏工程待办；长期架构解释仍放在 `design.md`。
+本文记录 `cluster_host_vfs` 后续待改进点。
 
 ## 近期优先
 
 - [ ] 决定 `attach()` / `detach()` 是否做成幂等接口。
-  - 当前 `attach()` 只接受 `READY -> ATTACHED`。
-  - 当前 `detach()` 只接受 `ATTACHED -> READY`。
+  - 当前 `attach()` 只接受 `NEW -> ATTACHED`。
+  - 当前 `detach()` 只接受 `ATTACHED -> NEW`。
   - 可考虑：已处于目标状态时直接返回 `0`，不存在 target 才返回 `ENOENT`。
 
 ## 中期功能
@@ -44,14 +42,13 @@
   - Lua 的 `read/write/list/stat` 绑定应落到 `cluster_vfs_*`。
   - Web API 或 WebShell 不应直接操作 `mini9p_client`。
 
-- [ ] 考虑把 `cluster_config` 移到独立 `cluster/` 层。
-  - 当前 `cluster_config.c` 临时位于 `vfs_bridge/`。
-  - 它负责静态节点注册，更接近“节点管理/配置”职责。
-  - 长期可迁移到 `pwos-master-esp32p4/cluster/`，由该层协调 shared mesh cluster 与 `cluster_vfs_discover_node()`。
+## 已完成（从旧 TODO 迁移）
+
+- [x] 多跳 routing header（mesh envelope 已支持 hop/TTL 和 route_lookup）。
+- [x] 动态路由发现（主机维护拓扑并派生路由，向从机下发 ROUTE_UPDATE）。
+- [x] `cluster_config` 已迁移到 `pwos-master-esp32p4/cluster/`。
 
 ## 暂不做
 
-- [ ] 多跳 routing header。
-- [ ] 动态路由发现。
 - [ ] 自动重连和目录缓存。
-- [ ] 并发锁和跨任务 fd 访问保护。 -->
+- [ ] 并发锁和跨任务 fd 访问保护。

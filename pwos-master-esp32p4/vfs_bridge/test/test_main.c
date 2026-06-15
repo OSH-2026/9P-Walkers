@@ -488,6 +488,25 @@ static void test_duplicate_discovery_preserves_attached_session(void)
     expect_int("duplicate attached attach count after stat", ctx.attach_count, 1);
 }
 
+/* runtime 可能因短暂链路不可达重置 client，会话下次访问必须自动重新 attach。 */
+static void test_stale_attached_route_reattaches_client(void)
+{
+    static const uint8_t expected[] = {'d', 'a', 't', 'a'};
+    struct mock_ctx ctx;
+    struct m9p_client client;
+    uint8_t buf[8] = {0};
+    uint16_t len = sizeof(buf);
+
+    setup_attached_node(&ctx, &client);
+    m9p_client_reset_session(&client);
+
+    expect_int("stale read_path", cluster_vfs_read_path("/mcu1/dev/temp", buf, &len), 0);
+    expect_int("stale reattach count", ctx.attach_count, 2);
+    expect_str("stale mapped path", ctx.last_walk_path, "/dev/temp");
+    expect_u16("stale len", len, (uint16_t)sizeof(expected));
+    expect_mem("stale data", buf, expected, sizeof(expected));
+}
+
 /* 新主机初始化不再预注册静态 mcu1，而是只启动 mesh cluster + VFS 桥接层。 */
 static void test_mesh_host_init_starts_empty(void)
 {
@@ -880,6 +899,7 @@ int main(void)
 
     run_test("test_duplicate_discovery_reuses_route", test_duplicate_discovery_reuses_route);
     run_test("test_duplicate_discovery_preserves_attached_session", test_duplicate_discovery_preserves_attached_session);
+    run_test("test_stale_attached_route_reattaches_client", test_stale_attached_route_reattaches_client);
     run_test("test_mesh_host_init_starts_empty", test_mesh_host_init_starts_empty);
     run_test("test_discover_node_allocates_name_and_tracks_uid", test_discover_node_allocates_name_and_tracks_uid);
     run_test("test_rediscover_same_uid_reuses_name", test_rediscover_same_uid_reuses_name);

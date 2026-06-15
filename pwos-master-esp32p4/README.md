@@ -102,7 +102,16 @@ pytest pytest_hello_world.py
 
 - `mesh_host_runtime` 仍具有全局单事务语义(通过 `dispatch_busy`)
 - 主机侧尚未为"远端主动发到主机的 mini9P T*"挂接本地 server handler
-- `vfs_bridge/design.md` 和 `vfs_bridge/TODO.md` 中标注 `<!-- 过期说明 -->` 的内容已过期,实际行为以 `cluster_host_vfs.c` 当前实现为准
+- `vfs_bridge/design.md` 和 `vfs_bridge/TODO.md` 已随本次文档同步更新，若仍有与 `cluster_host_vfs.c` 实现不一致之处，以代码为准
+
+## 相关文档
+
+- `docs/architecture.md`：系统架构
+- `docs/protocol_spec.md` / `docs/mesh_envelope_spec.md`：协议栈
+- `docs/mesh_wifi_link.md`：WiFi 链路
+- `docs/cluster_config_usage.md`：`cluster_config` 使用说明
+- `docs/build_and_flash.md`：构建烧录
+- `pwos-shared/RUN_TIME_NODE_MESH.md`：主机侧 runtime 调用指南
 
 ---
 

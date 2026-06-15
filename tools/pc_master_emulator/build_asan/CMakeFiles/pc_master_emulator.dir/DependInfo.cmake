@@ -1,0 +1,34 @@
+
+# Consider dependencies only in project.
+set(CMAKE_DEPENDS_IN_PROJECT_ONLY OFF)
+
+# The set of languages for which implicit dependencies are needed:
+set(CMAKE_DEPENDS_LANGUAGES
+  )
+
+# The set of dependency files which are needed:
+set(CMAKE_DEPENDS_DEPENDENCY_FILES
+  "/home/hb/lkvo/projects/9P-Walkers/pwos-master-esp32p4/cluster/cluster_config.c" "CMakeFiles/pc_master_emulator.dir/home/hb/lkvo/projects/9P-Walkers/pwos-master-esp32p4/cluster/cluster_config.c.o" "gcc" "CMakeFiles/pc_master_emulator.dir/home/hb/lkvo/projects/9P-Walkers/pwos-master-esp32p4/cluster/cluster_config.c.o.d"
+  "/home/hb/lkvo/projects/9P-Walkers/pwos-master-esp32p4/mesh/mesh_host_runtime.c" "CMakeFiles/pc_master_emulator.dir/home/hb/lkvo/projects/9P-Walkers/pwos-master-esp32p4/mesh/mesh_host_runtime.c.o" "gcc" "CMakeFiles/pc_master_emulator.dir/home/hb/lkvo/projects/9P-Walkers/pwos-master-esp32p4/mesh/mesh_host_runtime.c.o.d"
+  "/home/hb/lkvo/projects/9P-Walkers/pwos-master-esp32p4/mesh/mesh_host_service.c" "CMakeFiles/pc_master_emulator.dir/home/hb/lkvo/projects/9P-Walkers/pwos-master-esp32p4/mesh/mesh_host_service.c.o" "gcc" "CMakeFiles/pc_master_emulator.dir/home/hb/lkvo/projects/9P-Walkers/pwos-master-esp32p4/mesh/mesh_host_service.c.o.d"
+  "/home/hb/lkvo/projects/9P-Walkers/pwos-master-esp32p4/vfs_bridge/cluster_host_vfs.c" "CMakeFiles/pc_master_emulator.dir/home/hb/lkvo/projects/9P-Walkers/pwos-master-esp32p4/vfs_bridge/cluster_host_vfs.c.o" "gcc" "CMakeFiles/pc_master_emulator.dir/home/hb/lkvo/projects/9P-Walkers/pwos-master-esp32p4/vfs_bridge/cluster_host_vfs.c.o.d"
+  "/home/hb/lkvo/projects/9P-Walkers/pwos-shared/mesh/cluster/cluster.c" "CMakeFiles/pc_master_emulator.dir/home/hb/lkvo/projects/9P-Walkers/pwos-shared/mesh/cluster/cluster.c.o" "gcc" "CMakeFiles/pc_master_emulator.dir/home/hb/lkvo/projects/9P-Walkers/pwos-shared/mesh/cluster/cluster.c.o.d"
+  "/home/hb/lkvo/projects/9P-Walkers/pwos-shared/mesh/envelope/mesh_protocal.c" "CMakeFiles/pc_master_emulator.dir/home/hb/lkvo/projects/9P-Walkers/pwos-shared/mesh/envelope/mesh_protocal.c.o" "gcc" "CMakeFiles/pc_master_emulator.dir/home/hb/lkvo/projects/9P-Walkers/pwos-shared/mesh/envelope/mesh_protocal.c.o.d"
+  "/home/hb/lkvo/projects/9P-Walkers/pwos-shared/mesh/processer/mesh_processer.c" "CMakeFiles/pc_master_emulator.dir/home/hb/lkvo/projects/9P-Walkers/pwos-shared/mesh/processer/mesh_processer.c.o" "gcc" "CMakeFiles/pc_master_emulator.dir/home/hb/lkvo/projects/9P-Walkers/pwos-shared/mesh/processer/mesh_processer.c.o.d"
+  "/home/hb/lkvo/projects/9P-Walkers/pwos-shared/mini9p/mini9p_client.c" "CMakeFiles/pc_master_emulator.dir/home/hb/lkvo/projects/9P-Walkers/pwos-shared/mini9p/mini9p_client.c.o" "gcc" "CMakeFiles/pc_master_emulator.dir/home/hb/lkvo/projects/9P-Walkers/pwos-shared/mini9p/mini9p_client.c.o.d"
+  "/home/hb/lkvo/projects/9P-Walkers/pwos-shared/mini9p/mini9p_protocol.c" "CMakeFiles/pc_master_emulator.dir/home/hb/lkvo/projects/9P-Walkers/pwos-shared/mini9p/mini9p_protocol.c.o" "gcc" "CMakeFiles/pc_master_emulator.dir/home/hb/lkvo/projects/9P-Walkers/pwos-shared/mini9p/mini9p_protocol.c.o.d"
+  "/home/hb/lkvo/projects/9P-Walkers/tools/pc_master_emulator/main.c" "CMakeFiles/pc_master_emulator.dir/main.c.o" "gcc" "CMakeFiles/pc_master_emulator.dir/main.c.o.d"
+  "/home/hb/lkvo/projects/9P-Walkers/tools/pc_master_emulator/mesh_uart_transport_stub.c" "CMakeFiles/pc_master_emulator.dir/mesh_uart_transport_stub.c.o" "gcc" "CMakeFiles/pc_master_emulator.dir/mesh_uart_transport_stub.c.o.d"
+  "" "pc_master_emulator" "gcc" "CMakeFiles/pc_master_emulator.dir/link.d"
+  )
+
+# Targets to which this target links which contain Fortran sources.
+set(CMAKE_Fortran_TARGET_LINKED_INFO_FILES
+  )
+
+# Targets to which this target links which contain Fortran sources.
+set(CMAKE_Fortran_TARGET_FORWARD_LINKED_INFO_FILES
+  )
+
+# Fortran module output directory.
+set(CMAKE_Fortran_TARGET_MODULE_DIR "")

@@ -810,6 +810,37 @@ static void test_assigned_register_poll_path_uses_ingress_as_direct_link(void)
     expect_int("assigned register attach next hop", io.tx_next_hops[io.tx_count - 1u], 0x11u);
 }
 
+static void test_assigned_register_restores_lost_direct_link(void)
+{
+    struct mesh_host_runtime runtime;
+    struct fake_mesh_io io;
+    struct cluster *mesh_cluster;
+    uint8_t uid[MESH_UID_LEN];
+    uint8_t frame[TEST_FRAME_CAP];
+    size_t frame_len = 0u;
+    bool reachable = true;
+
+    init_runtime(&runtime, &io);
+    process_register(&runtime, 0x11u, 0x13u);
+    process_link_state(&runtime, 0x11u, 0x00u, 1u);
+    mesh_cluster = cluster_config_mesh_cluster();
+
+    expect_int("restore remove direct",
+               cluster_remove_link(mesh_cluster, 0x00u, 0x11u, false),
+               0);
+    expect_int("restore rebuild", cluster_rebuild_routes(mesh_cluster), 0);
+    expect_int("restore unreachable rc", cluster_can_reach(mesh_cluster, 0x11u, &reachable), 0);
+    expect_int("restore unreachable", reachable, 0);
+
+    fill_uid(uid, 0x13u);
+    build_register_frame(0x11u, uid, frame, &frame_len);
+    push_rx_frame_from_port(&io, frame, frame_len, 0u);
+
+    expect_int("restore poll register", mesh_host_runtime_poll_once(&runtime), 0);
+    expect_int("restore reachable rc", cluster_can_reach(mesh_cluster, 0x11u, &reachable), 0);
+    expect_int("restore reachable", reachable, 1);
+}
+
 /*
  * 当节点通过 LINK_STATE 明确声明“我与 host 相连”后，
  * runtime 应推导出 host -> node 的反向可达边，并允许 VFS attach。
@@ -1051,6 +1082,8 @@ int main(void)
              test_register_broadcast_updates_vfs_without_direct_link);
     run_test("test_assigned_register_poll_path_uses_ingress_as_direct_link",
              test_assigned_register_poll_path_uses_ingress_as_direct_link);
+    run_test("test_assigned_register_restores_lost_direct_link",
+             test_assigned_register_restores_lost_direct_link);
     run_test("test_neighbor_probe_request_gets_host_response_without_topology",
              test_neighbor_probe_request_gets_host_response_without_topology);
     run_test("test_neighbor_probe_request_poll_path_gets_host_response",

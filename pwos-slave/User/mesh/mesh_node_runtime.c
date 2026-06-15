@@ -333,6 +333,10 @@ static int mesh_node_runtime_handle_downstream_register(
         mesh_diag_text("downstream reg parse fail");
         return -(int)MESH_ERR_BAD_FRAME;
     }
+    if (memcmp(payload.uid, runtime->config.local_uid, MESH_UID_LEN) == 0) {
+        mesh_diag_text("downstream reg skip local uid");
+        return 0;
+    }
 
     rc = mesh_node_runtime_remember_pending_register(runtime, &payload, ingress_port);
     if (rc != 0) {
@@ -378,6 +382,11 @@ static int mesh_node_runtime_handle_pending_assign(
     if (runtime->config.send_frame_to_port == NULL) {
         mesh_diag_text("pending assign no port tx");
         return -(int)MESH_ERR_INVALID_STATE;
+    }
+    if (payload.node_addr == runtime->processor.config.local_addr) {
+        mesh_diag_text("pending assign skip local addr");
+        memset(pending, 0, sizeof(*pending));
+        return 0;
     }
 
     rc = runtime->config.send_frame_to_port(

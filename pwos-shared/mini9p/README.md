@@ -3,6 +3,10 @@
 `pwos-shared/mini9p` 现在只保留 Mini9P 协议本体和节点侧组装层。旧的 `mini9p_peer_link` 已移除，
 当前主从双向收发由 mesh runtime 负责分流和等待响应。
 
+> **重要：mini9P 帧在线缆上不再直接出现。**
+> 它被整体封装为 mesh envelope 的 `MESH_TYPE_MINI9P` payload，经过 mesh processer 路由、多跳转发后到达目标节点，再由目标节点解出并交给 `mini9p_server` 处理。
+> 线缆协议细节见 `docs/protocol_spec.md` 与 `pwos-shared/mesh/envelope/mesh_protocol_spec.md`。
+
 ## 模块边界
 
 ```text

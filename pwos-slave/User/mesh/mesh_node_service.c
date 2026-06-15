@@ -14,6 +14,8 @@
 
 #define MESH_NODE_SERVICE_DEFAULT_LOCAL_ADDR MESH_ADDR_UNASSIGNED
 #define MESH_NODE_SERVICE_DEBUG_PORT_NONE 0xffu
+#define MESH_NODE_SERVICE_PORT_QUARANTINE_MS 250u
+#define MESH_NODE_SERVICE_PORT_BAD_DELTA_LIMIT 8u
 
 struct mesh_node_service_addr_port {
     bool used;
@@ -24,6 +26,9 @@ struct mesh_node_service_addr_port {
 struct mesh_node_service_port {
     bool initialized;
     struct mesh_uart_transport transport;
+    uint32_t last_bad_frames;
+    uint32_t last_dropped_frames;
+    uint32_t quarantine_until_ms;
 };
 
 struct mesh_node_service {
@@ -41,6 +46,97 @@ static bool g_mesh_node_service_initialized;
 static bool mesh_node_service_error_is_soft(int rc)
 {
     return rc == -(int)MESH_ERR_BUSY || rc == -(int)MESH_ERR_NO_ROUTE;
+}
+
+static uint32_t mesh_node_service_now_ms(void)
+{
+    return HAL_GetTick();
+}
+
+static bool mesh_node_service_port_is_quarantined(
+    const struct mesh_node_service *service,
+    size_t port_index)
+{
+    const struct mesh_node_service_port *port;
+
+    if (service == NULL || port_index >= service->port_count) {
+        return false;
+    }
+    if (service->runtime.upstream_port == (uint8_t)port_index) {
+        return false;
+    }
+
+    port = &service->ports[port_index];
+    return port->quarantine_until_ms != 0u &&
+        (int32_t)(mesh_node_service_now_ms() - port->quarantine_until_ms) < 0;
+}
+
+static void mesh_node_service_update_port_health(
+    struct mesh_node_service *service,
+    size_t port_index)
+{
+    struct mesh_uart_transport_stats stats;
+    struct mesh_node_service_port *port;
+    uint32_t bad_delta;
+    uint32_t drop_delta;
+
+    if (service == NULL || port_index >= service->port_count ||
+        service->runtime.upstream_port == (uint8_t)port_index) {
+        return;
+    }
+
+    port = &service->ports[port_index];
+    memset(&stats, 0, sizeof(stats));
+    if (mesh_uart_transport_get_stats(&port->transport, &stats) != 0) {
+        return;
+    }
+
+    bad_delta = stats.bad_frames - port->last_bad_frames;
+    drop_delta = stats.dropped_frames - port->last_dropped_frames;
+    port->last_bad_frames = stats.bad_frames;
+    port->last_dropped_frames = stats.dropped_frames;
+
+    if (bad_delta >= MESH_NODE_SERVICE_PORT_BAD_DELTA_LIMIT ||
+        drop_delta >= MESH_NODE_SERVICE_PORT_BAD_DELTA_LIMIT) {
+        port->quarantine_until_ms =
+            mesh_node_service_now_ms() + MESH_NODE_SERVICE_PORT_QUARANTINE_MS;
+        (void)mesh_uart_transport_flush_input(&port->transport);
+    }
+}
+
+static size_t mesh_node_service_scan_index(
+    const struct mesh_node_service *service,
+    size_t checked)
+{
+    uint8_t upstream_port;
+    size_t candidate;
+    size_t skipped = 0u;
+    size_t offset;
+
+    if (service == NULL || service->port_count == 0u) {
+        return 0u;
+    }
+
+    upstream_port = service->runtime.upstream_port;
+    if (upstream_port < service->port_count) {
+        if (checked == 0u) {
+            return upstream_port;
+        }
+        offset = checked - 1u;
+        for (candidate = 0u; candidate < service->port_count; ++candidate) {
+            size_t index = (service->next_rx_index + candidate) % service->port_count;
+
+            if (index == upstream_port) {
+                continue;
+            }
+            if (skipped == offset) {
+                return index;
+            }
+            ++skipped;
+        }
+    }
+
+    return (service->next_rx_index + checked) % service->port_count;
 }
 
 static bool mesh_node_service_port_is_ready(const struct mesh_node_service *service, uint8_t port_id)
@@ -316,13 +412,17 @@ static int mesh_node_service_receive_frame(
     *rx_len = 0u;
     *out_ingress_port = MESH_PROCESSER_INGRESS_PORT_NONE;
     for (checked = 0u; checked < service->port_count; ++checked) {
-        size_t index = (service->next_rx_index + checked) % service->port_count;
+        size_t index = mesh_node_service_scan_index(service, checked);
         int rc;
 
         if (!service->ports[index].initialized) {
             continue;
         }
+        if (mesh_node_service_port_is_quarantined(service, index)) {
+            continue;
+        }
         if (!mesh_uart_transport_rx_pending(&service->ports[index].transport)) {
+            mesh_node_service_update_port_health(service, index);
             continue;
         }
 
@@ -333,11 +433,13 @@ static int mesh_node_service_receive_frame(
             return 0;
         }
         if (mesh_node_service_error_is_soft(rc)) {
+            mesh_node_service_update_port_health(service, index);
             soft_error = rc;
             continue;
         }
         if (rc == -(int)MESH_ERR_BAD_FRAME) {
             (void)mesh_uart_transport_flush_input(&service->ports[index].transport);
+            mesh_node_service_update_port_health(service, index);
             mesh_diag_recv_frame((uint8_t)index, 0u, rc);
             soft_error = -(int)MESH_ERR_BUSY;
             continue;
@@ -543,14 +645,21 @@ int mesh_node_service_format_uart_stats(char *out, size_t out_cap)
 
     for (i = 0u; i < g_mesh_node_service.port_count && used < out_cap - 1u; ++i) {
         struct mesh_uart_transport_stats stats;
+        uint32_t quarantine_left_ms = 0u;
         int rc;
 
         memset(&stats, 0, sizeof(stats));
         rc = mesh_uart_transport_get_stats(&g_mesh_node_service.ports[i].transport, &stats);
+        if (g_mesh_node_service.ports[i].quarantine_until_ms != 0u &&
+            (int32_t)(mesh_node_service_now_ms() -
+                      g_mesh_node_service.ports[i].quarantine_until_ms) < 0) {
+            quarantine_left_ms =
+                g_mesh_node_service.ports[i].quarantine_until_ms - mesh_node_service_now_ms();
+        }
         written = snprintf(
             out + used,
             out_cap - used,
-            "port%u init=%u rc=%d dma=%u pos=%u last=%u parse=%u q=%u head=%u bad=%lu drop=%lu err=0x%08lx g=0x%02lx rx=0x%02lx\n",
+            "port%u init=%u rc=%d dma=%u pos=%u last=%u parse=%u q=%u head=%u bad=%lu drop=%lu quar=%lu err=0x%08lx g=0x%02lx rx=0x%02lx\n",
             (unsigned)i,
             g_mesh_node_service.ports[i].initialized ? 1u : 0u,
             rc,
@@ -562,6 +671,7 @@ int mesh_node_service_format_uart_stats(char *out, size_t out_cap)
             (unsigned)stats.frame_head,
             (unsigned long)stats.bad_frames,
             (unsigned long)stats.dropped_frames,
+            (unsigned long)quarantine_left_ms,
             (unsigned long)stats.hal_error_code,
             (unsigned long)stats.hal_g_state,
             (unsigned long)stats.hal_rx_state);

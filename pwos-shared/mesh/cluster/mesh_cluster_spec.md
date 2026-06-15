@@ -72,39 +72,74 @@ cluster 目前支持两种模式：
 
 ## 4. 数据模型
 
+当前数据模型定义在 `cluster.h` 中，所有表项均为静态数组，不依赖动态内存。
+
 ### 4.1 节点信息
 
-`cluster_node` 目前只保留：
+`struct cluster_node` 包含：
 
-- addr：节点地址。
-- online：在线状态。
-- valid：是否占用。
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| addr | uint8_t | 节点 mesh 短地址。 |
+| capability_bits | uint16_t | 来自最新 REGISTER 的能力位图。 |
+| port_bitmap | uint8_t | 来自最新 REGISTER 的本地发送选择器位图。 |
+| online | bool | 控制面观测到的在线状态。 |
+| wifi_supported | bool | 该节点是否声明支持 Wi-Fi 直连传输。 |
+| valid | bool | 该表项是否占用。 |
 
 说明：
 
-- 这是最小可用模型。
-- 将来可以再扩展 UID、节点名、能力位图等字段。
-- 当前主机侧“节点名 <-> UID 映射”不放在 cluster 内，而放在 VFS 桥接层；
-	cluster 只维护拓扑与可达性真相。
+- UID、节点名等更高层身份映射不放在 cluster 内，而放在 VFS 桥接层；cluster 只维护拓扑与可达性真相。
+- `port_bitmap` 的最高位保留给 Wi-Fi 传输，与 `MESH_PORT_SELECTOR_WIFI_ID` / `CLUSTER_PORT_WIFI_ID` 对齐。
 
 ### 4.2 路由信息
 
-`cluster_route` 目前保留：
+`struct cluster_route` 包含：
 
-- dst：目标地址。
-- next_hop：下一跳地址。
-- metric：路径代价。
-- local：是否就是本机。
-- valid：是否占用。
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| dst | uint8_t | 目标地址。 |
+| next_hop | uint8_t | 下一跳地址或本地出口端口选择器。 |
+| metric | uint8_t | 路径代价。 |
+| local | bool | 目标是否就是本机。 |
+| selector_is_port | bool | `next_hop` 当前是否表示本地出口端口号。 |
+| valid | bool | 该表项是否占用。 |
+
+说明：
+
+- 默认情况下 `next_hop` 表示下一跳节点地址。
+- 当 `cluster_config.direct_routes_use_port_selectors = true` 且工作在 `DIRECT_TABLE` 模式时，`next_hop` 改为本地出口串口/端口编号，同时 `selector_is_port = true`。
+- 这让同一套 cluster API 同时覆盖：主机/普通路由场景（dst → 下一跳地址）和子机多串口场景（dst → 本地 UART 端口号）。
 
 ### 4.3 拓扑链路
 
-`cluster_link` 目前保留：
+`struct cluster_link` 包含：
 
-- from / to：链路两端。
-- metric：链路代价。
-- bidirectional：是否双向。
-- valid：是否占用。
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| from | uint8_t | 链路起点。 |
+| to | uint8_t | 链路终点。 |
+| metric | uint8_t | 链路代价。 |
+| from_port | uint8_t | 从 from 发往 to 时应使用的本地出口端口。 |
+| to_port | uint8_t | 从 to 发往 from 时应使用的本地出口端口。 |
+| bidirectional | bool | 是否双向链路。 |
+| valid | bool | 该表项是否占用。 |
+
+说明：
+
+- 主机维护全图时，需要 `from_port` / `to_port` 为子机生成“dst → 出口串口号”的 `ROUTE_UPDATE`。
+- `CLUSTER_PORT_INVALID`（0xFF）表示未知或未指定的端口。
+- `CLUSTER_PORT_WIFI_ID` 表示保留的 Wi-Fi 端口选择器。
+
+### 4.4 配置
+
+`struct cluster_config` 包含：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| local_addr | uint8_t | 本机 mesh 短地址，未分配时为 0xFF。 |
+| mode | enum cluster_mode | `DIRECT_TABLE` 或 `TOPOLOGY`。 |
+| direct_routes_use_port_selectors | bool | 是否在 DIRECT_TABLE 模式下把 `next_hop` 解释为本地端口编号。 |
 
 ## 5. API 说明
 
