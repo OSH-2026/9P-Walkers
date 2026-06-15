@@ -11,6 +11,8 @@ void shell_start(void);
 void shell_run_boot_demo(void);
 /* Parse and execute a single command line. */
 int shell_execute_line(const char *line);
+/* Write text to stdout and the optional shell output hook. */
+void shell_write(const char *text);
 
 /*
  * Optional output hook: when set, every line of text printed by the shell

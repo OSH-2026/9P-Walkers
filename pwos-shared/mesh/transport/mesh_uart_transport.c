@@ -89,6 +89,10 @@ int mesh_uart_transport_flush_input(struct mesh_uart_transport *transport)
 
 #elif defined(MESH_UART_TRANSPORT_USE_STM32_HAL)
 
+#define MESH_UART_TRANSPORT_STM32_MAX_INSTANCES 8u
+
+static struct mesh_uart_transport *g_stm32_transports[MESH_UART_TRANSPORT_STM32_MAX_INSTANCES];
+
 static uint32_t transport_timeout_ms(const struct mesh_uart_transport *transport)
 {
     if (transport->config.io_timeout_ms == 0u) {
@@ -112,92 +116,410 @@ static int hal_status_to_mesh(HAL_StatusTypeDef status)
     }
 }
 
-static int drain_rx_fifo(struct mesh_uart_transport *transport)
+static uint32_t mesh_uart_transport_enter_critical(void)
 {
-    uint8_t byte;
+    uint32_t primask = __get_PRIMASK();
 
-    while (HAL_UART_Receive(transport->config.uart, &byte, 1u, 1u) == HAL_OK) {
+    __disable_irq();
+    return primask;
+}
+
+static void mesh_uart_transport_exit_critical(uint32_t primask)
+{
+    if ((primask & 1u) == 0u) {
+        __enable_irq();
     }
-    __HAL_UART_FLUSH_DRREGISTER(transport->config.uart);
+}
+
+static struct mesh_uart_transport *stm32_find_transport(UART_HandleTypeDef *uart)
+{
+    size_t i;
+
+    if (uart == NULL) {
+        return NULL;
+    }
+
+    for (i = 0u; i < MESH_UART_TRANSPORT_STM32_MAX_INSTANCES; ++i) {
+        if (g_stm32_transports[i] != NULL &&
+            g_stm32_transports[i]->initialized &&
+            g_stm32_transports[i]->config.uart == uart) {
+            return g_stm32_transports[i];
+        }
+    }
+
+    return NULL;
+}
+
+static int stm32_register_transport(struct mesh_uart_transport *transport)
+{
+    size_t i;
+
+    if (transport == NULL || transport->config.uart == NULL) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    for (i = 0u; i < MESH_UART_TRANSPORT_STM32_MAX_INSTANCES; ++i) {
+        if (g_stm32_transports[i] == transport) {
+            return 0;
+        }
+        if (g_stm32_transports[i] != NULL &&
+            g_stm32_transports[i]->config.uart == transport->config.uart) {
+            g_stm32_transports[i] = transport;
+            return 0;
+        }
+    }
+
+    for (i = 0u; i < MESH_UART_TRANSPORT_STM32_MAX_INSTANCES; ++i) {
+        if (g_stm32_transports[i] == NULL) {
+            g_stm32_transports[i] = transport;
+            return 0;
+        }
+    }
+
+    return -(int)MESH_ERR_BUSY;
+}
+
+static void stm32_unregister_transport(struct mesh_uart_transport *transport)
+{
+    size_t i;
+
+    for (i = 0u; i < MESH_UART_TRANSPORT_STM32_MAX_INSTANCES; ++i) {
+        if (g_stm32_transports[i] == transport) {
+            g_stm32_transports[i] = NULL;
+        }
+    }
+}
+
+static uint16_t stm32_dma_current_pos(const struct mesh_uart_transport *transport)
+{
+    uint32_t remaining;
+    uint32_t pos;
+
+    if (transport == NULL ||
+        transport->config.uart == NULL ||
+        transport->config.uart->hdmarx == NULL) {
+        return 0u;
+    }
+
+    remaining = __HAL_DMA_GET_COUNTER(transport->config.uart->hdmarx);
+    if (remaining > MESH_UART_TRANSPORT_STM32_DMA_RX_BUFFER_SIZE) {
+        return 0u;
+    }
+
+    pos = MESH_UART_TRANSPORT_STM32_DMA_RX_BUFFER_SIZE - remaining;
+    if (pos > MESH_UART_TRANSPORT_STM32_DMA_RX_BUFFER_SIZE) {
+        pos = 0u;
+    }
+    return (uint16_t)pos;
+}
+
+static void stm32_reset_rx_state(struct mesh_uart_transport *transport)
+{
+    uint32_t primask;
+
+    if (transport == NULL) {
+        return;
+    }
+
+    primask = mesh_uart_transport_enter_critical();
+    transport->dma_last_pos = stm32_dma_current_pos(transport);
+    transport->parse_len = 0u;
+    transport->frame_head = 0u;
+    transport->frame_count = 0u;
+    mesh_uart_transport_exit_critical(primask);
+}
+
+static void stm32_enqueue_frame_from_isr(
+    struct mesh_uart_transport *transport,
+    const uint8_t *frame,
+    uint16_t frame_len)
+{
+    uint8_t slot;
+
+    if (transport == NULL || frame == NULL || frame_len == 0u ||
+        frame_len > MESH_UART_TRANSPORT_STM32_FRAME_CAP) {
+        return;
+    }
+
+    if (transport->frame_count >= MESH_UART_TRANSPORT_STM32_FRAME_QUEUE_CAP) {
+        ++transport->dropped_frames;
+        return;
+    }
+
+    slot = (uint8_t)((transport->frame_head + transport->frame_count) %
+                    MESH_UART_TRANSPORT_STM32_FRAME_QUEUE_CAP);
+    memcpy(transport->frame_queue[slot], frame, frame_len);
+    transport->frame_lens[slot] = frame_len;
+    ++transport->frame_count;
+}
+
+static void stm32_parser_reset(struct mesh_uart_transport *transport)
+{
+    if (transport != NULL) {
+        transport->parse_len = 0u;
+    }
+}
+
+static void stm32_consume_byte_from_isr(struct mesh_uart_transport *transport, uint8_t byte)
+{
+    uint16_t frame_len_field;
+    uint16_t expected_len;
+
+    if (transport == NULL) {
+        return;
+    }
+
+    if (transport->parse_len == 0u) {
+        if (byte == (uint8_t)'M') {
+            transport->parse_buffer[0] = byte;
+            transport->parse_len = 1u;
+        }
+        return;
+    }
+
+    if (transport->parse_len == 1u) {
+        if (byte == (uint8_t)'H') {
+            transport->parse_buffer[1] = byte;
+            transport->parse_len = 2u;
+            return;
+        }
+
+        transport->parse_len = 0u;
+        if (byte == (uint8_t)'M') {
+            transport->parse_buffer[0] = byte;
+            transport->parse_len = 1u;
+        }
+        return;
+    }
+
+    if (transport->parse_len >= MESH_UART_TRANSPORT_STM32_FRAME_CAP) {
+        ++transport->bad_frames;
+        stm32_parser_reset(transport);
+        return;
+    }
+
+    transport->parse_buffer[transport->parse_len++] = byte;
+
+    if (transport->parse_len < 4u) {
+        return;
+    }
+
+    frame_len_field = (uint16_t)transport->parse_buffer[2] |
+        (uint16_t)((uint16_t)transport->parse_buffer[3] << 8);
+    if (frame_len_field < 8u || frame_len_field > (uint16_t)(8u + MESH_MAX_PAYLOAD_LEN)) {
+        ++transport->bad_frames;
+        stm32_parser_reset(transport);
+        return;
+    }
+
+    expected_len = (uint16_t)(frame_len_field + 6u);
+    if (expected_len > MESH_UART_TRANSPORT_STM32_FRAME_CAP) {
+        ++transport->bad_frames;
+        stm32_parser_reset(transport);
+        return;
+    }
+
+    if (transport->parse_len == expected_len) {
+        stm32_enqueue_frame_from_isr(transport, transport->parse_buffer, expected_len);
+        stm32_parser_reset(transport);
+    } else if (transport->parse_len > expected_len) {
+        ++transport->bad_frames;
+        stm32_parser_reset(transport);
+    }
+}
+
+static void stm32_consume_span_from_isr(
+    struct mesh_uart_transport *transport,
+    const uint8_t *data,
+    uint16_t len)
+{
+    uint16_t i;
+
+    if (transport == NULL || data == NULL) {
+        return;
+    }
+
+    for (i = 0u; i < len; ++i) {
+        stm32_consume_byte_from_isr(transport, data[i]);
+    }
+}
+
+static void stm32_dma_consume_until_from_isr(
+    struct mesh_uart_transport *transport,
+    uint16_t pos)
+{
+    uint16_t last;
+
+    if (transport == NULL || !transport->dma_running) {
+        return;
+    }
+
+    if (pos > MESH_UART_TRANSPORT_STM32_DMA_RX_BUFFER_SIZE) {
+        pos = MESH_UART_TRANSPORT_STM32_DMA_RX_BUFFER_SIZE;
+    }
+
+    last = transport->dma_last_pos;
+    if (last > MESH_UART_TRANSPORT_STM32_DMA_RX_BUFFER_SIZE) {
+        last = 0u;
+    }
+    if (pos == last) {
+        return;
+    }
+
+    if (pos > last) {
+        stm32_consume_span_from_isr(
+            transport,
+            transport->dma_rx_buffer + last,
+            (uint16_t)(pos - last));
+    } else {
+        stm32_consume_span_from_isr(
+            transport,
+            transport->dma_rx_buffer + last,
+            (uint16_t)(MESH_UART_TRANSPORT_STM32_DMA_RX_BUFFER_SIZE - last));
+        if (pos > 0u) {
+            stm32_consume_span_from_isr(transport, transport->dma_rx_buffer, pos);
+        }
+    }
+
+    transport->dma_last_pos = pos;
+}
+
+static void stm32_poll_dma_rx(struct mesh_uart_transport *transport)
+{
+    uint32_t primask;
+    uint16_t pos;
+
+    if (transport == NULL || !transport->dma_running) {
+        return;
+    }
+
+    pos = stm32_dma_current_pos(transport);
+    primask = mesh_uart_transport_enter_critical();
+    stm32_dma_consume_until_from_isr(transport, pos);
+    mesh_uart_transport_exit_critical(primask);
+}
+
+static int stm32_start_dma_rx(struct mesh_uart_transport *transport)
+{
+    HAL_StatusTypeDef status;
+
+    if (transport == NULL || transport->config.uart == NULL) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    transport->dma_last_pos = 0u;
+    status = HAL_UARTEx_ReceiveToIdle_DMA(
+        transport->config.uart,
+        transport->dma_rx_buffer,
+        MESH_UART_TRANSPORT_STM32_DMA_RX_BUFFER_SIZE);
+    if (status != HAL_OK) {
+        transport->dma_running = false;
+        return hal_status_to_mesh(status);
+    }
+
+    if (transport->config.uart->hdmarx != NULL) {
+        __HAL_DMA_DISABLE_IT(transport->config.uart->hdmarx, DMA_IT_HT);
+    }
+    transport->dma_running = true;
     return 0;
 }
 
-static int read_exact(struct mesh_uart_transport *transport, uint8_t *buf, size_t len)
-{
-    size_t total = 0u;
-
-    while (total < len) {
-        size_t chunk = len - total;
-        int rc;
-
-        if (chunk > (size_t)UINT16_MAX) {
-            chunk = (size_t)UINT16_MAX;
-        }
-
-        rc = hal_status_to_mesh(HAL_UART_Receive(
-            transport->config.uart,
-            buf + total,
-            (uint16_t)chunk,
-            transport_timeout_ms(transport)));
-        if (rc != 0) {
-            return rc;
-        }
-
-        total += chunk;
-    }
-
-    return 0;
-}
-
-static int receive_frame_locked(
+static int stm32_dequeue_frame(
     struct mesh_uart_transport *transport,
     uint8_t *rx_data,
     size_t rx_cap,
     size_t *rx_len)
 {
-    uint8_t header[4];
-    uint16_t frame_len_field;
-    size_t total_len;
-    int rc;
+    uint32_t primask;
+    uint8_t slot;
+    uint16_t frame_len;
 
-    rc = read_exact(transport, header, sizeof(header));
-    if (rc != 0) {
-        return rc;
+    if (transport == NULL || rx_data == NULL || rx_len == NULL) {
+        return -(int)MESH_ERR_INVALID_STATE;
     }
-    if (header[0] != (uint8_t)'M' || header[1] != (uint8_t)'H') {
+
+    primask = mesh_uart_transport_enter_critical();
+    if (transport->frame_count == 0u) {
+        mesh_uart_transport_exit_critical(primask);
+        return -(int)MESH_ERR_BUSY;
+    }
+
+    slot = transport->frame_head;
+    frame_len = transport->frame_lens[slot];
+    if (frame_len == 0u ||
+        frame_len > MESH_UART_TRANSPORT_STM32_FRAME_CAP ||
+        (size_t)frame_len > rx_cap) {
+        transport->frame_head =
+            (uint8_t)((transport->frame_head + 1u) % MESH_UART_TRANSPORT_STM32_FRAME_QUEUE_CAP);
+        --transport->frame_count;
+        mesh_uart_transport_exit_critical(primask);
+        *rx_len = 0u;
         return -(int)MESH_ERR_BAD_FRAME;
     }
 
-    frame_len_field = (uint16_t)header[2] | (uint16_t)((uint16_t)header[3] << 8);
-    if (frame_len_field < 8u) {
-        return -(int)MESH_ERR_BAD_FRAME;
-    }
+    memcpy(rx_data, transport->frame_queue[slot], frame_len);
+    transport->frame_head =
+        (uint8_t)((transport->frame_head + 1u) % MESH_UART_TRANSPORT_STM32_FRAME_QUEUE_CAP);
+    --transport->frame_count;
+    mesh_uart_transport_exit_critical(primask);
 
-    total_len = (size_t)frame_len_field + 6u;
-    if (total_len > rx_cap || total_len < MESH_FRAME_OVERHEAD) {
-        return -(int)MESH_ERR_BAD_FRAME;
-    }
-
-    memcpy(rx_data, header, sizeof(header));
-    rc = read_exact(transport, rx_data + sizeof(header), total_len - sizeof(header));
-    if (rc != 0) {
-        return rc;
-    }
-
-    *rx_len = total_len;
+    *rx_len = frame_len;
     return 0;
+}
+
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
+{
+    struct mesh_uart_transport *transport = stm32_find_transport(huart);
+
+    if (transport == NULL) {
+        return;
+    }
+    stm32_dma_consume_until_from_isr(transport, Size);
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    struct mesh_uart_transport *transport = stm32_find_transport(huart);
+
+    if (transport == NULL) {
+        return;
+    }
+
+    transport->dma_running = false;
+    transport->parse_len = 0u;
+    transport->dma_last_pos = 0u;
+    huart->ErrorCode = HAL_UART_ERROR_NONE;
+    (void)stm32_start_dma_rx(transport);
 }
 
 int mesh_uart_transport_init(
     struct mesh_uart_transport *transport,
     const struct mesh_uart_transport_config *config)
 {
+    struct mesh_uart_transport_config local_config;
+    int rc;
+
     if (transport == NULL || config == NULL || config->uart == NULL) {
         return -(int)MESH_ERR_INVALID_STATE;
     }
 
-    transport->config = *config;
+    local_config = *config;
+    memset(transport, 0, sizeof(*transport));
+    transport->config = local_config;
     transport->initialized = true;
+    rc = stm32_register_transport(transport);
+    if (rc != 0) {
+        memset(transport, 0, sizeof(*transport));
+        return rc;
+    }
+
+    rc = stm32_start_dma_rx(transport);
+    if (rc != 0) {
+        stm32_unregister_transport(transport);
+        memset(transport, 0, sizeof(*transport));
+        return rc;
+    }
+
     return 0;
 }
 
@@ -207,6 +529,11 @@ void mesh_uart_transport_deinit(struct mesh_uart_transport *transport)
         return;
     }
 
+    if (transport->initialized && transport->config.uart != NULL) {
+        transport->dma_running = false;
+        (void)HAL_UART_DMAStop(transport->config.uart);
+        stm32_unregister_transport(transport);
+    }
     memset(transport, 0, sizeof(*transport));
 }
 
@@ -240,25 +567,25 @@ int mesh_uart_transport_receive_frame(
     }
 
     *rx_len = 0u;
+    stm32_poll_dma_rx(transport);
 
     if (transport->config.flush_before_receive) {
-        int rc = drain_rx_fifo(transport);
-
-        if (rc != 0) {
-            return rc;
-        }
+        stm32_reset_rx_state(transport);
     }
 
-    return receive_frame_locked(transport, rx_data, rx_cap, rx_len);
+    return stm32_dequeue_frame(transport, rx_data, rx_cap, rx_len);
 }
 
 bool mesh_uart_transport_rx_pending(const struct mesh_uart_transport *transport)
 {
+    struct mesh_uart_transport *mutable_transport = (struct mesh_uart_transport *)transport;
+
     if (transport == NULL || !transport->initialized || transport->config.uart == NULL) {
         return false;
     }
 
-    return __HAL_UART_GET_FLAG(transport->config.uart, UART_FLAG_RXNE) != RESET;
+    stm32_poll_dma_rx(mutable_transport);
+    return mutable_transport->frame_count > 0u;
 }
 
 int mesh_uart_transport_flush_input(struct mesh_uart_transport *transport)
@@ -267,15 +594,19 @@ int mesh_uart_transport_flush_input(struct mesh_uart_transport *transport)
         return -(int)MESH_ERR_INVALID_STATE;
     }
 
-    return drain_rx_fifo(transport);
+    stm32_reset_rx_state(transport);
+    return 0;
 }
 
 #else
 
 #include "driver/uart.h"
 #include "esp_err.h"
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+
+static const char *TAG = "mesh_uart";
 
 static int transport_timeout_ms(const struct mesh_uart_transport *transport)
 {
@@ -502,6 +833,14 @@ int mesh_uart_transport_init(
 
     (void)uart_flush_input((uart_port_t)config->uart_port);
     transport->initialized = true;
+    ESP_LOGI(
+        TAG,
+        "initialized uart%d tx=%d rx=%d baud=%d timeout=%u ms",
+        config->uart_port,
+        config->tx_pin,
+        config->rx_pin,
+        config->baud_rate,
+        (unsigned)config->io_timeout_ms);
     return 0;
 }
 

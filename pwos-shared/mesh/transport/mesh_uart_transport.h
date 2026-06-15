@@ -24,6 +24,10 @@ extern "C" {
 #define MESH_UART_TRANSPORT_DEFAULT_BAUD_RATE 1000000
 #define MESH_UART_TRANSPORT_DEFAULT_RX_BUFFER_SIZE 1024u
 #define MESH_UART_TRANSPORT_DEFAULT_TX_BUFFER_SIZE 1024u
+#elif defined(MESH_UART_TRANSPORT_USE_STM32_HAL)
+#define MESH_UART_TRANSPORT_STM32_DMA_RX_BUFFER_SIZE 1024u
+#define MESH_UART_TRANSPORT_STM32_FRAME_QUEUE_CAP 4u
+#define MESH_UART_TRANSPORT_STM32_FRAME_CAP (MESH_FRAME_OVERHEAD + MESH_MAX_PAYLOAD_LEN)
 #endif
 
 struct mesh_uart_transport_config {
@@ -48,6 +52,18 @@ struct mesh_uart_transport {
 #ifdef ESP_PLATFORM
     void *tx_lock;
     void *rx_lock;
+#elif defined(MESH_UART_TRANSPORT_USE_STM32_HAL)
+    uint8_t dma_rx_buffer[MESH_UART_TRANSPORT_STM32_DMA_RX_BUFFER_SIZE];
+    uint16_t dma_last_pos;
+    uint8_t parse_buffer[MESH_UART_TRANSPORT_STM32_FRAME_CAP];
+    uint16_t parse_len;
+    uint8_t frame_queue[MESH_UART_TRANSPORT_STM32_FRAME_QUEUE_CAP][MESH_UART_TRANSPORT_STM32_FRAME_CAP];
+    uint16_t frame_lens[MESH_UART_TRANSPORT_STM32_FRAME_QUEUE_CAP];
+    volatile uint8_t frame_head;
+    volatile uint8_t frame_count;
+    volatile uint32_t dropped_frames;
+    volatile uint32_t bad_frames;
+    bool dma_running;
 #endif
     bool initialized;
 };

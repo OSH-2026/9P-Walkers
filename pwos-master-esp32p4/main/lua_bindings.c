@@ -14,6 +14,7 @@
 #include "lualib.h"
 #include "mini9p_protocol.h"
 #include "sdkconfig.h"
+#include "shell.h"
 
 /**
  * @brief 
@@ -24,8 +25,10 @@
 static int host_echo(lua_State *L)
 {
     const char *text = luaL_checkstring(L, 1);
+    char buf[160];
 
-    printf("[lua] %s\n", text);
+    snprintf(buf, sizeof(buf), "[lua] %s\n", text);
+    shell_write(buf);
     lua_pushstring(L, text);
     return 1;
 }

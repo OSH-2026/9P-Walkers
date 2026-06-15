@@ -8,6 +8,7 @@
 #include "lua.h"
 #include "lualib.h"
 #include "lua_bindings.h"
+#include "shell.h"
 
 // 静态 全局 Lua VM 实例
 static lua_State *g_lua_state;
@@ -44,8 +45,38 @@ static void *lua_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 static int lua_panic_handler(lua_State *L)
 {
     const char *message = lua_tostring(L, -1);
+    char buf[160];
 
-    printf("lua panic: %s\n", message != NULL ? message : "(unknown)");
+    snprintf(buf, sizeof(buf), "lua panic: %s\n", message != NULL ? message : "(unknown)");
+    shell_write(buf);
+    return 0;
+}
+
+static int pw_lua_print(lua_State *L)
+{
+    int n = lua_gettop(L);
+
+    for (int i = 1; i <= n; ++i) {
+        size_t len = 0;
+        const char *text = luaL_tolstring(L, i, &len);
+
+        if (i > 1) {
+            shell_write("\t");
+        }
+        if (text != NULL) {
+            char buf[160];
+            while (len > 0u) {
+                size_t chunk = len < sizeof(buf) - 1u ? len : sizeof(buf) - 1u;
+                memcpy(buf, text, chunk);
+                buf[chunk] = '\0';
+                shell_write(buf);
+                text += chunk;
+                len -= chunk;
+            }
+        }
+        lua_pop(L, 1);
+    }
+    shell_write("\n");
     return 0;
 }
 
@@ -74,6 +105,9 @@ static void open_minimal_libs(lua_State *L)
         luaL_requiref(L, libs[i].name, libs[i].open_func, 1);
         lua_pop(L, 1);  // 弹出栈顶的库表
     }
+
+    lua_pushcfunction(L, pw_lua_print);
+    lua_setglobal(L, "print");
 }
 
 /**
@@ -92,11 +126,13 @@ static void print_results(lua_State *L, int result_count)
     }
 
     first_index = lua_gettop(L) - result_count + 1;
-    puts("lua result:");
+    shell_write("lua result:\n");
     for (i = 0; i < result_count; ++i) {
         const char *text = luaL_tolstring(L, first_index + i, NULL);
+        char buf[160];
 
-        printf("  %s\n", text != NULL ? text : "(nil)");
+        snprintf(buf, sizeof(buf), "  %s\n", text != NULL ? text : "(nil)");
+        shell_write(buf);
         lua_pop(L, 1);  // 弹出 luaL_tolstring 生成的字符串
     }
 }
@@ -115,7 +151,7 @@ bool pw_lua_init(void)
 
     g_lua_state = lua_newstate(lua_alloc, NULL, 0u);
     if (g_lua_state == NULL) {
-        puts("lua init failed: allocator returned NULL");
+        shell_write("lua init failed: allocator returned NULL\n");
         return false;
     }
 
@@ -148,6 +184,7 @@ int pw_lua_run_buffer(const char *chunk_name, const char *source)
     int base;
     int status;
     int result_count;
+    char load_error[192];
 
     if (source == NULL) {
         return -1;
@@ -160,16 +197,46 @@ int pw_lua_run_buffer(const char *chunk_name, const char *source)
     base = lua_gettop(g_lua_state);
     status = luaL_loadbuffer(g_lua_state, source, strlen(source), chunk_name != NULL ? chunk_name : "chunk");
     if (status != LUA_OK) {
-        printf("lua load error: %s\n", lua_tostring(g_lua_state, -1));
+        const char *message = lua_tostring(g_lua_state, -1);
+        char expr_source[320];
+        int written;
+
+        snprintf(load_error, sizeof(load_error), "lua load error: %s\n", message != NULL ? message : "(unknown)");
         lua_settop(g_lua_state, base);  // 恢复旧的栈顶
-        return status;
+
+        /*
+         * Shell 上的一行 Lua 常被当作 REPL 表达式输入，例如：
+         *   lua 1 + 1
+         * Lua chunk 语法不允许裸表达式，因此失败后再按 "return <expr>" 尝试一次。
+         */
+        written = snprintf(expr_source, sizeof(expr_source), "return %s", source);
+        if (written > 0 && (size_t)written < sizeof(expr_source)) {
+            int expr_status = luaL_loadbuffer(
+                g_lua_state,
+                expr_source,
+                strlen(expr_source),
+                chunk_name != NULL ? chunk_name : "chunk");
+            if (expr_status == LUA_OK) {
+                status = LUA_OK;
+            } else {
+                shell_write(load_error);
+                lua_settop(g_lua_state, base);
+                return status;
+            }
+        } else {
+            shell_write(load_error);
+            return status;
+        }
     }
 
     // 用 g_lua_state 启动脚本
     // 0: 无参数，LUA_MULTRET: 返回所有结果，0: 无错误函数
     status = lua_pcall(g_lua_state, 0, LUA_MULTRET, 0);
     if (status != LUA_OK) {
-        printf("lua runtime error: %s\n", lua_tostring(g_lua_state, -1));
+        char buf[192];
+
+        snprintf(buf, sizeof(buf), "lua runtime error: %s\n", lua_tostring(g_lua_state, -1));
+        shell_write(buf);
         lua_settop(g_lua_state, base);  // 恢复旧的栈顶
         return status;
     }

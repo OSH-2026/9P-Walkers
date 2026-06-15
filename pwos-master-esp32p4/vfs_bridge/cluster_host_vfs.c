@@ -255,6 +255,8 @@ static int resolve_path(const char *path,
                         char *remote_path,
                         size_t remote_cap)
 {
+    bool matched_unreachable = false;
+
     if (!path || !out_route || !remote_path || remote_cap == 0)
     {
         return -(int)M9P_ERR_EINVAL;
@@ -267,13 +269,13 @@ static int resolve_path(const char *path,
 
     for (size_t i = 0; i < CLUSTER_VFS_MAX_ROUTES; ++i)
     {
-        if (g_routes[i].m9p_state != CLUSTER_VFS_M9P_ATTACHED || !route_is_reachable(&g_routes[i]))
+        const size_t target_len = strlen(g_routes[i].target);
+        const char *path_target = path + 1;
+
+        if (g_routes[i].m9p_state == CLUSTER_VFS_M9P_EMPTY)
         {
             continue;
         }
-
-        const size_t target_len = strlen(g_routes[i].target);
-        const char *path_target = path + 1;
 
         if (strncmp(path_target, g_routes[i].target, target_len) != 0)
         {
@@ -282,6 +284,12 @@ static int resolve_path(const char *path,
 
         if (path_target[target_len] != '\0' && path_target[target_len] != '/')
         {
+            continue;
+        }
+
+        if (!route_is_reachable(&g_routes[i]))
+        {
+            matched_unreachable = true;
             continue;
         }
 
@@ -297,8 +305,21 @@ static int resolve_path(const char *path,
         }
 
         strcpy(remote_path, mapped_path);
+        if (g_routes[i].m9p_state != CLUSTER_VFS_M9P_ATTACHED)
+        {
+            int ret = cluster_vfs_attach(g_routes[i].target);
+            if (ret < 0)
+            {
+                return ret;
+            }
+        }
         *out_route = &g_routes[i];
         return 0;
+    }
+
+    if (matched_unreachable)
+    {
+        return -(int)M9P_ERR_EAGAIN;
     }
 
     return -(int)M9P_ERR_ENOENT;
@@ -338,6 +359,7 @@ int cluster_vfs_discover_node(
 {
     struct cluster_vfs_route *conflict_route;
     struct cluster_vfs_route *route;
+    bool mapping_changed = true;
     bool reused_mapping = false;
 
     if (hw_uid == NULL || client == NULL)
@@ -384,19 +406,31 @@ int cluster_vfs_discover_node(
     else
     {
         reused_mapping = true;
-        invalidate_open_files_for_route(route);
-        if (route->client != NULL && route->client != client)
+        mapping_changed = !route->has_hw_uid ||
+                          route->mesh_addr != mesh_addr ||
+                          route->client != client;
+        if (mapping_changed)
         {
-            reset_client_session(route->client);
+            invalidate_open_files_for_route(route);
+            if (route->client != NULL && route->client != client)
+            {
+                reset_client_session(route->client);
+            }
         }
     }
 
-    reset_client_session(client);
+    if (mapping_changed)
+    {
+        reset_client_session(client);
+    }
     route->client = client;
     route->mesh_addr = mesh_addr;
     memcpy(route->hw_uid, hw_uid, CLUSTER_VFS_UID_LEN);
     route->has_hw_uid = true;
-    route->m9p_state = CLUSTER_VFS_M9P_NEW;
+    if (mapping_changed || route->m9p_state == CLUSTER_VFS_M9P_EMPTY)
+    {
+        route->m9p_state = CLUSTER_VFS_M9P_NEW;
+    }
 
     if (out_target != NULL)
     {

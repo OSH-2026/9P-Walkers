@@ -277,7 +277,8 @@ static int mock_transport(void *ctx_ptr,
         ctx->open_count++;
         ctx->last_open_fid = get_le16(frame.payload);
         ctx->last_open_mode = frame.payload[2];
-        if (strcmp(ctx->last_walk_path, "/dev") == 0)
+        if (strcmp(ctx->last_walk_path, "/") == 0 ||
+            strcmp(ctx->last_walk_path, "/dev") == 0)
         {
             return send_ropen_with_type(frame.tag, M9P_QID_DIR, rx, rx_cap, rx_len);
         }
@@ -292,7 +293,8 @@ static int mock_transport(void *ctx_ptr,
         ctx->last_read_fid = get_le16(frame.payload);
         ctx->last_read_offset = get_le32(frame.payload + 2);
         ctx->last_read_count = get_le16(frame.payload + 6);
-        if (strcmp(ctx->last_walk_path, "/dev") == 0)
+        if (strcmp(ctx->last_walk_path, "/") == 0 ||
+            strcmp(ctx->last_walk_path, "/dev") == 0)
         {
             if (ctx->last_read_offset == 0u)
             {
@@ -461,6 +463,31 @@ static void test_duplicate_discovery_reuses_route(void)
     expect_str("duplicate same name", name2, name1);
 }
 
+/* 同一 UID/地址/client 的重复 REGISTER 是心跳刷新，不能冲掉已 attach 会话。 */
+static void test_duplicate_discovery_preserves_attached_session(void)
+{
+    struct mock_ctx ctx;
+    struct m9p_client client;
+    struct m9p_stat stat;
+    uint8_t uid[CLUSTER_VFS_UID_LEN];
+    const char *name = NULL;
+    bool reused = false;
+
+    setup_attached_node(&ctx, &client);
+    fill_uid(uid, 0x70u);
+
+    expect_int("duplicate attached rediscover",
+               cluster_config_on_node_discovered(0x11u, uid, &client, &name, &reused),
+               0);
+    expect_int("duplicate attached reused", reused, 1);
+    expect_str("duplicate attached same name", name, "mcu1");
+
+    expect_int("duplicate attached attach", cluster_vfs_attach("mcu1"), 0);
+    expect_int("duplicate attached no reattach", ctx.attach_count, 1);
+    expect_int("duplicate attached stat", cluster_vfs_stat("/mcu1/dev/temp", &stat), 0);
+    expect_int("duplicate attached attach count after stat", ctx.attach_count, 1);
+}
+
 /* 新主机初始化不再预注册静态 mcu1，而是只启动 mesh cluster + VFS 桥接层。 */
 static void test_mesh_host_init_starts_empty(void)
 {
@@ -554,7 +581,7 @@ static void test_node_departure_marks_new_and_invalidates_fd(void)
     fd = 0xffffu;
     expect_int("depart open blocked",
                cluster_vfs_open("/mcu1/dev/temp", M9P_OREAD, &fd),
-               -(int)M9P_ERR_ENOENT);
+               -(int)M9P_ERR_EAGAIN);
 }
 
 /* 链路图变化后应通过 mesh cluster 的连通性查询驱动 VFS 回退到离线/NEW。 */
@@ -733,6 +760,25 @@ static void test_list_root_mounts(void)
     expect_int("list root no remote read", ctx.read_count, 0);
 }
 
+/* 首次访问远端挂载点时应自动 attach，而不是要求 shell 先手动 attach。 */
+static void test_list_remote_root_auto_attaches(void)
+{
+    struct mock_ctx ctx;
+    struct m9p_client client;
+    struct m9p_dirent entries[4];
+    size_t count = 0u;
+
+    memset(entries, 0, sizeof(entries));
+    setup_discovered_node(&ctx, &client, 0x11u, 0x91u, NULL);
+
+    expect_int("list remote root", cluster_vfs_list("/mcu1/", entries, 4u, &count), 0);
+    expect_int("list remote root attach count", ctx.attach_count, 1);
+    expect_str("list remote root mapped path", ctx.last_walk_path, "/");
+    expect_int("list remote root count", (int)count, 2);
+    expect_str("list remote root first", entries[0].name, "temp");
+    expect_str("list remote root second", entries[1].name, "led");
+}
+
 /* 远端目录列表通过 open/read/parse dirent/close 完成。 */
 static void test_list_remote_dir(void)
 {
@@ -833,6 +879,7 @@ int main(void)
     printf("cluster_vfs test runner start\n");
 
     run_test("test_duplicate_discovery_reuses_route", test_duplicate_discovery_reuses_route);
+    run_test("test_duplicate_discovery_preserves_attached_session", test_duplicate_discovery_preserves_attached_session);
     run_test("test_mesh_host_init_starts_empty", test_mesh_host_init_starts_empty);
     run_test("test_discover_node_allocates_name_and_tracks_uid", test_discover_node_allocates_name_and_tracks_uid);
     run_test("test_rediscover_same_uid_reuses_name", test_rediscover_same_uid_reuses_name);
@@ -847,6 +894,7 @@ int main(void)
     run_test("test_write_path_helper", test_write_path_helper);
     run_test("test_write_path_dir_returns_eisdir", test_write_path_dir_returns_eisdir);
     run_test("test_list_root_mounts", test_list_root_mounts);
+    run_test("test_list_remote_root_auto_attaches", test_list_remote_root_auto_attaches);
     run_test("test_list_remote_dir", test_list_remote_dir);
     run_test("test_list_file_returns_enotdir", test_list_file_returns_enotdir);
     run_test("test_stat_success_clunks", test_stat_success_clunks);

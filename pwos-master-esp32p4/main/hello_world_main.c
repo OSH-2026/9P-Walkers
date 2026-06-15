@@ -32,7 +32,8 @@ static void print_chip_banner(void)
 
 void app_main(void)
 {
-    setvbuf(stdin,  NULL, _IONBF, 0);
+    /* stdout 无缓冲确保 printf 立即输出到 UART；stdin 保留默认行缓冲
+     * 使 fgets 在 UART 无数据时阻塞等待，避免 shell prompt 无限循环。 */
     setvbuf(stdout, NULL, _IONBF, 0);
 
     print_chip_banner();
@@ -52,8 +53,8 @@ void app_main(void)
         return;
     }
 
-    /* Bring up Ethernet (internal EMAC + RMII PHY) so browsers can reach
-     * the web server.  IP is obtained via DHCP and logged on link-up. */
+    /* Bring up Ethernet (internal EMAC + RMII PHY). The board expects to be
+     * plugged into a router and receives its WebShell IP through DHCP. */
     lan_init();
 
     /* Start HTTP + WebSocket server (port 80). */

@@ -32,6 +32,18 @@ static const httpd_uri_t uri_root = {
     .handler = get_handler,
 };
 
+static esp_err_t health_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/plain");
+    return httpd_resp_sendstr(req, "ok\n");
+}
+
+static const httpd_uri_t uri_health = {
+    .uri     = "/health",
+    .method  = HTTP_GET,
+    .handler = health_handler,
+};
+
 /* ------------------------------------------------------------------ */
 /* WebSocket 处理器 — 与 shell_execute_line 的桥梁                       */
 /* ------------------------------------------------------------------ */
@@ -108,8 +120,10 @@ void web_server_start(void)
     websocket_shell_init();
 
     httpd_config_t cfg    = HTTPD_DEFAULT_CONFIG();
+    cfg.stack_size        = 8192;
     cfg.max_open_sockets  = 6;   /* 足够 HTTP 以及几个 WS 客户端使用 */
     cfg.max_uri_handlers  = 4;
+    cfg.lru_purge_enable  = true;
     cfg.close_fn          = on_socket_close;
 
     ESP_LOGI(TAG, "Starting HTTP server on port %d", cfg.server_port);
@@ -120,6 +134,7 @@ void web_server_start(void)
     }
 
     httpd_register_uri_handler(s_server, &uri_root);
+    httpd_register_uri_handler(s_server, &uri_health);
     httpd_register_uri_handler(s_server, &uri_ws);
 
     /* 与 WebSocket 广播层共享服务器句柄。 */

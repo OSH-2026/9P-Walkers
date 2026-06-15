@@ -26,7 +26,8 @@ static int mesh_node_runtime_send_neighbor_probe_to_port(
 
 static int mesh_node_runtime_send_link_state_to_upstream(
     struct mesh_node_runtime *runtime,
-    uint8_t neighbor_addr);
+    uint8_t neighbor_addr,
+    uint8_t local_port);
 
 static int mesh_node_runtime_probe_all_ports(struct mesh_node_runtime *runtime);
 
@@ -149,8 +150,11 @@ static int mesh_node_runtime_ensure_upstream_control_route(struct mesh_node_runt
 static int mesh_node_runtime_report_new_direct_peer(
     struct mesh_node_runtime *runtime,
     uint8_t peer_addr,
+    uint8_t local_port,
     bool already_known)
 {
+    char diag[96];
+
     if (already_known) {
         return 0;
     }
@@ -159,12 +163,21 @@ static int mesh_node_runtime_report_new_direct_peer(
         runtime->control_plane_addr == MESH_ADDR_UNASSIGNED ||
         runtime->upstream_port == MESH_PROCESSER_INGRESS_PORT_NONE ||
         runtime->config.send_frame_to_port == NULL ||
-        peer_addr == MESH_ADDR_UNASSIGNED) {
-        mesh_diag_text("direct peer skip link_state");
+        peer_addr == MESH_ADDR_UNASSIGNED ||
+        local_port == MESH_PROCESSER_INGRESS_PORT_NONE) {
+        (void)snprintf(
+            diag,
+            sizeof(diag),
+            "direct peer skip ls peer=0x%02x port=%u up=%u ctrl=0x%02x",
+            peer_addr,
+            (unsigned)local_port,
+            (unsigned)(runtime != NULL ? runtime->upstream_port : MESH_PROCESSER_INGRESS_PORT_NONE),
+            (unsigned)(runtime != NULL ? runtime->control_plane_addr : MESH_ADDR_UNASSIGNED));
+        mesh_diag_text(diag);
         return 0;
     }
 
-    return mesh_node_runtime_send_link_state_to_upstream(runtime, peer_addr);
+    return mesh_node_runtime_send_link_state_to_upstream(runtime, peer_addr, local_port);
 }
 
 /*
@@ -298,26 +311,45 @@ static int mesh_node_runtime_handle_downstream_register(
     uint8_t ingress_port)
 {
     struct mesh_register_payload payload;
+    char diag[96];
     int rc;
 
     if (runtime == NULL || frame == NULL || frame_data == NULL) {
         return -(int)MESH_ERR_INVALID_STATE;
     }
-    if (runtime->processor.config.local_addr == MESH_ADDR_UNASSIGNED ||
-        ingress_port == MESH_PROCESSER_INGRESS_PORT_NONE ||
-        runtime->upstream_port == MESH_PROCESSER_INGRESS_PORT_NONE) {
+    if (runtime->processor.config.local_addr == MESH_ADDR_UNASSIGNED) {
+        mesh_diag_text("downstream reg skip local unassigned");
+        return 0;
+    }
+    if (ingress_port == MESH_PROCESSER_INGRESS_PORT_NONE) {
+        mesh_diag_text("downstream reg skip ingress none");
+        return 0;
+    }
+    if (runtime->upstream_port == MESH_PROCESSER_INGRESS_PORT_NONE) {
+        mesh_diag_text("downstream reg skip upstream none");
         return 0;
     }
     if (!mesh_parse_register(frame, &payload)) {
+        mesh_diag_text("downstream reg parse fail");
         return -(int)MESH_ERR_BAD_FRAME;
     }
 
     rc = mesh_node_runtime_remember_pending_register(runtime, &payload, ingress_port);
     if (rc != 0) {
+        mesh_diag_kv_u32("downstream reg pending rc", (uint32_t)(int32_t)rc);
         return rc;
     }
 
-    return mesh_node_runtime_send_raw_to_upstream(runtime, frame_data, frame_len);
+    rc = mesh_node_runtime_send_raw_to_upstream(runtime, frame_data, frame_len);
+    (void)snprintf(
+        diag,
+        sizeof(diag),
+        "downstream reg fwd rc=%d in=%u up=%u",
+        rc,
+        (unsigned)ingress_port,
+        (unsigned)runtime->upstream_port);
+    mesh_diag_text(diag);
+    return rc;
 }
 
 static int mesh_node_runtime_handle_pending_assign(
@@ -328,6 +360,7 @@ static int mesh_node_runtime_handle_pending_assign(
 {
     struct mesh_node_runtime_bootstrap_pending *pending;
     struct mesh_assign_payload payload;
+    char diag[96];
     int rc;
 
     if (runtime == NULL || frame == NULL || frame_data == NULL) {
@@ -339,9 +372,11 @@ static int mesh_node_runtime_handle_pending_assign(
 
     pending = mesh_node_runtime_find_pending_by_uid(runtime, payload.uid);
     if (pending == NULL) {
+        mesh_diag_text("pending assign miss");
         return -(int)MESH_ERR_NO_ROUTE;
     }
     if (runtime->config.send_frame_to_port == NULL) {
+        mesh_diag_text("pending assign no port tx");
         return -(int)MESH_ERR_INVALID_STATE;
     }
 
@@ -351,19 +386,32 @@ static int mesh_node_runtime_handle_pending_assign(
         frame_data,
         frame_len);
     if (rc != 0) {
+        mesh_diag_kv_u32("pending assign child rc", (uint32_t)(int32_t)rc);
         return rc;
     }
 
     rc = mesh_node_runtime_refresh_direct_peer(runtime, payload.node_addr, pending->ingress_port);
     if (rc != 0) {
+        mesh_diag_kv_u32("pending assign learn rc", (uint32_t)(int32_t)rc);
         return rc;
     }
 
-    rc = mesh_node_runtime_send_link_state_to_upstream(runtime, payload.node_addr);
+    rc = mesh_node_runtime_send_link_state_to_upstream(
+        runtime,
+        payload.node_addr,
+        pending->ingress_port);
     if (rc != 0) {
+        mesh_diag_kv_u32("pending assign ls rc", (uint32_t)(int32_t)rc);
         return rc;
     }
 
+    (void)snprintf(
+        diag,
+        sizeof(diag),
+        "pending assign done node=0x%02x port=%u",
+        payload.node_addr,
+        (unsigned)pending->ingress_port);
+    mesh_diag_text(diag);
     memset(pending, 0, sizeof(*pending));
     return 0;
 }
@@ -470,30 +518,27 @@ static int mesh_node_runtime_send_register(
         frame_len);
 }
 
-static int mesh_node_runtime_send_link_state_to_upstream(
+static int mesh_node_runtime_send_register_to_port(
     struct mesh_node_runtime *runtime,
-    uint8_t neighbor_addr)
+    uint8_t port_id)
 {
-    struct mesh_link_state_payload payload;
+    struct mesh_register_payload payload;
     uint8_t frame[MESH_PROCESSER_FRAME_CAP];
     size_t frame_len = 0u;
 
     if (runtime == NULL || !runtime->initialized ||
-        runtime->processor.config.local_addr == MESH_ADDR_UNASSIGNED ||
-        runtime->control_plane_addr == MESH_ADDR_UNASSIGNED ||
-        runtime->upstream_port == MESH_PROCESSER_INGRESS_PORT_NONE ||
-        runtime->config.send_frame_to_port == NULL ||
-        neighbor_addr == MESH_ADDR_UNASSIGNED) {
+        runtime->config.send_frame_to_port == NULL) {
         return -(int)MESH_ERR_INVALID_STATE;
     }
 
-    payload.neighbor = neighbor_addr;
-    payload.link_up = 1u;
-    payload.quality = 1u;
+    memset(&payload, 0, sizeof(payload));
+    memcpy(payload.uid, runtime->config.local_uid, sizeof(payload.uid));
+    payload.boot_nonce = runtime->config.boot_nonce;
+    payload.capability_bits = runtime->config.capability_bits;
+    payload.port_bitmap = runtime->config.port_bitmap;
 
-    if (!mesh_build_link_state(
+    if (!mesh_build_register(
             runtime->processor.config.local_addr,
-            runtime->control_plane_addr,
             mesh_node_runtime_take_seq(runtime),
             mesh_node_runtime_default_hop(runtime),
             &payload,
@@ -505,9 +550,75 @@ static int mesh_node_runtime_send_link_state_to_upstream(
 
     return runtime->config.send_frame_to_port(
         runtime->config.transport_ctx,
+        port_id,
+        frame,
+        frame_len);
+}
+
+static int mesh_node_runtime_send_link_state_to_upstream(
+    struct mesh_node_runtime *runtime,
+    uint8_t neighbor_addr,
+    uint8_t local_port)
+{
+    struct mesh_link_state_payload payload;
+    uint8_t frame[MESH_PROCESSER_FRAME_CAP];
+    size_t frame_len = 0u;
+    char diag[96];
+    int rc;
+
+    if (runtime == NULL || !runtime->initialized ||
+        runtime->processor.config.local_addr == MESH_ADDR_UNASSIGNED ||
+        runtime->control_plane_addr == MESH_ADDR_UNASSIGNED ||
+        runtime->upstream_port == MESH_PROCESSER_INGRESS_PORT_NONE ||
+        runtime->config.send_frame_to_port == NULL ||
+        neighbor_addr == MESH_ADDR_UNASSIGNED ||
+        local_port == MESH_PROCESSER_INGRESS_PORT_NONE) {
+        (void)snprintf(
+            diag,
+            sizeof(diag),
+            "link_state skip n=0x%02x port=%u up=%u ctrl=0x%02x",
+            neighbor_addr,
+            (unsigned)local_port,
+            (unsigned)(runtime != NULL ? runtime->upstream_port : MESH_PROCESSER_INGRESS_PORT_NONE),
+            (unsigned)(runtime != NULL ? runtime->control_plane_addr : MESH_ADDR_UNASSIGNED));
+        mesh_diag_text(diag);
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    memset(&payload, 0, sizeof(payload));
+    payload.neighbor = neighbor_addr;
+    payload.link_up = 1u;
+    payload.quality = 1u;
+    payload.local_port = local_port;
+
+    if (!mesh_build_link_state(
+            runtime->processor.config.local_addr,
+            runtime->control_plane_addr,
+            mesh_node_runtime_take_seq(runtime),
+            mesh_node_runtime_default_hop(runtime),
+            &payload,
+            frame,
+            sizeof(frame),
+            &frame_len)) {
+        mesh_diag_text("link_state build fail");
+        return -(int)MESH_ERR_BAD_FRAME;
+    }
+
+    rc = runtime->config.send_frame_to_port(
+        runtime->config.transport_ctx,
         runtime->upstream_port,
         frame,
         frame_len);
+    (void)snprintf(
+        diag,
+        sizeof(diag),
+        "link_state n=0x%02x port=%u up=%u rc=%d",
+        neighbor_addr,
+        (unsigned)local_port,
+        (unsigned)runtime->upstream_port,
+        rc);
+    mesh_diag_text(diag);
+    return rc;
 }
 
 /*
@@ -792,6 +903,12 @@ int mesh_node_runtime_notify_link_up(struct mesh_node_runtime *runtime)
         return -(int)MESH_ERR_INVALID_STATE;
     }
 
+    if (runtime->processor.config.local_addr != MESH_ADDR_UNASSIGNED &&
+        runtime->upstream_port != MESH_PROCESSER_INGRESS_PORT_NONE &&
+        runtime->config.send_frame_to_port != NULL) {
+        return mesh_node_runtime_send_register_to_port(runtime, runtime->upstream_port);
+    }
+
     return mesh_node_runtime_send_register(runtime, runtime->config.bootstrap_next_hop);
 }
 
@@ -848,7 +965,11 @@ int mesh_node_runtime_process_frame_from_port(
                     return rc;
                 }
             }
-            rc = mesh_node_runtime_report_new_direct_peer(runtime, frame.src, already_known);
+            rc = mesh_node_runtime_report_new_direct_peer(
+                runtime,
+                frame.src,
+                ingress_port,
+                already_known);
             if (rc != 0) {
                 return rc;
             }
@@ -887,7 +1008,11 @@ int mesh_node_runtime_process_frame_from_port(
                 return rc;
             }
         }
-        rc = mesh_node_runtime_report_new_direct_peer(runtime, frame.src, already_known);
+        rc = mesh_node_runtime_report_new_direct_peer(
+            runtime,
+            frame.src,
+            ingress_port,
+            already_known);
         (void)snprintf(
             diag,
             sizeof(diag),

@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "dma.h"
 #include "sdio.h"
 #include "usart.h"
 #include "gpio.h"
@@ -59,6 +60,8 @@ FS_SelfTestReport g_fs_report;
 #endif
 #ifdef PWOS_ENABLE_MINI9P_SERIAL
 static uint32_t g_register_retry_last_ms;
+#define REGISTER_RETRY_UNASSIGNED_MS 1000U
+#define REGISTER_REANNOUNCE_ASSIGNED_MS 3000U
 #endif
 /* USER CODE END PV */
 
@@ -128,6 +131,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_USART2_UART_Init();
   MX_SDIO_SD_Init();
   MX_USART1_UART_Init();
@@ -161,9 +165,12 @@ int main(void)
     {
       struct mesh_node_runtime *runtime = mesh_node_service_runtime();
       uint32_t now = HAL_GetTick();
+      uint32_t interval = REGISTER_RETRY_UNASSIGNED_MS;
       if (runtime != NULL &&
-          runtime->processor.config.local_addr == MESH_ADDR_UNASSIGNED &&
-          (uint32_t)(now - g_register_retry_last_ms) >= 1000U) {
+          runtime->processor.config.local_addr != MESH_ADDR_UNASSIGNED) {
+        interval = REGISTER_REANNOUNCE_ASSIGNED_MS;
+      }
+      if (runtime != NULL && (uint32_t)(now - g_register_retry_last_ms) >= interval) {
         (void)mesh_node_service_notify_link_up();
         g_register_retry_last_ms = now;
       }

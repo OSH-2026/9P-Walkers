@@ -1,12 +1,14 @@
 #include "shell.h"
 
 #include <stdbool.h>
+#include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "cluster_host_vfs.h"
+#include "cluster_config.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
@@ -31,7 +33,7 @@ void shell_set_print_hook(shell_print_hook_t hook)
 }
 
 /* Emit pre-formatted text to stdout AND the optional hook. */
-static void shell_emit(const char *text)
+void shell_write(const char *text)
 {
     fputs(text, stdout);
     if (s_print_hook) {
@@ -39,7 +41,7 @@ static void shell_emit(const char *text)
     }
 }
 
-/* printf-style wrapper that routes through shell_emit. */
+/* printf-style wrapper that routes through shell_write. */
 static void shell_printf(const char *fmt, ...)
 {
     char buf[SHELL_EMIT_CAP];
@@ -47,7 +49,7 @@ static void shell_printf(const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-    shell_emit(buf);
+    shell_write(buf);
 }
 
 /* puts-style wrapper (appends '\n' like puts does). */
@@ -55,7 +57,7 @@ static void shell_puts(const char *s)
 {
     char buf[SHELL_EMIT_CAP];
     snprintf(buf, sizeof(buf), "%s\n", s);
-    shell_emit(buf);
+    shell_write(buf);
 }
 
 /* 用于测试 Shell 命令操作的模拟 m9p 客户端环境 */
@@ -136,10 +138,11 @@ static void print_banner(void)
     shell_puts("  cat <file>读取集群节点文件内容(read cluster file)");
     shell_puts("  lua       执行内置测试用Lua剧本(run built-in Lua demo)");
     shell_puts("  lua ...   执行随后输入的一行Lua语句(execute inline Lua chunk)");
-    shell_puts("  m9p_attach 测试向客户端服务端发起链接(test mini9p attach)");
+    shell_puts("  m9p_attach 本地 mock 自检；实物节点请用 ls / 和 cat /mcuN/...");
     shell_puts("  m9p_walk  测试根据路径分配ID(test mini9p walk)");
     shell_puts("  m9p N     查阅 mini9p 状态码名称(print mini9p error name)");
-    shell_puts("  wifi ...  WiFi mesh 链路管理(wifi status|start [port]|stop)");
+    shell_puts("  mesh      打印主机本地 mesh 节点/链路/路由(print local mesh state)");
+    shell_puts("  wifi ...  LAN/TCP mesh 透传管理(wifi status|start [port]|stop)");
     shell_puts("  reboot    系统重启(restart the board)");
     shell_puts("");
 }
@@ -296,13 +299,117 @@ static int handle_cat(const char *args)
     return 0;
 }
 
+static const char *mesh_mode_name(enum cluster_mode mode)
+{
+    switch (mode) {
+    case CLUSTER_MODE_DIRECT_TABLE:
+        return "direct";
+    case CLUSTER_MODE_TOPOLOGY:
+        return "topology";
+    default:
+        return "?";
+    }
+}
+
+static int handle_mesh(const char *args)
+{
+    struct cluster *mesh_cluster;
+    int rc;
+
+    if (args != NULL && *args != '\0' && strcmp(args, "status") != 0) {
+        shell_puts("usage: mesh [status]");
+        return -1;
+    }
+
+    mesh_cluster = cluster_config_mesh_cluster();
+    if (mesh_cluster == NULL || !mesh_cluster->initialized) {
+        shell_puts("mesh: cluster not initialized");
+        return -(int)M9P_ERR_EAGAIN;
+    }
+
+    rc = cluster_rebuild_routes(mesh_cluster);
+    shell_printf(
+        "mesh local=0x%02x mode=%s rebuild=%d dirty=%u\n",
+        mesh_cluster->config.local_addr,
+        mesh_mode_name(mesh_cluster->config.mode),
+        rc,
+        mesh_cluster->routes_dirty ? 1u : 0u);
+
+    shell_puts("nodes:");
+    bool any = false;
+    for (size_t i = 0u; i < CLUSTER_MAX_NODES; ++i) {
+        const struct cluster_node *node = &mesh_cluster->nodes[i];
+
+        if (!node->valid) {
+            continue;
+        }
+        any = true;
+        shell_printf(
+            "  addr=0x%02x online=%u caps=0x%04x ports=0x%02x wifi=%u\n",
+            node->addr,
+            node->online ? 1u : 0u,
+            node->capability_bits,
+            node->port_bitmap,
+            node->wifi_supported ? 1u : 0u);
+    }
+    if (!any) {
+        shell_puts("  (none)");
+    }
+
+    shell_puts("links:");
+    any = false;
+    for (size_t i = 0u; i < CLUSTER_MAX_LINKS; ++i) {
+        const struct cluster_link *link = &mesh_cluster->links[i];
+
+        if (!link->valid) {
+            continue;
+        }
+        any = true;
+        shell_printf(
+            "  0x%02x -> 0x%02x metric=%u bidi=%u from_port=%u to_port=%u\n",
+            link->from,
+            link->to,
+            link->metric,
+            link->bidirectional ? 1u : 0u,
+            link->from_port,
+            link->to_port);
+    }
+    if (!any) {
+        shell_puts("  (none)");
+    }
+
+    shell_puts("routes:");
+    any = false;
+    for (size_t i = 0u; i < CLUSTER_MAX_ROUTES; ++i) {
+        const struct cluster_route *route = &mesh_cluster->routes[i];
+
+        if (!route->valid) {
+            continue;
+        }
+        any = true;
+        shell_printf(
+            "  dst=0x%02x next=0x%02x metric=%u local=%u selector=%s\n",
+            route->dst,
+            route->next_hop,
+            route->metric,
+            route->local ? 1u : 0u,
+            route->selector_is_port ? "port" : "addr");
+    }
+    if (!any) {
+        shell_puts("  (none)");
+    }
+
+    return rc;
+}
+
 /**
  * @brief attach 会话连接测试处理器
  * 用以请求远端 mini9p 服务器开启通信根节点，设置数据包基础大小和配置。
  */
 static int handle_m9p_attach(const char *args)
 {
-    shell_puts("Attaching to mock mini9p server...");
+    shell_puts("m9p_attach is a local mock self-test; it does not attach to a real STM32 slave.");
+    shell_puts("Use 'ls /' to see registered nodes, then 'cat /mcu1/sys/health' or another /mcuN path.");
     ensure_m9p_mock_client();
     (void)args;
 
@@ -332,14 +439,14 @@ static int handle_m9p_walk(const char *args)
 }
 
 /**
- * @brief wifi 命令处理器：管理 WiFi/TCP mesh 链路。
+ * @brief wifi 命令处理器：管理路由器局域网 TCP mesh 透传链路。
  *
  * 用法：
- *   wifi / wifi status      显示以太网 IP 与 WiFi mesh 链路状态
+ *   wifi / wifi status      显示以太网 DHCP IP 与 TCP mesh 链路状态
  *   wifi start [tcp_port]   启动 TCP 监听（默认端口 9000）
  *   wifi stop               停止监听并断开 client
  *
- * 主机经网线接入路由器；从机侧 WiFi 透传模块以 TCP client 模式
+ * 主机经网线接入路由器；从机侧 TCP/WiFi 透传模块以 TCP client 模式
  * 连接 <主机IP>:<端口>，mesh 帧在该连接上原样透传。
  */
 static int handle_wifi(const char *args)
@@ -354,7 +461,7 @@ static int handle_wifi(const char *args)
             shell_puts("eth ip   : (waiting for DHCP)");
         }
         if (mesh_wifi_link_format_status(status, sizeof(status)) > 0) {
-            shell_emit(status);
+            shell_write(status);
         }
         return 0;
     }
@@ -383,7 +490,7 @@ static int handle_wifi(const char *args)
             return rc;
         }
 
-        shell_printf("wifi mesh link listening on tcp port %ld\n", port);
+        shell_printf("lan tcp mesh link listening on tcp port %ld\n", port);
         if (lan_get_ip_str(ip, sizeof(ip))) {
             shell_printf("slave transparent module should connect to %s:%ld\n", ip, port);
         }
@@ -397,7 +504,7 @@ static int handle_wifi(const char *args)
             shell_printf("wifi stop failed: %d\n", rc);
             return rc;
         }
-        shell_puts("wifi mesh link stopped");
+        shell_puts("lan tcp mesh link stopped");
         return 0;
     }
 
@@ -438,6 +545,9 @@ int shell_execute_line(const char *line)
         *args++ = '\0';
         args = skip_spaces(args);
     }
+    for (char *p = command; *p != '\0'; ++p) {
+        *p = (char)tolower((unsigned char)*p);
+    }
 
     /* 故意设计的精简命令集，为了满足以下前期验证工作：
      * 1. 验证 shell 的 I/O 及交互逻辑
@@ -472,6 +582,9 @@ int shell_execute_line(const char *line)
     }
     if (strcmp(command, "m9p") == 0) {
         return handle_m9p(args);
+    }
+    if (strcmp(command, "mesh") == 0) {
+        return handle_mesh(args);
     }
     if (strcmp(command, "wifi") == 0) {
         return handle_wifi(args);
@@ -519,10 +632,9 @@ static void shell_task(void *arg)
         fputs("pwos> ", stdout);
         fflush(stdout);
 
-        if (fgets(line, sizeof(line), stdin) == NULL) {
+        while (fgets(line, sizeof(line), stdin) == NULL) {
             clearerr(stdin);
             vTaskDelay(pdMS_TO_TICKS(100));
-            continue;
         }
 
         (void)shell_execute_line(line);

@@ -109,7 +109,7 @@ static void link_learn_addr_locked(uint8_t mesh_addr)
     }
     if (s_link.addr_count < MESH_WIFI_LINK_MAX_ADDRS) {
         s_link.addrs[s_link.addr_count++] = mesh_addr;
-        ESP_LOGI(TAG, "learned mesh addr 0x%02x via wifi link", mesh_addr);
+        ESP_LOGI(TAG, "learned mesh addr 0x%02x via LAN TCP link", mesh_addr);
     }
 }
 
@@ -431,7 +431,7 @@ int mesh_wifi_link_format_status(char *out, size_t out_cap)
     }
 
     if (!s_link.active) {
-        written = snprintf(out, out_cap, "wifi link: inactive (use: wifi start [port])\n");
+        written = snprintf(out, out_cap, "lan tcp link: inactive (use: wifi start [port])\n");
         return written < 0 ? -(int)MESH_ERR_INVALID_STATE : written;
     }
 
@@ -443,7 +443,7 @@ int mesh_wifi_link_format_status(char *out, size_t out_cap)
     written = snprintf(
         out,
         out_cap,
-        "wifi link: listening on tcp/%u\nclient   : %s\n",
+        "lan tcp link: listening on tcp/%u\nclient      : %s\n",
         (unsigned)s_link.tcp_port,
         s_link.client_fd >= 0 ? s_link.client_ip : "(none)");
     if (written > 0 && (size_t)written < out_cap) {
@@ -518,7 +518,7 @@ int mesh_wifi_link_format_status(char *out, size_t out_cap)
     if (out == NULL || out_cap == 0u) {
         return -(int)MESH_ERR_INVALID_STATE;
     }
-    return snprintf(out, out_cap, "wifi link: not supported on this platform\n");
+    return snprintf(out, out_cap, "lan tcp link: not supported on this platform\n");
 }
 
 #endif /* ESP_PLATFORM */

@@ -1,13 +1,11 @@
 #include "mesh_host_runtime.h"
 #ifdef ESP_PLATFORM
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #endif
 #include <stdio.h>
 #include <string.h>
-
-/* ASSIGN 租约时长（毫秒），与 PC emulator 对齐。 */
-#define MESH_HOST_RUNTIME_ASSIGN_LEASE_MS 60000u
 
 /*
  * 这个文件的核心思路是：
@@ -22,6 +20,21 @@
  * 3. 当前实现保持“同一时刻只允许一个同步请求占用接收链路”，用最小复杂度
  *    换取一个真正可运行、可调试的 runtime 闭环。
  */
+
+#define MESH_HOST_RUNTIME_ASSIGN_LEASE_MS 30000u
+#define MESH_HOST_RUNTIME_ASSIGN_EPOCH 1u
+#define MESH_HOST_RUNTIME_BOOTSTRAP_ASSIGN_DELAY_MS 20u
+#define MESH_HOST_RUNTIME_CLIENT_RESPONSE_WAIT_MS 1500u
+#define MESH_HOST_RUNTIME_CLIENT_EMPTY_POLL_LIMIT 8u
+
+#ifdef ESP_PLATFORM
+static const char *TAG = "mesh_host_runtime";
+#define MESH_HOST_LOGI(...) ESP_LOGI(TAG, __VA_ARGS__)
+#define MESH_HOST_RUNTIME_BOOTSTRAP_ASSIGN_REPEAT 3u
+#else
+#define MESH_HOST_LOGI(...) do { } while (0)
+#define MESH_HOST_RUNTIME_BOOTSTRAP_ASSIGN_REPEAT 1u
+#endif
 
 static bool m9p_type_is_response(uint8_t type)
 {
@@ -137,6 +150,57 @@ static struct mesh_host_runtime_client_slot *mesh_host_runtime_alloc_slot(
     return NULL;
 }
 
+static uint8_t mesh_host_runtime_addr_for_slot_index(size_t slot_index)
+{
+    size_t one_based = slot_index + 1u;
+
+    if (one_based == 0u || one_based >= MESH_ADDR_UNASSIGNED) {
+        return MESH_HOST_RUNTIME_UNASSIGNED_ADDR;
+    }
+
+    if (one_based <= 14u) {
+        return (uint8_t)((one_based << 4u) | one_based);
+    }
+
+    return (uint8_t)one_based;
+}
+
+static void mesh_host_runtime_format_node_name(size_t slot_index, char *out_name, size_t out_cap)
+{
+    if (out_name == NULL || out_cap == 0u) {
+        return;
+    }
+
+    (void)snprintf(out_name, out_cap, "mcu%u", (unsigned)(slot_index + 1u));
+}
+
+static struct mesh_host_runtime_client_slot *mesh_host_runtime_prepare_bootstrap_slot(
+    struct mesh_host_runtime *runtime,
+    const uint8_t uid[MESH_UID_LEN])
+{
+    struct mesh_host_runtime_client_slot *slot;
+
+    slot = mesh_host_runtime_find_slot_by_uid(runtime, uid);
+    if (slot == NULL) {
+        slot = mesh_host_runtime_alloc_slot(runtime);
+        if (slot == NULL) {
+            return NULL;
+        }
+        memcpy(slot->uid, uid, MESH_UID_LEN);
+    }
+
+    if (slot->mesh_addr == MESH_HOST_RUNTIME_UNASSIGNED_ADDR) {
+        slot->mesh_addr = mesh_host_runtime_addr_for_slot_index(slot->transport_ctx.slot_index);
+    }
+
+    if (slot->mesh_addr == MESH_HOST_RUNTIME_UNASSIGNED_ADDR ||
+        slot->mesh_addr == runtime->config.local_addr) {
+        return NULL;
+    }
+
+    return slot;
+}
+
 static void mesh_host_runtime_mark_slot_addr_reused(struct mesh_host_runtime_client_slot *slot)
 {
     if (slot == NULL || !slot->used) {
@@ -228,10 +292,14 @@ static int mesh_host_runtime_prepare_registered_client(
         }
     }
 
+    if (slot->mesh_addr != mesh_addr) {
+        m9p_client_reset_session(&slot->client);
+    }
+
     memcpy(slot->uid, uid, MESH_UID_LEN);
     slot->mesh_addr = mesh_addr;
     slot->online = true;
-    m9p_client_init(&slot->client, NULL, &slot->transport_ctx);
+    slot->client.transport_ctx = &slot->transport_ctx;
 
     if (out_client != NULL) {
         *out_client = &slot->client;
@@ -420,6 +488,66 @@ static int mesh_host_runtime_handle_neighbor_probe(
         response_len);
 }
 
+static int mesh_host_runtime_apply_register_ingress_link(
+    struct mesh_host_runtime *runtime,
+    const struct mesh_frame_view *frame,
+    uint8_t ingress_port)
+{
+    bool reachable = false;
+    int rc;
+
+    if (runtime == NULL || frame == NULL) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+    if (frame->type != MESH_TYPE_REGISTER ||
+        frame->src == MESH_ADDR_UNASSIGNED ||
+        ingress_port == MESH_PROCESSER_INGRESS_PORT_NONE) {
+        return 0;
+    }
+
+    rc = cluster_can_reach(runtime->config.mesh_cluster, frame->src, &reachable);
+    if (rc != 0) {
+        return rc;
+    }
+    if (reachable) {
+        return 0;
+    }
+
+    rc = cluster_add_link_with_ports(
+        runtime->config.mesh_cluster,
+        runtime->config.local_addr,
+        frame->src,
+        1u,
+        false,
+        ingress_port,
+        CLUSTER_PORT_INVALID);
+    if (rc != 0) {
+        return rc;
+    }
+
+    MESH_HOST_LOGI(
+        "direct REGISTER ingress src=0x%02x port=%u -> host link",
+        frame->src,
+        (unsigned)ingress_port);
+
+    rc = cluster_rebuild_routes(runtime->config.mesh_cluster);
+    if (rc != 0) {
+        return rc;
+    }
+
+    rc = cluster_config_refresh_all_nodes_connectivity(NULL);
+    if (rc != 0) {
+        return rc;
+    }
+
+    rc = mesh_host_runtime_sync_slots_from_cluster(runtime);
+    if (rc != 0) {
+        return rc;
+    }
+
+    return mesh_host_runtime_sync_controller_routes(runtime);
+}
+
 static int mesh_host_runtime_map_transport_error_to_m9p(int rc)
 {
     if (rc == -(int)MESH_ERR_BUSY) {
@@ -439,6 +567,13 @@ static int mesh_host_runtime_map_transport_error_to_m9p(int rc)
     return rc;
 }
 
+static bool mesh_host_runtime_receive_would_block(int rc)
+{
+    return rc == -(int)MESH_ERR_BUSY ||
+           rc == -(int)M9P_ERR_EAGAIN ||
+           rc == -(int)M9P_ERR_EBUSY;
+}
+
 static int mesh_host_runtime_client_request(
     void *transport_ctx,
     const uint8_t *tx_data,
@@ -454,6 +589,11 @@ static int mesh_host_runtime_client_request(
     uint8_t next_hop = 0u;
     size_t mesh_len = 0u;
     int rc;
+#ifdef ESP_PLATFORM
+    TickType_t response_wait_start = 0;
+#else
+    unsigned empty_polls = 0u;
+#endif
 
     if (ctx == NULL || ctx->runtime == NULL || rx_data == NULL || rx_len == NULL) {
         return -(int)M9P_ERR_EINVAL;
@@ -527,6 +667,10 @@ static int mesh_host_runtime_client_request(
         goto out;
     }
 
+#ifdef ESP_PLATFORM
+    response_wait_start = xTaskGetTickCount();
+#endif
+
     while (1) {
         struct mesh_frame_view mesh_frame;
         uint8_t ingress_port = MESH_PROCESSER_INGRESS_PORT_NONE;
@@ -538,9 +682,26 @@ static int mesh_host_runtime_client_request(
             rx_len,
             &ingress_port);
         if (rc != 0) {
+            if (mesh_host_runtime_receive_would_block(rc)) {
+#ifdef ESP_PLATFORM
+                TickType_t elapsed = xTaskGetTickCount() - response_wait_start;
+
+                if (elapsed < pdMS_TO_TICKS(MESH_HOST_RUNTIME_CLIENT_RESPONSE_WAIT_MS)) {
+                    vTaskDelay(pdMS_TO_TICKS(MESH_HOST_RUNTIME_IDLE_DELAY_MS));
+                    continue;
+                }
+#else
+                if (++empty_polls < MESH_HOST_RUNTIME_CLIENT_EMPTY_POLL_LIMIT) {
+                    continue;
+                }
+#endif
+            }
             rc = mesh_host_runtime_map_transport_error_to_m9p(rc);
             goto out;
         }
+#ifndef ESP_PLATFORM
+        empty_polls = 0u;
+#endif
 
         if (mesh_decode_frame(runtime->processor.rx_buffer, *rx_len, &mesh_frame) &&
             mesh_frame.dst == runtime->config.local_addr &&
@@ -565,7 +726,11 @@ static int mesh_host_runtime_client_request(
             }
         }
 
-        rc = mesh_host_runtime_process_frame(runtime, runtime->processor.rx_buffer, *rx_len);
+        rc = mesh_host_runtime_process_frame_from_port(
+            runtime,
+            runtime->processor.rx_buffer,
+            *rx_len,
+            ingress_port);
         if (rc != 0) {
             rc = mesh_host_runtime_map_transport_error_to_m9p(rc);
             goto out;
@@ -583,6 +748,8 @@ int mesh_host_runtime_register_assigned_node(
     const uint8_t uid[MESH_UID_LEN])
 {
     struct m9p_client *client = NULL;
+    const char *target = NULL;
+    bool reused_mapping = false;
     int rc;
 
     if (runtime == NULL || uid == NULL || !runtime->initialized) {
@@ -598,13 +765,103 @@ int mesh_host_runtime_register_assigned_node(
     }
 
     /*
-     * prepare_registered_client 已通过 m9p_client_init 把 transport_ctx 指向
-     * slot->transport_ctx，这里只需补上 transport 函数指针即可，不必再次查槽位。
+     * prepare_registered_client 已确保 transport_ctx 指向 slot->transport_ctx。
+     * 这里只需补上 transport 函数指针即可，不必再次查槽位。
+     * 对同 UID/同地址的重复 REGISTER，必须保留已 attach 的 mini9P 会话。
      * 重复调用 find_slot_by_uid 并解引用其结果既冗余，又在槽位已满时存在 NULL 解引用风险。
      */
     client->transport = mesh_host_runtime_client_request;
 
-    return cluster_config_on_mesh_node_registered(mesh_addr, uid, client, NULL, NULL);
+    rc = cluster_config_on_mesh_node_registered(mesh_addr, uid, client, &target, &reused_mapping);
+    if (rc == 0) {
+        MESH_HOST_LOGI(
+            "registered mesh=0x%02x as /%s uid=%02x%02x%02x%02x%02x%02x%02x%02x reused=%u",
+            mesh_addr,
+            target != NULL ? target : "?",
+            uid[0],
+            uid[1],
+            uid[2],
+            uid[3],
+            uid[4],
+            uid[5],
+            uid[6],
+            uid[7],
+            reused_mapping ? 1u : 0u);
+    }
+
+    return rc;
+}
+
+static int mesh_host_runtime_assign_bootstrap_node(
+    struct mesh_host_runtime *runtime,
+    const struct mesh_frame_view *frame,
+    const struct mesh_register_payload *register_payload)
+{
+    struct mesh_host_runtime_client_slot *slot;
+    struct mesh_assign_payload assign_payload;
+    uint8_t assign_frame[MESH_PROCESSER_FRAME_CAP];
+    size_t assign_len = 0u;
+    char node_name[MESH_MAX_NODE_NAME + 1u];
+    int rc;
+
+    if (runtime == NULL || frame == NULL || register_payload == NULL) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    slot = mesh_host_runtime_prepare_bootstrap_slot(runtime, register_payload->uid);
+    if (slot == NULL) {
+        return -(int)MESH_ERR_BUSY;
+    }
+
+    memset(&assign_payload, 0, sizeof(assign_payload));
+    memcpy(assign_payload.uid, register_payload->uid, sizeof(assign_payload.uid));
+    assign_payload.node_addr = slot->mesh_addr;
+    assign_payload.lease_ms = MESH_HOST_RUNTIME_ASSIGN_LEASE_MS;
+    assign_payload.epoch = MESH_HOST_RUNTIME_ASSIGN_EPOCH;
+    mesh_host_runtime_format_node_name(slot->transport_ctx.slot_index, node_name, sizeof(node_name));
+    (void)snprintf(assign_payload.node_name, sizeof(assign_payload.node_name), "%s", node_name);
+
+    if (!mesh_build_assign(
+            runtime->config.local_addr,
+            MESH_ADDR_UNASSIGNED,
+            mesh_host_runtime_next_seq(runtime),
+            runtime->config.default_hop,
+            &assign_payload,
+            assign_frame,
+            sizeof(assign_frame),
+            &assign_len)) {
+        return -(int)MESH_ERR_BAD_FRAME;
+    }
+
+    for (unsigned attempt = 0u; attempt < MESH_HOST_RUNTIME_BOOTSTRAP_ASSIGN_REPEAT; ++attempt) {
+#ifdef ESP_PLATFORM
+        /*
+         * STM32 slave currently polls UART without DMA/IRQ RX. It can still be
+         * finishing a multi-port bootstrap broadcast when the host observes the
+         * first REGISTER. A short delay avoids replying while its RX FIFO is not
+         * being drained yet.
+         */
+        vTaskDelay(pdMS_TO_TICKS(MESH_HOST_RUNTIME_BOOTSTRAP_ASSIGN_DELAY_MS));
+#endif
+        rc = runtime->config.send_frame(
+            runtime->config.transport_ctx,
+            MESH_ADDR_UNASSIGNED,
+            assign_frame,
+            assign_len);
+        if (rc != 0) {
+            return rc;
+        }
+    }
+
+    MESH_HOST_LOGI(
+        "bootstrap REGISTER src=0x%02x dst=0x%02x -> ASSIGN /%s mesh=0x%02x repeat=%u",
+        frame->src,
+        frame->dst,
+        assign_payload.node_name,
+        assign_payload.node_addr,
+        (unsigned)MESH_HOST_RUNTIME_BOOTSTRAP_ASSIGN_REPEAT);
+
+    return mesh_host_runtime_register_assigned_node(runtime, slot->mesh_addr, slot->uid);
 }
 
 static int mesh_host_runtime_apply_host_local_link(
@@ -722,7 +979,7 @@ static int mesh_host_runtime_handle_bootstrap_register(
     memcpy(assign_payload.uid, reg_payload->uid, sizeof(assign_payload.uid));
     assign_payload.node_addr = new_addr;
     assign_payload.lease_ms = MESH_HOST_RUNTIME_ASSIGN_LEASE_MS;
-    assign_payload.epoch = 1u;
+    assign_payload.epoch = MESH_HOST_RUNTIME_ASSIGN_EPOCH;
     (void)snprintf(assign_payload.node_name, sizeof(assign_payload.node_name),
                    "mcu%u", (unsigned)(new_addr & 0x0fu));
 
@@ -738,14 +995,31 @@ static int mesh_host_runtime_handle_bootstrap_register(
         return -(int)MESH_ERR_BAD_FRAME;
     }
 
-    rc = runtime->config.send_frame(
-        runtime->config.transport_ctx,
-        MESH_ADDR_UNASSIGNED,
-        frame,
-        frame_len);
-    if (rc != 0) {
-        return rc;
+    for (unsigned attempt = 0u; attempt < MESH_HOST_RUNTIME_BOOTSTRAP_ASSIGN_REPEAT; ++attempt) {
+#ifdef ESP_PLATFORM
+        /*
+         * STM32 nodes broadcast bootstrap REGISTER across all enabled UARTs. When
+         * the host receives the first copy, the node can still be transmitting on
+         * another port and not draining RX yet, so an immediate ASSIGN is easy to
+         * miss. Keep this short; repeated REGISTERs will retransmit ASSIGN.
+         */
+        vTaskDelay(pdMS_TO_TICKS(MESH_HOST_RUNTIME_BOOTSTRAP_ASSIGN_DELAY_MS));
+#endif
+        rc = runtime->config.send_frame(
+            runtime->config.transport_ctx,
+            MESH_ADDR_UNASSIGNED,
+            frame,
+            frame_len);
+        if (rc != 0) {
+            return rc;
+        }
     }
+
+    MESH_HOST_LOGI(
+        "bootstrap REGISTER -> ASSIGN /%s mesh=0x%02x repeat=%u",
+        assign_payload.node_name,
+        assign_payload.node_addr,
+        (unsigned)MESH_HOST_RUNTIME_BOOTSTRAP_ASSIGN_REPEAT);
 
     return mesh_host_runtime_register_assigned_node(runtime, new_addr, reg_payload->uid);
 }
@@ -797,6 +1071,11 @@ static int mesh_host_runtime_control_handler(
             return -(int)MESH_ERR_BAD_FRAME;
         }
 
+        if (frame->src == MESH_ADDR_UNASSIGNED && frame->dst == MESH_ADDR_UNASSIGNED) {
+            return mesh_host_runtime_assign_bootstrap_node(runtime, frame, &payload);
+        }
+
+        MESH_HOST_LOGI("assigned REGISTER src=0x%02x dst=0x%02x", frame->src, frame->dst);
         return mesh_host_runtime_register_assigned_node(runtime, frame->src, payload.uid);
     }
 
@@ -806,6 +1085,14 @@ static int mesh_host_runtime_control_handler(
         if (!mesh_parse_link_state(frame, &payload)) {
             return -(int)MESH_ERR_BAD_FRAME;
         }
+
+        MESH_HOST_LOGI(
+            "LINK_STATE src=0x%02x neighbor=0x%02x up=%u quality=%u local_port=%u",
+            frame->src,
+            payload.neighbor,
+            (unsigned)payload.link_up,
+            (unsigned)payload.quality,
+            (unsigned)payload.local_port);
 
         /*
          * shared cluster 默认只按“src -> neighbor”记录上报方向。
@@ -935,7 +1222,21 @@ int mesh_host_runtime_process_frame(
     const uint8_t *frame_data,
     size_t frame_len)
 {
+    return mesh_host_runtime_process_frame_from_port(
+        runtime,
+        frame_data,
+        frame_len,
+        MESH_PROCESSER_INGRESS_PORT_NONE);
+}
+
+int mesh_host_runtime_process_frame_from_port(
+    struct mesh_host_runtime *runtime,
+    const uint8_t *frame_data,
+    size_t frame_len,
+    uint8_t ingress_port)
+{
     struct mesh_frame_view frame;
+    int rc;
 
     if (runtime == NULL || !runtime->initialized) {
         return -(int)MESH_ERR_INVALID_STATE;
@@ -948,7 +1249,16 @@ int mesh_host_runtime_process_frame(
         return mesh_host_runtime_handle_neighbor_probe(runtime, &frame);
     }
 
-    return mesh_processer_process_frame(&runtime->processor, frame_data, frame_len);
+    rc = mesh_processer_process_frame_from_port(
+        &runtime->processor,
+        frame_data,
+        frame_len,
+        ingress_port);
+    if (rc != 0) {
+        return rc;
+    }
+
+    return mesh_host_runtime_apply_register_ingress_link(runtime, &frame, ingress_port);
 }
 
 int mesh_host_runtime_poll_once(struct mesh_host_runtime *runtime)
@@ -973,8 +1283,11 @@ int mesh_host_runtime_poll_once(struct mesh_host_runtime *runtime)
         &rx_len,
         &ingress_port);
     if (rc == 0) {
-        (void)ingress_port;
-        rc = mesh_host_runtime_process_frame(runtime, runtime->processor.rx_buffer, rx_len);
+        rc = mesh_host_runtime_process_frame_from_port(
+            runtime,
+            runtime->processor.rx_buffer,
+            rx_len,
+            ingress_port);
     }
     mesh_host_runtime_release_dispatch(runtime);
     return rc;

@@ -30,6 +30,7 @@ typedef void (*test_fn)(void);
 struct fake_mesh_io {
     uint8_t rx_frames[TEST_QUEUE_CAP][TEST_FRAME_CAP];
     size_t rx_lens[TEST_QUEUE_CAP];
+    uint8_t rx_ingress_ports[TEST_QUEUE_CAP];
     size_t rx_head;
     size_t rx_count;
 
@@ -133,8 +134,8 @@ static int fake_receive_frame(
     if (io == NULL || rx_data == NULL || rx_len == NULL || out_ingress_port == NULL) {
         return -(int)M9P_ERR_EINVAL;
     }
-    *out_ingress_port = MESH_PROCESSER_INGRESS_PORT_NONE;
     if (io->rx_count == 0u) {
+        *out_ingress_port = MESH_PROCESSER_INGRESS_PORT_NONE;
         return -(int)M9P_ERR_EAGAIN;
     }
 
@@ -145,12 +146,17 @@ static int fake_receive_frame(
 
     memcpy(rx_data, io->rx_frames[slot], io->rx_lens[slot]);
     *rx_len = io->rx_lens[slot];
+    *out_ingress_port = io->rx_ingress_ports[slot];
     io->rx_head = (io->rx_head + 1u) % TEST_QUEUE_CAP;
     --io->rx_count;
     return 0;
 }
 
-static void push_rx_frame(struct fake_mesh_io *io, const uint8_t *frame, size_t frame_len)
+static void push_rx_frame_from_port(
+    struct fake_mesh_io *io,
+    const uint8_t *frame,
+    size_t frame_len,
+    uint8_t ingress_port)
 {
     size_t slot;
 
@@ -166,7 +172,13 @@ static void push_rx_frame(struct fake_mesh_io *io, const uint8_t *frame, size_t 
     slot = (io->rx_head + io->rx_count) % TEST_QUEUE_CAP;
     memcpy(io->rx_frames[slot], frame, frame_len);
     io->rx_lens[slot] = frame_len;
+    io->rx_ingress_ports[slot] = ingress_port;
     ++io->rx_count;
+}
+
+static void push_rx_frame(struct fake_mesh_io *io, const uint8_t *frame, size_t frame_len)
+{
+    push_rx_frame_from_port(io, frame, frame_len, MESH_PROCESSER_INGRESS_PORT_NONE);
 }
 
 static void fill_uid(uint8_t uid[MESH_UID_LEN], uint8_t seed)
@@ -769,6 +781,36 @@ static void test_register_broadcast_updates_vfs_without_direct_link(void)
 }
 
 /*
+ * 真实 UART receive_frame 会告诉 runtime 这帧来自哪个物理口。
+ * assigned REGISTER 若带着具体 ingress port 到达，就足以作为 host -> node
+ * 的直连发送依据；否则 VFS 名字存在但 /mcu1/... 永远无法发起远端请求。
+ */
+static void test_assigned_register_poll_path_uses_ingress_as_direct_link(void)
+{
+    struct mesh_host_runtime runtime;
+    struct fake_mesh_io io;
+    uint8_t uid[MESH_UID_LEN];
+    uint8_t frame[TEST_FRAME_CAP];
+    size_t frame_len = 0u;
+    bool reachable = false;
+
+    init_runtime(&runtime, &io);
+    fill_uid(uid, 0x12u);
+    build_register_frame(0x11u, uid, frame, &frame_len);
+    push_rx_frame_from_port(&io, frame, frame_len, 0u);
+
+    expect_int("assigned register poll", mesh_host_runtime_poll_once(&runtime), 0);
+    expect_int("assigned register reachable rc",
+               cluster_can_reach(cluster_config_mesh_cluster(), 0x11u, &reachable),
+               0);
+    expect_int("assigned register reachable", reachable, 1);
+
+    queue_rattach(&io, 0x11u, 1u);
+    expect_int("assigned register attach", cluster_vfs_attach("mcu1"), 0);
+    expect_int("assigned register attach next hop", io.tx_next_hops[io.tx_count - 1u], 0x11u);
+}
+
+/*
  * 当节点通过 LINK_STATE 明确声明“我与 host 相连”后，
  * runtime 应推导出 host -> node 的反向可达边，并允许 VFS attach。
  *
@@ -801,6 +843,48 @@ static void test_link_state_to_host_enables_attach_over_mesh_client(void)
     expect_int("attach mesh dst", mesh_view.dst, 0x11u);
     expect_int("attach mini9p type", m9p_view.type, M9P_TATTACH);
     expect_u16("attach mini9p tag", m9p_view.tag, 1u);
+}
+
+static void test_duplicate_register_preserves_attached_client_session(void)
+{
+    static const uint8_t expected[] = {'o', 'k'};
+    struct mesh_host_runtime runtime;
+    struct fake_mesh_io io;
+    struct mesh_frame_view mesh_view;
+    struct m9p_frame_view m9p_view;
+    uint8_t buf[8] = {0};
+    uint16_t len = sizeof(buf);
+
+    init_runtime(&runtime, &io);
+    process_register(&runtime, 0x11u, 0x24u);
+    process_link_state(&runtime, 0x11u, 0x00u, 1u);
+
+    queue_rattach(&io, 0x11u, 1u);
+    expect_int("dup register initial attach", cluster_vfs_attach("mcu1"), 0);
+    fake_mesh_io_clear_tx(&io);
+
+    process_register(&runtime, 0x11u, 0x24u);
+
+    queue_rwalk(&io, 0x11u, 2u, 42u);
+    queue_ropen(&io, 0x11u, 3u, 42u);
+    queue_rread(&io, 0x11u, 4u, expected, (uint16_t)sizeof(expected));
+    queue_rclunk(&io, 0x11u, 5u);
+
+    expect_int("dup register read_path", cluster_vfs_read_path("/mcu1/sys/health", buf, &len), 0);
+    expect_int("dup register tx count", (int)io.tx_count, 4);
+    expect_u16("dup register read len", len, (uint16_t)sizeof(expected));
+    expect_mem("dup register read data", buf, expected, sizeof(expected));
+
+    if (!mesh_decode_frame(io.tx_frames[0], io.tx_lens[0], &mesh_view)) {
+        failf("dup register first tx mesh decode", "mesh_decode_frame failed");
+        return;
+    }
+    if (!m9p_decode_frame(mesh_view.payload, mesh_view.payload_len, &m9p_view)) {
+        failf("dup register first tx mini9p decode", "m9p_decode_frame failed");
+        return;
+    }
+    expect_int("dup register first tx type", m9p_view.type, M9P_TWALK);
+    expect_u16("dup register first tx tag", m9p_view.tag, 2u);
 }
 
 static void test_attach_timeout_maps_mesh_busy_to_m9p_eagain(void)
@@ -965,6 +1049,8 @@ int main(void)
              test_bootstrap_register_assigns_and_registers);
     run_test("test_register_broadcast_updates_vfs_without_direct_link",
              test_register_broadcast_updates_vfs_without_direct_link);
+    run_test("test_assigned_register_poll_path_uses_ingress_as_direct_link",
+             test_assigned_register_poll_path_uses_ingress_as_direct_link);
     run_test("test_neighbor_probe_request_gets_host_response_without_topology",
              test_neighbor_probe_request_gets_host_response_without_topology);
     run_test("test_neighbor_probe_request_poll_path_gets_host_response",
@@ -973,6 +1059,8 @@ int main(void)
              test_neighbor_probe_response_is_consumed_by_host);
     run_test("test_link_state_to_host_enables_attach_over_mesh_client",
              test_link_state_to_host_enables_attach_over_mesh_client);
+    run_test("test_duplicate_register_preserves_attached_client_session",
+             test_duplicate_register_preserves_attached_client_session);
     run_test("test_attach_timeout_maps_mesh_busy_to_m9p_eagain",
              test_attach_timeout_maps_mesh_busy_to_m9p_eagain);
     run_test("test_routed_read_path_uses_cluster_next_hop",

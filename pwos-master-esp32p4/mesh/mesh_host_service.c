@@ -2,6 +2,11 @@
 
 #include <string.h>
 
+#define PWOS_MASTER_MESH_UART_BAUD_RATE 1000000
+#define PWOS_MASTER_MESH_UART_PORT 1
+#define PWOS_MASTER_MESH_UART_TX_PIN 37
+#define PWOS_MASTER_MESH_UART_RX_PIN 38
+
 #ifdef ESP_PLATFORM
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -118,6 +123,12 @@ void mesh_host_service_get_default_config(struct mesh_host_service_config *out_c
     out_config->ports[0].enabled = true;
     out_config->ports[0].neighbor_addr = MESH_HOST_SERVICE_NEIGHBOR_ANY;
     mesh_uart_transport_get_default_config(&out_config->ports[0].uart_config);
+#ifdef ESP_PLATFORM
+    out_config->ports[0].uart_config.uart_port = PWOS_MASTER_MESH_UART_PORT;
+    out_config->ports[0].uart_config.tx_pin = PWOS_MASTER_MESH_UART_TX_PIN;
+    out_config->ports[0].uart_config.rx_pin = PWOS_MASTER_MESH_UART_RX_PIN;
+    out_config->ports[0].uart_config.baud_rate = PWOS_MASTER_MESH_UART_BAUD_RATE;
+#endif
 }
 
 int mesh_host_service_init(

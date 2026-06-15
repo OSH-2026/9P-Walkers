@@ -185,6 +185,18 @@ int mesh_host_runtime_process_frame(
     size_t frame_len);
 
 /**
+ * @brief 处理一帧已经读到内存中的 raw mesh 数据，并携带真实入口端口。
+ *
+ * transport/poll 路径应优先使用这个入口，以便 runtime 可以把物理 ingress port
+ * 用于直连链路兜底和诊断。没有端口概念时传 MESH_PROCESSER_INGRESS_PORT_NONE。
+ */
+int mesh_host_runtime_process_frame_from_port(
+    struct mesh_host_runtime *runtime,
+    const uint8_t *frame_data,
+    size_t frame_len,
+    uint8_t ingress_port);
+
+/**
  * @brief 注册一个已由主机分配地址的节点。
  *
  * ASSIGN 成功发出后即可调用；后续收到旧固件的二次 REGISTER 时重复调用也是幂等刷新。

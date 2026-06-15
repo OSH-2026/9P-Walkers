@@ -1,5 +1,6 @@
 #include "websocket_shell.h"
 
+#include <stdbool.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,11 +10,16 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
 #include "shell.h"
 
 #define WS_BROADCAST_CAP 1024
 #define WS_CMD_MAX_LEN   256
 #define MAX_WS_CLIENTS   4
+#define WS_CMD_QUEUE_LEN  4
+#define WS_SHELL_STACK    12288
+#define WS_SHELL_PRIORITY 4
 
 static const char *TAG = "web_shell";
 
@@ -24,6 +30,13 @@ static httpd_handle_t s_server = NULL;
 static int           s_client_fds[MAX_WS_CLIENTS];
 static int           s_client_count = 0;
 static portMUX_TYPE  s_client_lock  = portMUX_INITIALIZER_UNLOCKED;
+
+typedef struct {
+    char line[WS_CMD_MAX_LEN];
+} ws_cmd_item_t;
+
+static QueueHandle_t s_cmd_queue = NULL;
+static TaskHandle_t  s_shell_task = NULL;
 
 /* ------------------------------------------------------------------ */
 /* 客户端记账管理                                                       */
@@ -36,28 +49,44 @@ void websocket_shell_set_server(httpd_handle_t hd)
 
 void websocket_shell_client_connected(int fd)
 {
+    int total = 0;
+    bool accepted = false;
+
     taskENTER_CRITICAL(&s_client_lock);
     if (s_client_count < MAX_WS_CLIENTS) {
         s_client_fds[s_client_count++] = fd;
-        ESP_LOGI(TAG, "WS client connected fd=%d (total=%d)", fd, s_client_count);
+        total = s_client_count;
+        accepted = true;
+    }
+    taskEXIT_CRITICAL(&s_client_lock);
+
+    if (accepted) {
+        ESP_LOGI(TAG, "WS client connected fd=%d (total=%d)", fd, total);
     } else {
         ESP_LOGW(TAG, "WS client table full, rejecting fd=%d", fd);
     }
-    taskEXIT_CRITICAL(&s_client_lock);
 }
 
 void websocket_shell_client_disconnected(int fd)
 {
+    int total = 0;
+    bool removed = false;
+
     taskENTER_CRITICAL(&s_client_lock);
     for (int i = 0; i < s_client_count; i++) {
         if (s_client_fds[i] == fd) {
             /* 交换删除以实现不保留顺序的 O(1) 删除。 */
             s_client_fds[i] = s_client_fds[--s_client_count];
-            ESP_LOGI(TAG, "WS client disconnected fd=%d (total=%d)", fd, s_client_count);
+            total = s_client_count;
+            removed = true;
             break;
         }
     }
     taskEXIT_CRITICAL(&s_client_lock);
+
+    if (removed) {
+        ESP_LOGI(TAG, "WS client disconnected fd=%d (total=%d)", fd, total);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -141,6 +170,35 @@ static void shell_output_hook(const char *text)
 }
 
 /* ------------------------------------------------------------------ */
+/* Shell 命令执行任务                                                   */
+/* ------------------------------------------------------------------ */
+
+static void ws_shell_task(void *arg)
+{
+    ws_cmd_item_t item;
+
+    (void)arg;
+
+    for (;;) {
+        if (xQueueReceive(s_cmd_queue, &item, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+
+        shell_set_print_hook(shell_output_hook);
+        int rc = shell_execute_line(item.line);
+        shell_set_print_hook(NULL);
+
+        if (rc > 0) {
+            char rc_buf[24];
+            int n = snprintf(rc_buf, sizeof(rc_buf), "[rc=%d]\r\n", rc);
+            if (n > 0) {
+                ws_send_raw_to_all(rc_buf, (size_t)n);
+            }
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* 公共 API                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -148,11 +206,37 @@ void websocket_shell_init(void)
 {
     memset(s_client_fds, -1, sizeof(s_client_fds));
     s_client_count = 0;
+
+    if (s_cmd_queue == NULL) {
+        s_cmd_queue = xQueueCreate(WS_CMD_QUEUE_LEN, sizeof(ws_cmd_item_t));
+        if (s_cmd_queue == NULL) {
+            ESP_LOGE(TAG, "failed to create WS command queue");
+            return;
+        }
+    }
+
+    if (s_shell_task == NULL) {
+        BaseType_t ok = xTaskCreate(
+            ws_shell_task,
+            "ws_shell",
+            WS_SHELL_STACK,
+            NULL,
+            WS_SHELL_PRIORITY,
+            &s_shell_task);
+        if (ok != pdPASS) {
+            ESP_LOGE(TAG, "failed to create WS shell task");
+            s_shell_task = NULL;
+            return;
+        }
+    }
+
     ESP_LOGI(TAG, "WebSocket shell bridge ready (max %d clients)", MAX_WS_CLIENTS);
 }
 
 void websocket_shell_receive_text(const char *data, size_t len)
 {
+    ws_cmd_item_t item;
+
     if (len == 0) {
         return;
     }
@@ -161,33 +245,29 @@ void websocket_shell_receive_text(const char *data, size_t len)
         ws_send_raw_to_all("[ERR] Command too long\r\n", 24);
         return;
     }
+    if (s_cmd_queue == NULL) {
+        ESP_LOGE(TAG, "WS command queue is not initialized");
+        ws_send_raw_to_all("[ERR] shell queue unavailable\r\n", 31);
+        return;
+    }
 
     /* 复制为以 NUL 结尾的缓冲区。 */
-    char line[WS_CMD_MAX_LEN];
-    memcpy(line, data, len);
-    line[len] = '\0';
+    memset(&item, 0, sizeof(item));
+    memcpy(item.line, data, len);
+    item.line[len] = '\0';
 
-    ESP_LOGI(TAG, "WS cmd: %s", line);
+    ESP_LOGI(TAG, "WS cmd: %s", item.line);
 
     /* 将 "pwos> <cmd>" 回显回浏览器，以便 xterm 可以显示提示符。 */
     char echo_buf[WS_CMD_MAX_LEN + 16];
-    int  echo_len = snprintf(echo_buf, sizeof(echo_buf), "pwos> %s\r\n", line);
+    int  echo_len = snprintf(echo_buf, sizeof(echo_buf), "pwos> %s\r\n", item.line);
     if (echo_len > 0) {
         ws_send_raw_to_all(echo_buf, (size_t)echo_len);
     }
 
-    /* 挂钩 shell 打印输出，这样在 shell_execute_line 内部的 printf/puts 会发送到 WS。 */
-    shell_set_print_hook(shell_output_hook);
-    int rc = shell_execute_line(line);
-    shell_set_print_hook(NULL);
-
-    /* 对于非零、非 (-1) 的返回码，将错误呈现给浏览器。 */
-    if (rc > 0) {
-        char rc_buf[24];
-        int  n = snprintf(rc_buf, sizeof(rc_buf), "[rc=%d]\r\n", rc);
-        if (n > 0) {
-            ws_send_raw_to_all(rc_buf, (size_t)n);
-        }
+    if (xQueueSend(s_cmd_queue, &item, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "WS command queue full");
+        ws_send_raw_to_all("[ERR] shell busy\r\n", 18);
     }
 }
 
