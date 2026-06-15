@@ -47,6 +47,21 @@ struct mesh_uart_transport_config {
     bool flush_before_receive;
 };
 
+struct mesh_uart_transport_stats {
+    bool initialized;
+    bool dma_running;
+    uint16_t dma_pos;
+    uint16_t dma_last_pos;
+    uint16_t parse_len;
+    uint8_t frame_head;
+    uint8_t frame_count;
+    uint32_t dropped_frames;
+    uint32_t bad_frames;
+    uint32_t hal_error_code;
+    uint32_t hal_g_state;
+    uint32_t hal_rx_state;
+};
+
 struct mesh_uart_transport {
     struct mesh_uart_transport_config config;
 #ifdef ESP_PLATFORM
@@ -90,6 +105,10 @@ int mesh_uart_transport_receive_frame(
 bool mesh_uart_transport_rx_pending(const struct mesh_uart_transport *transport);
 
 int mesh_uart_transport_flush_input(struct mesh_uart_transport *transport);
+
+int mesh_uart_transport_get_stats(
+    struct mesh_uart_transport *transport,
+    struct mesh_uart_transport_stats *out_stats);
 
 int mesh_uart_transport_init_default(void);
 

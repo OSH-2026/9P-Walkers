@@ -46,6 +46,12 @@ static int mesh_node_log_text(void *ctx, char *out, size_t out_cap)
     return pwos_log_format(out, out_cap);
 }
 
+static int mesh_node_uart_text(void *ctx, char *out, size_t out_cap)
+{
+    (void)ctx;
+    return mesh_node_service_format_uart_stats(out, out_cap);
+}
+
 static bool mesh_node_uart_is_enabled(const UART_HandleTypeDef *uart)
 {
     return uart != NULL &&
@@ -87,6 +93,7 @@ int mesh_node_mini9p_init(void)
     node_config.iounit = NODE_VFS_DEFAULT_IOUNIT;
     node_config.routes_text_fn = mesh_node_routes_text;
     node_config.log_text_fn = mesh_node_log_text;
+    node_config.uart_text_fn = mesh_node_uart_text;
     pwos_log_init();
     rc = node_vfs_init(&g_node_vfs, &node_config);
     if (rc != 0) {

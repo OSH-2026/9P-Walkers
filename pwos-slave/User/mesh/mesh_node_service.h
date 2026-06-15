@@ -144,6 +144,17 @@ int mesh_node_service_learn_addr_port(uint8_t mesh_addr, uint8_t port_id);
  */
 int mesh_node_service_format_addr_ports(char *out, size_t out_cap);
 
+/**
+ * @brief 将所有 UART transport 的运行统计格式化为文本。
+ *
+ * 输出用于 /sys/uart 调试文件。
+ *
+ * @param[out] out 输出缓冲。
+ * @param[in] out_cap 输出缓冲容量。
+ * @return 0 表示成功；负的 MESH_ERR_* 表示失败。
+ */
+int mesh_node_service_format_uart_stats(char *out, size_t out_cap);
+
 #ifdef __cplusplus
 }
 #endif

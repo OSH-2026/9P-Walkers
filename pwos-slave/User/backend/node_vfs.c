@@ -355,6 +355,8 @@ int node_vfs_init(struct node_vfs *vfs, const struct node_vfs_config *config)
     sys_config.routes_text_ctx = config->routes_text_ctx;
     sys_config.log_text_fn = config->log_text_fn;
     sys_config.log_text_ctx = config->log_text_ctx;
+    sys_config.uart_text_fn = config->uart_text_fn;
+    sys_config.uart_text_ctx = config->uart_text_ctx;
     sys_config.iounit = SYS_VFS_DEFAULT_IOUNIT;
     rc = sys_vfs_init(&vfs->sys_vfs, &sys_config);
     if (rc != 0) {

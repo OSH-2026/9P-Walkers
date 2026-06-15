@@ -519,3 +519,62 @@ int mesh_node_service_format_addr_ports(char *out, size_t out_cap)
     out[used] = '\0';
     return 0;
 }
+
+int mesh_node_service_format_uart_stats(char *out, size_t out_cap)
+{
+    size_t used = 0u;
+    size_t i;
+    int written;
+
+    if (!g_mesh_node_service_initialized || out == NULL || out_cap == 0u) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    written = snprintf(
+        out,
+        out_cap,
+        "service=1 ports=%u next_rx=%u\n",
+        (unsigned)g_mesh_node_service.port_count,
+        (unsigned)g_mesh_node_service.next_rx_index);
+    if (written < 0) {
+        return -(int)MESH_ERR_BAD_FRAME;
+    }
+    used = (size_t)written < out_cap ? (size_t)written : out_cap - 1u;
+
+    for (i = 0u; i < g_mesh_node_service.port_count && used < out_cap - 1u; ++i) {
+        struct mesh_uart_transport_stats stats;
+        int rc;
+
+        memset(&stats, 0, sizeof(stats));
+        rc = mesh_uart_transport_get_stats(&g_mesh_node_service.ports[i].transport, &stats);
+        written = snprintf(
+            out + used,
+            out_cap - used,
+            "port%u init=%u rc=%d dma=%u pos=%u last=%u parse=%u q=%u head=%u bad=%lu drop=%lu err=0x%08lx g=0x%02lx rx=0x%02lx\n",
+            (unsigned)i,
+            g_mesh_node_service.ports[i].initialized ? 1u : 0u,
+            rc,
+            stats.dma_running ? 1u : 0u,
+            (unsigned)stats.dma_pos,
+            (unsigned)stats.dma_last_pos,
+            (unsigned)stats.parse_len,
+            (unsigned)stats.frame_count,
+            (unsigned)stats.frame_head,
+            (unsigned long)stats.bad_frames,
+            (unsigned long)stats.dropped_frames,
+            (unsigned long)stats.hal_error_code,
+            (unsigned long)stats.hal_g_state,
+            (unsigned long)stats.hal_rx_state);
+        if (written < 0) {
+            return -(int)MESH_ERR_BAD_FRAME;
+        }
+        if ((size_t)written >= out_cap - used) {
+            used = out_cap - 1u;
+            break;
+        }
+        used += (size_t)written;
+    }
+
+    out[used] = '\0';
+    return 0;
+}

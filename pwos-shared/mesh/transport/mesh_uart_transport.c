@@ -87,6 +87,19 @@ int mesh_uart_transport_flush_input(struct mesh_uart_transport *transport)
     return 0;
 }
 
+int mesh_uart_transport_get_stats(
+    struct mesh_uart_transport *transport,
+    struct mesh_uart_transport_stats *out_stats)
+{
+    if (out_stats == NULL) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    memset(out_stats, 0, sizeof(*out_stats));
+    out_stats->initialized = transport != NULL && transport->initialized;
+    return 0;
+}
+
 #elif defined(MESH_UART_TRANSPORT_USE_STM32_HAL)
 
 #define MESH_UART_TRANSPORT_STM32_MAX_INSTANCES 8u
@@ -598,6 +611,39 @@ int mesh_uart_transport_flush_input(struct mesh_uart_transport *transport)
     return 0;
 }
 
+int mesh_uart_transport_get_stats(
+    struct mesh_uart_transport *transport,
+    struct mesh_uart_transport_stats *out_stats)
+{
+    uint32_t primask;
+
+    if (transport == NULL || out_stats == NULL) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    memset(out_stats, 0, sizeof(*out_stats));
+    stm32_poll_dma_rx(transport);
+
+    primask = mesh_uart_transport_enter_critical();
+    out_stats->initialized = transport->initialized;
+    out_stats->dma_running = transport->dma_running;
+    out_stats->dma_pos = stm32_dma_current_pos(transport);
+    out_stats->dma_last_pos = transport->dma_last_pos;
+    out_stats->parse_len = transport->parse_len;
+    out_stats->frame_head = transport->frame_head;
+    out_stats->frame_count = transport->frame_count;
+    out_stats->dropped_frames = transport->dropped_frames;
+    out_stats->bad_frames = transport->bad_frames;
+    if (transport->config.uart != NULL) {
+        out_stats->hal_error_code = transport->config.uart->ErrorCode;
+        out_stats->hal_g_state = (uint32_t)transport->config.uart->gState;
+        out_stats->hal_rx_state = (uint32_t)transport->config.uart->RxState;
+    }
+    mesh_uart_transport_exit_critical(primask);
+
+    return 0;
+}
+
 #else
 
 #include "driver/uart.h"
@@ -930,6 +976,19 @@ int mesh_uart_transport_flush_input(struct mesh_uart_transport *transport)
     }
 
     return flush_input(transport);
+}
+
+int mesh_uart_transport_get_stats(
+    struct mesh_uart_transport *transport,
+    struct mesh_uart_transport_stats *out_stats)
+{
+    if (out_stats == NULL) {
+        return -(int)MESH_ERR_INVALID_STATE;
+    }
+
+    memset(out_stats, 0, sizeof(*out_stats));
+    out_stats->initialized = transport != NULL && transport->initialized;
+    return 0;
 }
 
 #endif
