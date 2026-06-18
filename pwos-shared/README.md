@@ -1,6 +1,6 @@
 # pwos-shared
 
-`pwos-shared` 目录存放主控 (`pwos-master-esp32p4`) 和从机 (`pwos-slave` / `pwos-slave-stm32f411`) 共同依赖的协议与运行时源码。原则上:
+`pwos-shared` 目录存放主控 (`pwos-master-esp32p4`) 和从机 (`pwos-slave`) 共同依赖的协议与运行时源码。原则上:
 
 - **协议与运行时** 在此目录实现,跨板级复用。
 - **板级 HAL、main、driver** 不放在这里,留在各自的 MCU 目录。

@@ -1,6 +1,6 @@
 # 构建与烧录指南
 
-本文档汇总 ESP32-P4 主控、STM32F407/F411 从机以及 PC 模拟器的构建、烧录和监控命令。
+本文档汇总 ESP32-P4 主控、STM32F407 从机以及 PC 模拟器的构建、烧录和监控命令。
 
 ## 1. 依赖
 
@@ -15,11 +15,11 @@
 - ESP-IDF（需支持 ESP32-P4），安装后 source 环境使 `IDF_PATH` 可用。
 - USB 转串口或 JTAG 调试器，用于 `idf.py flash` / `idf.py monitor`。
 
-### 1.3 STM32 从机
+### 1.3 STM32F407 从机
 
 - ARM GNU Toolchain：`arm-none-eabi-gcc/g++` 必须在 `PATH` 中。
-- OpenOCD（F407 烧录用）或 `dfu-util`（F411 烧录用）。
-- ST-Link 调试器或 USB-TTL 转 DFU。
+- OpenOCD。
+- ST-Link 调试器。
 
 ### 1.4 PC 模拟器
 
@@ -101,38 +101,7 @@ openocd \
 - `OPENOCD_INTERFACE`：默认 `interface/stlink.cfg`。
 - `OPENOCD_TARGET`：默认 `target/stm32f4x.cfg`。
 
-## 4. STM32F411 从机（pwos-slave-stm32f411）
-
-### 4.1 构建
-
-```bash
-cd pwos-slave-stm32f411
-cmake --preset Debug
-cmake --build --preset Debug
-
-# Release
-cmake --preset Release
-cmake --build --preset Release
-```
-
-F411 当前板级配置中 `USART2`（`PA2=TX`、`PA3=RX`）是与 PC/host 通信的 mesh 主口，默认 `1000000` baud；该口只传 Mini9P/mesh 二进制帧。
-
-### 4.2 烧录（DFU）
-
-```bash
-cd pwos-slave-stm32f411
-./build.sh flash
-```
-
-等价命令：
-
-```bash
-dfu-util -a 0 -s 0x08000000:leave -D build/Debug/pwos-slave-stm32f411.bin
-```
-
-烧录前需将 BOOT0 置高进入 DFU；烧录后恢复 BOOT0=0 并复位运行。
-
-## 5. PC 主控模拟器
+## 4. PC 主控模拟器
 
 ```bash
 cmake -S tools/pc_master_emulator -B tools/pc_master_emulator/build
@@ -147,9 +116,9 @@ tools/pc_master_emulator/build/pc_master_emulator /dev/ttyUSB0 1000000 2
 
 省略波特率时默认 `1000000`；省略节点数时默认等待 2 个节点。
 
-## 6. 常用测试构建
+## 5. 常用测试构建
 
-### 6.1 Cluster VFS host test
+### 5.1 Cluster VFS host test
 
 ```bash
 cmake -S pwos-master-esp32p4/vfs_bridge/test -B pwos-master-esp32p4/vfs_bridge/test/build
@@ -157,7 +126,7 @@ cmake --build pwos-master-esp32p4/vfs_bridge/test/build
 pwos-master-esp32p4/vfs_bridge/test/build/cluster_vfs_test
 ```
 
-### 6.2 从机 local VFS backend test
+### 5.2 从机 local VFS backend test
 
 ```bash
 cmake -S pwos-slave/User/backend/test -B pwos-slave/User/backend/test/build
@@ -165,9 +134,9 @@ cmake --build pwos-slave/User/backend/test/build
 pwos-slave/User/backend/test/build/local_vfs_test
 ```
 
-## 7. 常见问题
+## 6. 常见问题
 
-### 7.1 `IDF_PATH is not set`
+### 6.1 `IDF_PATH is not set`
 
 ESP-IDF 环境未导出。执行类似：
 
@@ -175,7 +144,7 @@ ESP-IDF 环境未导出。执行类似：
 . $HOME/esp/esp-idf/export.sh
 ```
 
-### 7.2 `arm-none-eabi-gcc: command not found`
+### 6.2 `arm-none-eabi-gcc: command not found`
 
 ARM 工具链未加入 `PATH`。安装后：
 
@@ -183,25 +152,19 @@ ARM 工具链未加入 `PATH`。安装后：
 export PATH=$PATH:/path/to/arm-gnu-toolchain/bin
 ```
 
-### 7.3 STM32 构建失败：找不到 `stm32cubemx`
+### 6.3 STM32 构建失败：找不到 `stm32cubemx`
 
 确保已用 STM32CubeMX 或仓库已生成 `cmake/stm32cubemx/` 目录与 HAL 源文件。
 
-### 7.4 串口通信无响应
+### 6.4 串口通信无响应
 
 - 检查波特率是否为 `1000000`。
 - 确认该 USART 未被日志/VOFA 占用。
 - 检查线序：TX-RX 交叉、共地、3.3V TTL 电平。
 - 使用 `pc_master_emulator` 时，确认从机已上电并发送 `REGISTER`。
 
-### 7.5 OpenOCD 无法连接
+### 6.5 OpenOCD 无法连接
 
 - 检查 ST-Link 接线与驱动。
 - 确认目标板供电正常。
 - 尝试降低接口速度：`-c "adapter speed 1000"`。
-
-### 7.6 DFU 烧录失败
-
-- 确认 BOOT0 为高电平并复位进入 DFU。
-- 检查 USB 线是否支持数据通信。
-- 使用 `dfu-util -l` 列出设备确认识别。

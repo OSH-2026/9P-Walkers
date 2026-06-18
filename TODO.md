@@ -15,7 +15,6 @@
 验收状态：
 
 - [x] 单板 `PC <-> F407`：REGISTER、ASSIGN、NEIGHBOR_PROBE、LINK_STATE、ROUTE_UPDATE、attach、读取 `/sys/health` 成功。
-- [x] 单板 `PC <-> F411`：同上。
 - [x] 串联 `PC <-> A <-> B`：B 能注册为 `mcu2`，ASSIGN 能回转，A/B 都能上报 LINK_STATE，主机能读 `/mcu2/sys/health` 和 `/mcu2/sys/log`。
 
 ## 待办
@@ -70,6 +69,6 @@
 - [ ] `docs/mesh_wifi_link.md`：WiFi 链路使用与配网说明。
 - [ ] `docs/slave_mesh_runtime.md`：从机 runtime 开发者指南。
 - [ ] `docs/cluster_config_usage.md`：`cluster_config` 与 VFS 的协作流程。
-- [ ] `docs/build_and_flash.md`：ESP32-P4 / F407 / F411 编译烧录指南。
+- [ ] `docs/build_and_flash.md`：ESP32-P4 / F407 编译烧录指南。
 - [ ] `docs/transport_abstraction.md`：UART DMA/IDLE 设计与 WiFi 统一抽象。
 - [ ] `docs/adr/0003-*.md`：补充 mesh envelope、relay bootstrap、WiFi link 的架构决策记录。

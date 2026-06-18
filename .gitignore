@@ -1,15 +1,26 @@
+# Build output (all subprojects)
 build/
+pwos-master-esp32p4/build/
+pwos-master-esp32p4/managed_components/
+pwos-master-esp32p4/sdkconfig.old
+pwos-master-esp32p4/sdkconfig.bak
+pwos-slave/User/backend/test/build*/
+pwos-slave/User/uart_transport/test/build*/
 tools/pc_master_emulator/build/
+pwos-shared/link/tests/build*/
+pwos-shared/mesh2/tests/build*/
+
+# Legacy / superseded
 pwos-master/
+
+# IDE / editor
 .vscode/
 pwos-slave/.vscode/
-# !pwos-master-esp32p4/.vscode
 .codex
-
+.cache/
 
 # Local development files
 venv/
-# Logs and temporary files
 AGENTS.md
 *.o
 tmp*.md

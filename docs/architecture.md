@@ -78,9 +78,6 @@ Shell / Lua / WebShell
 │       ├── dev/                     # 外设回调
 │       └── compute/                 # 计算任务后端
 │
-├── pwos-slave-stm32f411/            # STM32F411 从机变体
-│   └── User/app/mesh_node_mini9p_init.c   # 仅适配 UART handle 与端口配置
-│
 ├── pwos-shared/                     # 主从共享代码
 │   ├── mini9p/                      # mini9P 协议本体
 │   │   ├── mini9p_protocol.c/.h

@@ -38,8 +38,7 @@ tools/pc_master_emulator/build/pc_master_emulator /dev/ttyUSB0 1000000 1
 tools/pc_master_emulator/build/pc_master_emulator /dev/ttyUSB0 1000000 2
 ```
 
-如果省略波特率，工具默认使用 `1000000`。当前 `pwos-slave` 与
-`pwos-slave-stm32f411` 的 UART 初始化均配置为 `1000000`。
+如果省略波特率，工具默认使用 `1000000`。当前 `pwos-slave` 的 UART 初始化配置为 `1000000`。
 
 如果省略 `node-count`，工具默认等待 2 个节点。节点按本次运行内的注册顺序分配：
 
