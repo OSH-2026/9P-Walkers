@@ -52,7 +52,12 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 
 # Add sources to executable
 set(PWOS_USER_DIR ${CMAKE_SOURCE_DIR}/User)
+set(PWOS_USER_DRIVERS_DIR ${PWOS_USER_DIR}/drivers)
+set(PWOS_USER_LINK_DIR ${PWOS_USER_DIR}/link)
 set(PWOS_USER_MESH_DIR ${PWOS_USER_DIR}/mesh)
+set(PWOS_USER_OS_DIR ${PWOS_USER_DIR}/os)
+set(PWOS_USER_RTOS_DIR ${PWOS_USER_DIR}/rtos)
+set(PWOS_SHARED_LINK_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/link)
 set(PWOS_SHARED_MESH_CLUSTER_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/cluster)
 set(PWOS_SHARED_MESH_ENVELOPE_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/envelope)
 set(PWOS_SHARED_MESH_PROCESSER_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/processer)
@@ -60,60 +65,31 @@ set(PWOS_SHARED_MESH_TRANSPORT_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/trans
 set(PWOS_SHARED_MESH_WIFI_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh/wifi)
 
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-    ${PWOS_USER_DIR}/fs/lfs.c
-    ${PWOS_USER_DIR}/fs/lfs_util.c
-    ${PWOS_USER_DIR}/drivers/storage/sd_blockdev.cpp
-    ${PWOS_USER_DIR}/drivers/storage/lfs_port.cpp
-    ${PWOS_USER_DIR}/app/fs_selftest.c
-    ${PWOS_USER_DIR}/app/mesh_diag.c
-    ${PWOS_USER_DIR}/app/mesh_node_mini9p_init.c
-    ${PWOS_USER_DIR}/app/pwos_log.c
-    ${PWOS_USER_DIR}/app/vofa_firewater.c
-    ${PWOS_USER_DIR}/backend/dev_vfs.c
-    ${PWOS_USER_DIR}/backend/lfs_vfs.c
-    ${PWOS_USER_DIR}/backend/node_vfs.c
-    ${PWOS_USER_DIR}/backend/sys_vfs.c
-    ${PWOS_USER_MESH_DIR}/mesh_node_service.c
-    ${PWOS_SHARED_MESH_CLUSTER_DIR}/cluster.c
-    ${PWOS_SHARED_MESH_ENVELOPE_DIR}/mesh_protocal.c
-    ${PWOS_SHARED_MESH_PROCESSER_DIR}/mesh_processer.c
-    ${PWOS_USER_MESH_DIR}/mesh_node_runtime.c
-    ${PWOS_SHARED_MESH_TRANSPORT_DIR}/mesh_uart_transport.c
-    ${PWOS_SHARED_MESH_WIFI_DIR}/mesh_wifi.c
-    ${CMAKE_SOURCE_DIR}/../pwos-shared/mini9p/mini9p_protocol.c
-    ${CMAKE_SOURCE_DIR}/../pwos-shared/mini9p/mini9p_server.c
+    ${PWOS_USER_OS_DIR}/frame_pool.c
+    ${PWOS_USER_RTOS_DIR}/pwos_queues.c
+    ${PWOS_USER_RTOS_DIR}/pwos_tasks.c
+    ${PWOS_USER_DRIVERS_DIR}/uart_dma_port.c
+    ${PWOS_USER_LINK_DIR}/port_manager.c
+    ${PWOS_SHARED_LINK_DIR}/pwos_link_crc.c
+    ${PWOS_SHARED_LINK_DIR}/pwos_link_frame.c
+    ${PWOS_SHARED_LINK_DIR}/pwos_link_parser.c
 )
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
-    ${PWOS_USER_DIR}/fs
-    ${PWOS_USER_DIR}/drivers/storage
-    ${PWOS_USER_DIR}/app
-    ${PWOS_USER_DIR}/backend
-    ${PWOS_USER_MESH_DIR}
-    ${CMAKE_SOURCE_DIR}/../pwos-shared/mini9p
-    ${PWOS_SHARED_MESH_CLUSTER_DIR}
-    ${PWOS_SHARED_MESH_ENVELOPE_DIR}
-    ${PWOS_SHARED_MESH_PROCESSER_DIR}
-    ${PWOS_SHARED_MESH_TRANSPORT_DIR}
-    ${PWOS_SHARED_MESH_WIFI_DIR}
+    ${PWOS_USER_DRIVERS_DIR}
+    ${PWOS_USER_LINK_DIR}
+    ${PWOS_USER_OS_DIR}
+    ${PWOS_USER_RTOS_DIR}
+    ${PWOS_SHARED_LINK_DIR}
 )
 
 # Add project symbols (macros)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
-    MESH_UART_TRANSPORT_USE_STM32_HAL
 )
 
-if(PWOS_ENABLE_MINI9P_SERIAL)
-    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE PWOS_ENABLE_MINI9P_SERIAL)
-endif()
-if(PWOS_ENABLE_LFS_SELFTEST)
-    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE PWOS_ENABLE_LFS_SELFTEST)
-endif()
-if(PWOS_ENABLE_UART5_MESH)
-    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE PWOS_ENABLE_UART5_MESH)
-endif()
+# M2 默认固件不再定义旧 mini9P/VFS/legacy mesh 宏。
 
 # Remove wrong libob.a library dependency when using cpp files
 list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)

@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "cmsis_os.h"
 #include "dma.h"
 #include "sdio.h"
 #include "usart.h"
@@ -25,14 +26,6 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#ifdef PWOS_ENABLE_MINI9P_SERIAL
-#include "mesh_node_mini9p_init.h"
-#include "mesh_node_service.h"
-#else
-#include "fs_selftest.h"
-#include "vofa_firewater.h"
-#include <stdio.h>
-#endif
 
 /* USER CODE END Includes */
 
@@ -54,51 +47,18 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-#ifndef PWOS_ENABLE_MINI9P_SERIAL
-HAL_SD_CardInfoTypeDef SDCardInfo;
-FS_SelfTestReport g_fs_report;
-#endif
-#ifdef PWOS_ENABLE_MINI9P_SERIAL
-static uint32_t g_register_retry_last_ms;
-#define REGISTER_RETRY_UNASSIGNED_MS 1000U
-#define REGISTER_REANNOUNCE_ASSIGNED_MS 3000U
-#endif
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
+void MX_FREERTOS_Init(void);
 /* USER CODE BEGIN PFP */
-#ifndef PWOS_ENABLE_MINI9P_SERIAL
-static void FS_ReportBootStatus(void);
-#endif
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-#ifndef PWOS_ENABLE_MINI9P_SERIAL
-static void FS_ReportBootStatus(void) {
-  char message[128];
-  int pass;
-
-  pass = (g_fs_report.init_status == 0) && (g_fs_report.mkdir_status == 0) &&
-         (g_fs_report.write_status == 0) && (g_fs_report.stat_status == 0) &&
-         (g_fs_report.read_status == 0) && (g_fs_report.dir_status == 0) &&
-         (g_fs_report.compare_status == 0) &&
-         (g_fs_report.fixture_status == 0) &&
-         (g_fs_report.report_status == 0);
-
-  if (snprintf(message, sizeof(message),
-               "boot status=%s init=%ld fixture=%ld file_size=%lu read=%lu write=%lu",
-               pass ? "PASS" : "FAIL", (long)g_fs_report.init_status,
-               (long)g_fs_report.fixture_status,
-               (unsigned long)g_fs_report.file_size,
-               (unsigned long)g_fs_report.bytes_read,
-               (unsigned long)g_fs_report.bytes_written) > 0) {
-    (void)vofa_firewater_send_text(message);
-  }
-}
-#endif
 
 /* USER CODE END 0 */
 
@@ -139,21 +99,20 @@ int main(void)
   MX_USART3_UART_Init();
   MX_USART6_UART_Init();
   /* USER CODE BEGIN 2 */
-#ifdef PWOS_ENABLE_MINI9P_SERIAL
-  if (mesh_node_mini9p_init() != 0) {
-    Error_Handler();
-  }
-#else
-  (void)vofa_firewater_send_text("boot: sdio ok");
-  if (HAL_SD_GetCardInfo(&hsd, &SDCardInfo) == HAL_OK) {
-    (void)vofa_firewater_send_text("boot: sd cardinfo ok");
-  } else {
-    (void)vofa_firewater_send_text("boot: sd cardinfo fail");
-  }
-  (void)fs_selftest_run(&g_fs_report);
-  FS_ReportBootStatus();
-#endif
+  /*
+   * M2 开始后，main 只保留 CubeMX 外设初始化。
+   * 任务、队列、UART DMA 收包入口都在 MX_FREERTOS_Init() 的用户区装配。
+   */
   /* USER CODE END 2 */
+
+  /* Init scheduler */
+  osKernelInitialize();  /* Call init function for freertos objects (in cmsis_os2.c) */
+  MX_FREERTOS_Init();
+
+  /* Start scheduler */
+  osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -161,25 +120,6 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-#ifdef PWOS_ENABLE_MINI9P_SERIAL
-    {
-      struct mesh_node_runtime *runtime = mesh_node_service_runtime();
-      uint32_t now = HAL_GetTick();
-      uint32_t interval = REGISTER_RETRY_UNASSIGNED_MS;
-      if (runtime != NULL &&
-          runtime->processor.config.local_addr != MESH_ADDR_UNASSIGNED) {
-        interval = REGISTER_REANNOUNCE_ASSIGNED_MS;
-      }
-      if (runtime != NULL && (uint32_t)(now - g_register_retry_last_ms) >= interval) {
-        (void)mesh_node_service_notify_link_up();
-        g_register_retry_last_ms = now;
-      }
-    }
-    (void)mesh_node_service_poll_once();
-#else
-    (void)vofa_firewater_send_fs_report(&g_fs_report, HAL_GetTick());
-    HAL_Delay(1000);
-#endif
   }
   /* USER CODE END 3 */
 }
@@ -232,6 +172,28 @@ void SystemClock_Config(void)
 /* USER CODE BEGIN 4 */
 
 /* USER CODE END 4 */
+
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM1 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
+
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM1)
+  {
+    HAL_IncTick();
+  }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.
