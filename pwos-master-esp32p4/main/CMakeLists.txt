@@ -1,63 +1,36 @@
-file(GLOB LUA_SRCS "${CMAKE_CURRENT_LIST_DIR}/../lua/*.c")
+set(PWOS_SHARED_LINK_DIR "${CMAKE_CURRENT_LIST_DIR}/../../pwos-shared/link")
+set(PWOS_SHARED_MESH2_DIR "${CMAKE_CURRENT_LIST_DIR}/../../pwos-shared/mesh2")
 set(PWOS_SHARED_MINI9P_DIR "${CMAKE_CURRENT_LIST_DIR}/../../pwos-shared/mini9p")
-set(PWOS_SHARED_MESH_CLUSTER_DIR "${CMAKE_CURRENT_LIST_DIR}/../../pwos-shared/mesh/cluster")
-set(PWOS_SHARED_MESH_ENVELOPE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../pwos-shared/mesh/envelope")
-set(PWOS_SHARED_MESH_PROCESSER_DIR "${CMAKE_CURRENT_LIST_DIR}/../../pwos-shared/mesh/processer")
-set(PWOS_SHARED_MESH_TRANSPORT_DIR "${CMAKE_CURRENT_LIST_DIR}/../../pwos-shared/mesh/transport")
-
-list(REMOVE_ITEM LUA_SRCS
-    "${CMAKE_CURRENT_LIST_DIR}/../lua/lua.c"
-    "${CMAKE_CURRENT_LIST_DIR}/../lua/luac.c"
-    "${CMAKE_CURRENT_LIST_DIR}/../lua/linit.c"
-    "${CMAKE_CURRENT_LIST_DIR}/../lua/liolib.c"
-    "${CMAKE_CURRENT_LIST_DIR}/../lua/loslib.c"
-    "${CMAKE_CURRENT_LIST_DIR}/../lua/loadlib.c"
-    "${CMAKE_CURRENT_LIST_DIR}/../lua/ldblib.c")
+set(PWOS_HOST_SESSIONS_DIR "${CMAKE_CURRENT_LIST_DIR}/../host_sessions")
+set(PWOS_HOST_API_DIR "${CMAKE_CURRENT_LIST_DIR}/../host_api")
 
 idf_component_register(
     SRCS
         "hello_world_main.c"
-        "lua_bindings.c"
-        "lua_vfs_bindings.c"
-        "lua_port.c"
-        "${PWOS_SHARED_MINI9P_DIR}/mini9p_client.c"
+        "../coordinator_runtime/pwos_coordinator_runtime.c"
+        "../host_coordinator/host_coordinator.c"
+        "../host_sessions/session_manager.c"
+        "../host_api/cluster_vfs.c"
+        "${PWOS_SHARED_LINK_DIR}/pwos_link_crc.c"
+        "${PWOS_SHARED_LINK_DIR}/pwos_link_frame.c"
+        "${PWOS_SHARED_LINK_DIR}/pwos_link_parser.c"
+        "${PWOS_SHARED_MESH2_DIR}/pwos_mesh2_control.c"
         "${PWOS_SHARED_MINI9P_DIR}/mini9p_protocol.c"
-        "${PWOS_SHARED_MESH_ENVELOPE_DIR}/mesh_protocal.c"
-        "${PWOS_SHARED_MESH_PROCESSER_DIR}/mesh_processer.c"
-        "${PWOS_SHARED_MESH_CLUSTER_DIR}/cluster.c"
-        "${PWOS_SHARED_MESH_TRANSPORT_DIR}/mesh_uart_transport.c"
-        "../cluster/cluster_config.c"
-        "../vfs_bridge/cluster_host_vfs.c"
-        "../mesh/mesh_host_runtime.c"
-        "../mesh/mesh_host_service.c"
-        "../mesh/mesh_wifi_link.c"
-        "../shell/shell.c"
-        "../web/http_server.c"
-        "../web/websocket_shell.c"
-        "../web/lan_init.c"
-        ${LUA_SRCS}
-    EMBED_FILES
-        "../web/index.html"
+        "${PWOS_SHARED_MINI9P_DIR}/mini9p_client.c"
     PRIV_REQUIRES
-        esp_timer
-        spi_flash
-        esp_http_server
-        esp_eth
-        esp_event
-        esp_netif
-        nvs_flash
+        freertos
         esp_driver_uart
-        lwip
+        esp_hw_support
+        esp_system
+        spi_flash
+        heap
+        log
     INCLUDE_DIRS
         "."
-        "../lua"
-        "${PWOS_SHARED_MINI9P_DIR}"
-        "${PWOS_SHARED_MESH_CLUSTER_DIR}"
-        "${PWOS_SHARED_MESH_ENVELOPE_DIR}"
-        "${PWOS_SHARED_MESH_PROCESSER_DIR}"
-        "${PWOS_SHARED_MESH_TRANSPORT_DIR}"
-        "../mesh"
-        "../cluster"
-        "../vfs_bridge"
-        "../shell"
-        "../web")
+        "../coordinator_runtime"
+        "../host_coordinator"
+        "../host_sessions"
+        "../host_api"
+        "${PWOS_SHARED_LINK_DIR}"
+        "${PWOS_SHARED_MESH2_DIR}"
+        "${PWOS_SHARED_MINI9P_DIR}")

@@ -1,5 +1,0 @@
-/home/hb/lkvo/projects/9P-Walkers/pwos-master-esp32p4/vfs_bridge/test/build_asan/CMakeFiles/cluster_vfs_test.dir
-/home/hb/lkvo/projects/9P-Walkers/pwos-master-esp32p4/vfs_bridge/test/build_asan/CMakeFiles/mesh_host_service_test.dir
-/home/hb/lkvo/projects/9P-Walkers/pwos-master-esp32p4/vfs_bridge/test/build_asan/CMakeFiles/mesh_host_runtime_test.dir
-/home/hb/lkvo/projects/9P-Walkers/pwos-master-esp32p4/vfs_bridge/test/build_asan/CMakeFiles/edit_cache.dir
-/home/hb/lkvo/projects/9P-Walkers/pwos-master-esp32p4/vfs_bridge/test/build_asan/CMakeFiles/rebuild_cache.dir

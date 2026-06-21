@@ -27,6 +27,10 @@ typedef enum {
     PWOS_PORT_PEER_COORDINATOR = 2
 } pwos_port_peer_role_t;
 
+#define PWOS_PORT_CAP_COORDINATOR 0x01u
+#define PWOS_PORT_CAP_RELAY 0x02u
+#define PWOS_PORT_CAP_UPSTREAM_REACHABLE 0x04u
+
 typedef struct {
     uint8_t id;
     const char *name;
@@ -66,6 +70,29 @@ void pwos_port_manager_tick(void);
  * 返回：1 表示已消费，调用方应释放 block；0 表示不是端口管理器关心的帧。
  */
 int pwos_port_manager_handle_rx(pwos_frame_block_t *block);
+
+/*
+ * 从当前端口表里选择控制面上游候选。
+ *
+ * 优先选择直连 coordinator，其次选择已经声明可达上游的 relay 节点。
+ * 返回 0 表示找到端口；负数表示当前还没有可用上游。
+ */
+int pwos_port_manager_select_upstream(uint8_t *out_port_id);
+
+/*
+ * 标记某个端口为当前控制面 upstream。
+ *
+ * 调用上下文：mesh_ctrl_task。用于收到 ADDR_ASSIGN 后固定本节点上游端口。
+ */
+void pwos_port_manager_mark_upstream(uint8_t port_id);
+
+/*
+ * 通知 port_manager 本节点已经获得 mesh 地址。
+ *
+ * 获得地址后 HELLO 会携带 UPSTREAM_REACHABLE capability，使下游节点可以选择
+ * 本节点作为注册中继。
+ */
+void pwos_port_manager_set_mesh_assigned(uint8_t assigned, uint8_t local_addr);
 
 /*
  * 获取端口状态快照。

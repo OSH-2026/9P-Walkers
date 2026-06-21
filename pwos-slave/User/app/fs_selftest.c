@@ -26,7 +26,7 @@
 #define FS_BACKEND_FILE "/verify/debug/backend.txt"
 #define FS_RUNCOUNT_FILE "/verify/debug/run_count.txt"
 #define FS_REPORT_FILE "/verify/debug/report.txt"
-#define FS_PC_MASTER_SMOKE_FILE "/verify/debug/pc_master_smoke.txt"
+#define FS_STORAGE_SMOKE_FILE "/verify/debug/storage_smoke.txt"
 #define FS_TREE_FILE "/verify/tree/readme.txt"
 #define FS_TREE_NESTED_FILE "/verify/tree/nested/config.txt"
 
@@ -39,8 +39,8 @@ static const char g_fs_tree_payload[] =
 static const char g_fs_nested_payload[] =
     "mode=debug\ntransport=uart-mesh-mini9p-lfs\n";
 
-static const char g_fs_pc_master_smoke_payload[] =
-    "pc_master_emulator sd smoke\n";
+static const char g_fs_storage_smoke_payload[] =
+    "pwos storage smoke\n";
 
 static uint32_t g_run_count = 0;
 
@@ -235,7 +235,7 @@ static int fs_selftest_seed_debug_tree(lfs_t *lfs, const char *backend_name) {
         return err;
     }
 
-    err = fs_selftest_write_text_file(lfs, FS_PC_MASTER_SMOKE_FILE, g_fs_pc_master_smoke_payload);
+    err = fs_selftest_write_text_file(lfs, FS_STORAGE_SMOKE_FILE, g_fs_storage_smoke_payload);
     if (err < 0) {
         return err;
     }

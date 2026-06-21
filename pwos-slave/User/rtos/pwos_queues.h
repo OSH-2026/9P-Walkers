@@ -1,9 +1,11 @@
 /*
  * pwos_queues.h - PWOS M2 队列封装接口
  *
- * 本文件封装 M2 使用的 3 条 FreeRTOS 静态队列：
+ * 本文件封装 M2/M4 使用的 4 条 FreeRTOS 静态队列：
  *   - link_rx：  ISR/驱动 -> link_rx_task，存放从 UART 接收到的帧块指针。
  *   - mesh_rx：  link_rx_task -> mesh_ctrl_task，存放待进入 mesh 层的帧块指针。
+ *   - service_rx：mesh_ctrl_task -> service_task，存放本机 DATA_MINI9P 请求。
+ *   - ctrl_tx：  mesh 控制面 -> link_tx_task，高优先级发送队列。
  *   - link_tx：  上层 -> link_tx_task，存放待发送的帧块指针。
  *
  * 设计要点
@@ -43,6 +45,8 @@ extern "C" {
  */
 #define PWOS_LINK_RX_QUEUE_LEN 16u
 #define PWOS_MESH_RX_QUEUE_LEN 16u
+#define PWOS_SERVICE_RX_QUEUE_LEN 8u
+#define PWOS_CTRL_TX_QUEUE_LEN 16u
 #define PWOS_LINK_TX_QUEUE_LEN 16u
 
 /*
@@ -99,6 +103,30 @@ BaseType_t pwos_mesh_rx_send(pwos_frame_block_t *block, TickType_t timeout_ticks
 BaseType_t pwos_mesh_rx_receive(pwos_frame_block_t **block, TickType_t timeout_ticks);
 
 /*
+ * 向 service 队列发送本机数据面请求。
+ *
+ * 调用上下文：mesh_ctrl_task。成功后 block 所有权转移给 service_task。
+ */
+BaseType_t pwos_service_rx_send(pwos_frame_block_t *block, TickType_t timeout_ticks);
+
+/*
+ * service_task 从 service 队列接收本机数据面请求。
+ */
+BaseType_t pwos_service_rx_receive(pwos_frame_block_t **block, TickType_t timeout_ticks);
+
+/*
+ * 向控制面高优先级 TX 队列发送帧块指针。
+ *
+ * 调用上下文：任务。成功后 block 所有权转移给 link_tx_task。
+ */
+BaseType_t pwos_ctrl_tx_send(pwos_frame_block_t *block, TickType_t timeout_ticks);
+
+/*
+ * link_tx_task 从控制面高优先级 TX 队列接收帧块指针。
+ */
+BaseType_t pwos_ctrl_tx_receive(pwos_frame_block_t **block, TickType_t timeout_ticks);
+
+/*
  * 向 link_tx 队列发送帧块指针。
  *
  * 调用上下文：任务。成功后 block 所有权转移给 link_tx_task。
@@ -125,6 +153,8 @@ BaseType_t pwos_link_tx_receive(pwos_frame_block_t **block, TickType_t timeout_t
  */
 UBaseType_t pwos_link_rx_depth(void);
 UBaseType_t pwos_mesh_rx_depth(void);
+UBaseType_t pwos_service_rx_depth(void);
+UBaseType_t pwos_ctrl_tx_depth(void);
 UBaseType_t pwos_link_tx_depth(void);
 
 /*
@@ -136,6 +166,8 @@ UBaseType_t pwos_link_tx_depth(void);
  */
 uint32_t pwos_link_rx_drop_count(void);
 uint32_t pwos_mesh_rx_drop_count(void);
+uint32_t pwos_service_rx_drop_count(void);
+uint32_t pwos_ctrl_tx_drop_count(void);
 uint32_t pwos_link_tx_drop_count(void);
 
 #ifdef __cplusplus

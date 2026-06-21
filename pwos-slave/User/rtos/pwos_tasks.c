@@ -1,7 +1,7 @@
 /*
- * pwos_tasks.c - PWOS M2 任务集实现
+ * pwos_tasks.c - PWOS RTOS 任务集实现
  *
- * 本文件实现 M2 的 8 个固定任务及其创建、状态收集逻辑。
+ * 本文件实现 PWOS 固定任务及其创建、状态收集逻辑。
  *
  * 任务职责与数据流
  * ----------------
@@ -17,7 +17,7 @@
  *   pwos_mesh_rx_send() ──► mesh_ctrl_task
  *        │
  *        ▼
- *   业务处理 / M2 mock 直接释放
+ *   node_control 控制面/中继，或 service_task 处理本机 DATA_MINI9P
  *
  *   上层发送路径：
  *   pwos_link_tx_send() ──► link_tx_task ──► pwos_uart_dma_send()
@@ -42,8 +42,10 @@
 #include "task.h"
 
 #include "frame_pool.h"
+#include "node_control.h"
 #include "port_manager.h"
 #include "pwos_queues.h"
+#include "service_runtime.h"
 #include "uart_dma_port.h"
 
 /*
@@ -207,7 +209,8 @@ static void link_rx_task(void *argument)
  * 链路发送任务。
  *
  * 职责：
- *   - 从 link_tx 队列等待待发送帧块。
+ *   - 优先从 ctrl_tx 队列发送控制面帧。
+ *   - ctrl_tx 为空时再从 link_tx 队列等待普通数据面帧。
  *   - 调用 UART DMA 发送。
  *   - 发送完成后释放帧块（目前不等待发送完成，调用后立刻释放）。
  */
@@ -218,7 +221,11 @@ static void link_tx_task(void *argument)
     for (;;) {
         pwos_frame_block_t *block = NULL;
 
-        if (pwos_link_tx_receive(&block, pdMS_TO_TICKS(100u)) == pdPASS) {
+        if (pwos_ctrl_tx_receive(&block, 0u) != pdPASS) {
+            (void)pwos_link_tx_receive(&block, pdMS_TO_TICKS(100u));
+        }
+
+        if (block != NULL) {
             /*
              * TX 队列拥有完整 link frame，发送完成或失败后归还块。
              * 这里忽略返回值，实际可靠性由 UART DMA 层保证或后续增强。
@@ -248,6 +255,7 @@ static void port_mgr_task(void *argument)
          * port_manager 拥有端口发现 FSM；UART RX 恢复由 uart_rx_task 处理。
          */
         pwos_port_manager_tick();
+        pwos_node_control_tick();
         note_heartbeat(PWOS_TASK_PORT_MGR);
         vTaskDelay(pdMS_TO_TICKS(100u));
     }
@@ -257,11 +265,9 @@ static void port_mgr_task(void *argument)
  * Mesh 控制任务。
  *
  * 职责：
- *   - 从 mesh_rx 队列接收需要进入 mesh 控制面或数据面的帧。
- *
- * M2 mock 实现：
- *   - 当前仅释放帧块，用于验证任何 UART 噪声/坏帧不会进入业务层或卡住任务。
- *   - M4 及后续平台会在这里按帧 type 分发控制面和数据面。
+ *   - 从 mesh_rx 队列接收链路层已解码的帧。
+ *   - 控制面和需要中继的数据面交给 node_control。
+ *   - 本机 DATA_MINI9P 请求转入 service_rx，由 service_task 串行处理。
  */
 static void mesh_ctrl_task(void *argument)
 {
@@ -272,10 +278,18 @@ static void mesh_ctrl_task(void *argument)
 
         if (pwos_mesh_rx_receive(&block, pdMS_TO_TICKS(100u)) == pdPASS) {
             /*
-             * M2 mock：只证明任意 UART 噪声/坏帧不会进入业务层或卡住任务。
-             * M4 会在这里按 type 分发控制面和数据面。
+             * 控制面和中继数据面先由 node_control 处理。
+             * node_control 返回 0 时，说明这是本机 service 层关心的数据面帧。
              */
-            pwos_frame_pool_free(block);
+            if (pwos_node_control_handle_rx(block) != 0) {
+                pwos_frame_pool_free(block);
+            } else if (pwos_service_runtime_accepts(block) != 0) {
+                if (pwos_service_rx_send(block, 0u) != pdPASS) {
+                    pwos_frame_pool_free(block);
+                }
+            } else {
+                pwos_frame_pool_free(block);
+            }
         }
 
         note_heartbeat(PWOS_TASK_MESH_CTRL);
@@ -283,17 +297,24 @@ static void mesh_ctrl_task(void *argument)
 }
 
 /*
- * 系统服务任务（占位）。
+ * 系统服务任务。
  *
- * 当前仅用于保持心跳，后续可加入看门狗喂狗、低功耗管理等功能。
+ * 当前 M5 第一阶段处理本机 DATA_MINI9P 请求，把 mini9P 请求落到 local_vfs，
+ * 并通过 node_control 按路由把响应发回请求源。
  */
 static void service_task(void *argument)
 {
     (void)argument;
 
     for (;;) {
+        pwos_frame_block_t *block = NULL;
+
+        if (pwos_service_rx_receive(&block, pdMS_TO_TICKS(100u)) == pdPASS) {
+            pwos_service_runtime_process(block);
+            pwos_frame_pool_free(block);
+        }
+
         note_heartbeat(PWOS_TASK_SERVICE);
-        vTaskDelay(pdMS_TO_TICKS(100u));
     }
 }
 
@@ -332,7 +353,17 @@ static void diag_task(void *argument)
         (void)pwos_frame_pool_free_count();
         (void)pwos_link_rx_depth();
         (void)pwos_mesh_rx_depth();
+        (void)pwos_service_rx_depth();
+        (void)pwos_ctrl_tx_depth();
         (void)pwos_link_tx_depth();
+        {
+            pwos_node_control_snapshot_t node;
+            pwos_node_control_get_snapshot(&node);
+        }
+        {
+            pwos_service_runtime_stats_t service;
+            pwos_service_runtime_get_stats(&service);
+        }
         note_heartbeat(PWOS_TASK_DIAG);
         vTaskDelay(pdMS_TO_TICKS(1000u));
     }

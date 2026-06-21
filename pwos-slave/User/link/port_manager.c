@@ -14,8 +14,6 @@
 #define PWOS_PORT_HELLO_PAYLOAD_LEN 24u
 #define PWOS_PORT_HELLO_INTERVAL_MS 500u
 #define PWOS_PORT_SUSPECT_MS 2000u
-#define PWOS_PORT_CAP_RELAY 0x02u
-#define PWOS_PORT_CAP_COORDINATOR 0x01u
 
 typedef struct {
     uint8_t initialized;
@@ -41,6 +39,8 @@ static size_t g_port_count;
 static uint32_t g_local_uid[3];
 static uint32_t g_local_boot_id;
 static uint16_t g_next_seq;
+static uint8_t g_mesh_assigned;
+static uint8_t g_local_addr;
 
 static void put_le32(uint8_t *dst, uint32_t value)
 {
@@ -72,11 +72,18 @@ static pwos_port_runtime_t *find_port(uint8_t port_id)
 
 static void encode_hello_payload(uint8_t local_port_id, uint8_t *payload)
 {
+    uint8_t caps;
+
+    caps = PWOS_PORT_CAP_RELAY;
+    if (g_mesh_assigned != 0u) {
+        caps |= PWOS_PORT_CAP_UPSTREAM_REACHABLE;
+    }
+
     memset(payload, 0, PWOS_PORT_HELLO_PAYLOAD_LEN);
     payload[0] = PWOS_PORT_HELLO_PAYLOAD_VERSION;
     payload[1] = (uint8_t)PWOS_PORT_PEER_NODE;
     payload[2] = local_port_id;
-    payload[3] = PWOS_PORT_CAP_RELAY;
+    payload[3] = caps;
     put_le32(payload + 4u, g_local_boot_id);
     put_le32(payload + 8u, g_local_uid[0]);
     put_le32(payload + 12u, g_local_uid[1]);
@@ -154,7 +161,7 @@ static int send_link_hello(uint8_t port_id, uint8_t frame_type)
     block->port_id = port_id;
     block->len = (uint16_t)frame_len;
     block->timestamp_ms = (uint32_t)xTaskGetTickCount();
-    if (pwos_link_tx_send(block, 0u) != pdPASS) {
+    if (pwos_ctrl_tx_send(block, 0u) != pdPASS) {
         pwos_frame_pool_free(block);
         return -1;
     }
@@ -201,6 +208,8 @@ void pwos_port_manager_init(void)
     g_local_uid[2] = HAL_GetUIDw2();
     g_local_boot_id = g_local_uid[0] ^ g_local_uid[1] ^ g_local_uid[2] ^ 0x504F5753u;
     g_next_seq = 0u;
+    g_mesh_assigned = 0u;
+    g_local_addr = PWOS_LINK_ADDR_UNASSIGNED;
 
     count = pwos_uart_dma_port_count();
     if (count > (sizeof(g_ports) / sizeof(g_ports[0]))) {
@@ -298,6 +307,84 @@ int pwos_port_manager_handle_rx(pwos_frame_block_t *block)
     }
 
     return 1;
+}
+
+int pwos_port_manager_select_upstream(uint8_t *out_port_id)
+{
+    size_t i;
+
+    if (out_port_id == NULL) {
+        return -1;
+    }
+
+    taskENTER_CRITICAL();
+    for (i = 0u; i < g_port_count; ++i) {
+        if (g_ports[i].initialized != 0u &&
+            g_ports[i].state == PWOS_PORT_UPSTREAM) {
+            *out_port_id = g_ports[i].id;
+            taskEXIT_CRITICAL();
+            return 0;
+        }
+    }
+    for (i = 0u; i < g_port_count; ++i) {
+        if (g_ports[i].initialized != 0u &&
+            g_ports[i].state == PWOS_PORT_HOST_CANDIDATE) {
+            *out_port_id = g_ports[i].id;
+            taskEXIT_CRITICAL();
+            return 0;
+        }
+    }
+    for (i = 0u; i < g_port_count; ++i) {
+        if (g_ports[i].initialized != 0u &&
+            g_ports[i].state == PWOS_PORT_PEER &&
+            (g_ports[i].peer_caps & PWOS_PORT_CAP_UPSTREAM_REACHABLE) != 0u) {
+            *out_port_id = g_ports[i].id;
+            taskEXIT_CRITICAL();
+            return 0;
+        }
+    }
+    taskEXIT_CRITICAL();
+    return -1;
+}
+
+void pwos_port_manager_mark_upstream(uint8_t port_id)
+{
+    size_t i;
+
+    taskENTER_CRITICAL();
+    for (i = 0u; i < g_port_count; ++i) {
+        if (g_ports[i].initialized == 0u) {
+            continue;
+        }
+        if (g_ports[i].id == port_id) {
+            g_ports[i].state = PWOS_PORT_UPSTREAM;
+        } else if (g_ports[i].state == PWOS_PORT_UPSTREAM) {
+            g_ports[i].state = PWOS_PORT_PEER;
+        }
+    }
+    taskEXIT_CRITICAL();
+}
+
+void pwos_port_manager_set_mesh_assigned(uint8_t assigned, uint8_t local_addr)
+{
+    size_t i;
+
+    taskENTER_CRITICAL();
+    g_mesh_assigned = assigned != 0u ? 1u : 0u;
+    g_local_addr = assigned != 0u ? local_addr : PWOS_LINK_ADDR_UNASSIGNED;
+
+    /*
+     * mesh 地址状态改变后，HELLO capability 也会改变。
+     * 清 last_tx_tick 让下一次 port_manager_tick 立即广播新能力，避免下游长时间
+     * 看不到 UPSTREAM_REACHABLE。
+     */
+    for (i = 0u; i < g_port_count; ++i) {
+        if (g_ports[i].initialized != 0u) {
+            g_ports[i].last_tx_tick = 0u;
+        }
+    }
+    (void)g_local_addr;
+    taskEXIT_CRITICAL();
 }
 
 size_t pwos_port_manager_get_snapshot(

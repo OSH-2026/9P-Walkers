@@ -26,9 +26,11 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "frame_pool.h"
+#include "node_control.h"
 #include "port_manager.h"
 #include "pwos_queues.h"
 #include "pwos_tasks.h"
+#include "service_runtime.h"
 #include "uart_dma_port.h"
 
 /* USER CODE END Includes */
@@ -81,6 +83,10 @@ void MX_FREERTOS_Init(void) {
     Error_Handler();
   }
   pwos_port_manager_init();
+  pwos_node_control_init();
+  if (pwos_service_runtime_init() != 0) {
+    Error_Handler();
+  }
 
   /* USER CODE END Init */
 

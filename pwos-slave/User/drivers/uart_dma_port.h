@@ -26,6 +26,13 @@ typedef struct {
     uint8_t id;
     uint8_t dma_running;
     uint16_t last_pos;
+    /*
+     * RX 事件诊断：用于区分“UART 没收到事件”和“收到字节但 parser 没成帧”。
+     * rx_last_event_type 取 HAL_UART_RXEVENT_*，当前 HAL 中 0=TC，1=HT，2=IDLE。
+     */
+    uint32_t rx_events;
+    uint16_t rx_last_event_size;
+    uint32_t rx_last_event_type;
     uint32_t rx_bytes;
     uint32_t rx_frames;
     uint32_t rx_parse_errors;
@@ -41,6 +48,13 @@ typedef struct {
     uint32_t tx_timeouts;
     uint8_t tx_busy;
     uint32_t hal_errors;
+    /* 最近一次 HAL/UART 状态快照，主要用于现场 GDB 定位噪声、溢出和重启失败。 */
+    uint32_t hal_last_status;
+    uint32_t uart_last_sr;
+    uint32_t uart_last_cr1;
+    uint32_t uart_last_cr3;
+    uint32_t uart_last_rx_state;
+    uint32_t uart_last_g_state;
     uint32_t dma_restarts;
 } pwos_uart_dma_port_stats_t;
 

@@ -4,15 +4,12 @@
 #include "esp_chip_info.h"
 #include "esp_flash.h"
 #include "esp_heap_caps.h"
-#include "esp_system.h"
-#include "http_server.h"
-#include "lua_port.h"
-#include "mesh_host_service.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "pwos_coordinator_runtime.h"
 #include "sdkconfig.h"
-#include "shell.h"
-#include "lan_init.h"
 
-// 打印系统初始信息
+/* 打印系统初始信息，方便串口日志确认当前烧录的是 coordinator 固件。 */
 static void print_chip_banner(void)
 {
     esp_chip_info_t chip_info;
@@ -32,34 +29,17 @@ static void print_chip_banner(void)
 
 void app_main(void)
 {
-    /* stdout 无缓冲确保 printf 立即输出到 UART；stdin 保留默认行缓冲
-     * 使 fgets 在 UART 无数据时阻塞等待，避免 shell prompt 无限循环。 */
+    /* stdout 无缓冲，确保启动日志立即出现在 USB Serial/JTAG console。 */
     setvbuf(stdout, NULL, _IONBF, 0);
 
     print_chip_banner();
 
-    /*
-     * 启动 mesh host service：一次性完成 cluster、UART transport 和 runtime 初始化，
-     * 并创建后台 FreeRTOS 任务持续处理 REGISTER / LINK_STATE / MINI9P mesh 帧。
-     * 节点上线后 REGISTER 帧会自动触发 VFS 注册，无需手动添加静态节点。
-     */
-    if (mesh_host_service_start_default_task() != 0) {
-        puts("fatal: mesh host runtime init failed");
+    if (pwos_coordinator_runtime_start_default() != 0) {
+        puts("fatal: pwos coordinator runtime init failed");
         return;
     }
 
-    if (!pw_lua_init()) {
-        puts("fatal: Lua init failed");
-        return;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
-
-    /* Bring up Ethernet (internal EMAC + RMII PHY). The board expects to be
-     * plugged into a router and receives its WebShell IP through DHCP. */
-    lan_init();
-
-    /* Start HTTP + WebSocket server (port 80). */
-    web_server_start();
-
-    shell_run_boot_demo();
-    shell_start();
 }

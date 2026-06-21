@@ -52,6 +52,12 @@ void MX_SDIO_SD_Init(void)
   }
   g_sdio_ready = 1;
   return;
+#else
+  /*
+   * 当前 M4 控制面不依赖 SD 卡。没有显式启用 mini9P 串行文件系统时，
+   * SDIO 作为可选外设处理，避免无卡或板级差异导致启动进入 Error_Handler。
+   */
+  return;
 #endif
 
   /* USER CODE END SDIO_Init 0 */

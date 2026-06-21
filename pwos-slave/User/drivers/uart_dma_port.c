@@ -42,6 +42,26 @@ static pwos_uart_dma_port_t g_ports[PWOS_UART_DMA_PORT_COUNT] = {
     { .desc = { .id = 4u, .name = "USART6", .huart = &huart6 }, .rx_buffer = g_uart_dma_rx_buffers[4] },
 };
 
+static void snapshot_uart_state(pwos_uart_dma_port_t *port)
+{
+    UART_HandleTypeDef *huart;
+
+    if (port == NULL || port->desc.huart == NULL || port->desc.huart->Instance == NULL) {
+        return;
+    }
+
+    /*
+     * 只读取寄存器，不读 DR；避免诊断代码误清 RXNE/IDLE/错误标志。
+     * 真正清标志仍交给 HAL IRQ 和 error 恢复路径。
+     */
+    huart = port->desc.huart;
+    port->stats.uart_last_sr = huart->Instance->SR;
+    port->stats.uart_last_cr1 = huart->Instance->CR1;
+    port->stats.uart_last_cr3 = huart->Instance->CR3;
+    port->stats.uart_last_rx_state = (uint32_t)huart->RxState;
+    port->stats.uart_last_g_state = (uint32_t)huart->gState;
+}
+
 static pwos_uart_dma_port_t *find_port_by_huart(UART_HandleTypeDef *huart)
 {
     size_t i;
@@ -91,6 +111,8 @@ static HAL_StatusTypeDef start_port_dma(pwos_uart_dma_port_t *port, uint8_t rese
         port->desc.huart,
         port->rx_buffer,
         (uint16_t)PWOS_UART_DMA_RX_BUFFER_SIZE);
+    port->stats.hal_last_status = (uint32_t)status;
+    snapshot_uart_state(port);
     if (status == HAL_OK) {
         /*
          * RX 使用 DMA_NORMAL + ReceiveToIdle。HT 对本协议没有价值，TC 保留用于
@@ -253,6 +275,10 @@ void pwos_uart_dma_rx_event_from_isr(UART_HandleTypeDef *huart, uint16_t size)
 
     port->dma_running = 1u;
     event_type = HAL_UARTEx_GetRxEventType(huart);
+    ++port->stats.rx_events;
+    port->stats.rx_last_event_size = size;
+    port->stats.rx_last_event_type = (uint32_t)event_type;
+    snapshot_uart_state(port);
 
     if (size > PWOS_UART_DMA_RX_BUFFER_SIZE) {
         size = (uint16_t)PWOS_UART_DMA_RX_BUFFER_SIZE;
@@ -290,6 +316,7 @@ void pwos_uart_dma_error_from_isr(UART_HandleTypeDef *huart)
     ++port->stats.hal_errors;
     ++port->stats.uart_errors;
     port->stats.uart_last_error = huart->ErrorCode;
+    snapshot_uart_state(port);
     port->dma_running = 0u;
     port->restart_pending = 1u;
     port->last_pos = 0u;

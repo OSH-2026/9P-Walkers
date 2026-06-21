@@ -1,5 +1,3 @@
 ## IDF Component Manager Manifest File
 dependencies:
   idf: ">=5.0"
-  ## mDNS responder — announces http://pwos.local on the LAN (see web/lan_init.c)
-  espressif/mdns: "^1.2"

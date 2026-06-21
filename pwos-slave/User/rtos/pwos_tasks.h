@@ -11,8 +11,8 @@
  *   - link_rx：   从 UART DMA 接收链路帧，交给 port_manager 或 mesh 控制面。
  *   - link_tx：   从发送队列取帧，通过 UART DMA 发出。
  *   - port_mgr：  维护端口发现状态机，定期 poll UART 恢复。
- *   - mesh_ctrl： 处理 mesh 控制面和数据面帧（M2 当前为 mock）。
- *   - service：   系统服务占位任务。
+ *   - mesh_ctrl： 处理 mesh 控制面和中继数据面帧。
+ *   - service：   串行处理本机 DATA_MINI9P 请求。
  *   - app：       应用层任务，周期最慢。
  *   - diag：      诊断任务，定期读取队列深度、帧池余量等。
  *
