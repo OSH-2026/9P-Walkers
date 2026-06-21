@@ -47,6 +47,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     User/bsp/bsp_sdram.c
     User/bsp/bsp_lcd.c
+    User/bsp/display_sync.c
     User/gfx/gfx.c
     User/app/cube_demo.c
 )

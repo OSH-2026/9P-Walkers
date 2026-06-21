@@ -2,22 +2,20 @@
  * @file gfx.h
  * @brief RGB565 graphics API for the STM32F429I-DISCO LCD.
  *
- * Operates directly on the LTDC framebuffer in external SDRAM (0xD0000000).
  * Resolution is 240x320 (portrait), pixel format RGB565 (2 bytes/pixel).
+ * Two framebuffers live in external SDRAM (FB_A @ 0xD0000000, FB_B @
+ * 0xD0025800). The LTDC scans out one ("front") while the CPU draws into the
+ * other ("back"). gfx_present() + gfx_wait_vsync() swap them at the LTDC
+ * vertical blanking, so partial frames never reach the panel (no tearing).
  *
- * The API is the "interface for drawing arbitrary images" the user asked for:
- *   - gfx_init()                 : bind framebuffer, clear screen
- *   - gfx_clear(color)           : fill whole screen
- *   - gfx_put_pixel(x,y,c)       : single pixel
- *   - gfx_fill_rect(x,y,w,h,c)   : filled rectangle (the main blit primitive)
- *   - gfx_draw_rect(x,y,w,h,c)   : rectangle outline
- *   - gfx_draw_line(x0,y0,x1,y1,c) : Bresenham line
- *   - gfx_draw_line_wide(...,thick,c) : thick line (used by cube wireframe)
- *   - gfx_fill_triangle(...)     : flat-split triangle rasterizer
- *   - gfx_blit_rgb565(...)       : blit an external RGB565 buffer (arbitrary image)
- *   - gfx_blit_argb8888(...)     : blit an external ARGB8888 buffer w/ alpha blend
- *   - gfx_color_rgb565(r,g,b)    : 24-bit -> RGB565
- *   - gfx_swap_buffers()         : double-buffer commit (layer 1 <-> layer 2)
+ * Typical frame loop:
+ *   gfx_init();
+ *   for (;;) {
+ *       gfx_clear(GFX_BLACK);
+ *       ... draw into back buffer via gfx_put_pixel / gfx_fill_rect / etc ...
+ *       gfx_present();        // hand back buffer to LTDC at next VSYNC
+ *       gfx_wait_vsync();     // block until swap done; back buffer now flips
+ *   }
  *
  * Coordinate system: (0,0) at top-left, x grows right, y grows down.
  * Bounds-checked; out-of-range draws are silently clipped.
@@ -37,6 +35,11 @@ extern "C" {
 #define GFX_LCD_HEIGHT    320
 #define GFX_FB_PIXELS     (GFX_LCD_WIDTH * GFX_LCD_HEIGHT)
 #define GFX_FB_BYTES      (GFX_FB_PIXELS * 2)
+
+/* Two framebuffers in SDRAM. FB_A matches the CubeMX LTDC layer 0 start
+ * address; FB_B is the second buffer. Each is 150 KB. */
+#define GFX_FB_A_ADDR     0xD0000000UL
+#define GFX_FB_B_ADDR     (GFX_FB_A_ADDR + GFX_FB_BYTES)
 
 typedef uint16_t gfx_color_t;  /* RGB565 */
 
@@ -64,13 +67,29 @@ static inline gfx_color_t gfx_color_rgb565(uint8_t r, uint8_t g, uint8_t b)
 #define GFX_DARKBLUE    ((gfx_color_t)GFX_RGB565(  0,   0,  64))
 
 /**
- * Bind the active framebuffer and clear it to black.
- * Call after BSP_SDRAM_Init() and before any draw call.
+ * Initialize both framebuffers (clear to black) and arm the LTDC line event
+ * for VSYNC-synchronized swapping. Call after BSP_SDRAM_Init(),
+ * BSP_LCD_Init(), and the LTDC is already running.
  */
 void gfx_init(void);
 
-/** Pointer to the currently-active drawing surface (RGB565, GFX_LCD_WIDTH*height). */
+/** Pointer to the back buffer (the surface you draw into). */
 uint16_t *gfx_framebuffer(void);
+
+/**
+ * Hand the current back buffer to the LTDC. The actual address swap happens
+ * at the next vertical blanking (inside the LTDC line-event ISR), so the
+ * panel never shows a half-drawn frame.
+ */
+void gfx_present(void);
+
+/**
+ * Block until the LTDC finishes the current frame and the buffer swap
+ * completes. After this returns, gfx_framebuffer() points to the OTHER
+ * buffer (the one the LTDC just stopped showing), which is now safe to
+ * overwrite for the next frame.
+ */
+void gfx_wait_vsync(void);
 
 /** Clear the whole screen to a single color. */
 void gfx_clear(gfx_color_t color);

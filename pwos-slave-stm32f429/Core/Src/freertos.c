@@ -59,7 +59,6 @@ osThreadId defaultTaskHandle;
 
 void StartDefaultTask(void const * argument);
 
-extern void MX_USB_HOST_Init(void);
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
 /* GetIdleTaskMemory prototype (linked to static allocation support) */
@@ -169,21 +168,21 @@ void MX_FREERTOS_Init(void) {
 /* USER CODE END Header_StartDefaultTask */
 void StartDefaultTask(void const * argument)
 {
-  /* init code for USB_HOST */
-  MX_USB_HOST_Init();
   /* USER CODE BEGIN StartDefaultTask */
   /* Bring up the display stack: SDRAM -> ILI9341 -> graphics -> demo.
    * All three init steps must complete before any framebuffer write. */
   BSP_SDRAM_Init();   /* Initialize the IS42S16400J SDRAM chip (FMC already configured by CubeMX). */
   BSP_LCD_Init();     /* Power up the ILI9341 via SPI5 and switch it to RGB-interface mode. */
-  gfx_init();         /* Bind the LTDC framebuffer in SDRAM and clear it. */
+  gfx_init();         /* Clear both framebuffers and arm VSYNC-synchronized swapping. */
 
-  /* Demo loop: ~20 FPS. Render is synchronous; the LTDC scans out the
-   * framebuffer in the background from SDRAM, so we just keep redrawing. */
+  /* Demo loop: render to back buffer, present at next VSYNC, wait for swap.
+   * The LTDC scans the front buffer continuously; we never touch it, so
+   * the panel shows complete frames only (no tearing). */
   for(;;)
   {
     cube_demo_step();
-    osDelay(50);   /* 20 FPS target; render time eats into this. */
+    gfx_present();
+    gfx_wait_vsync();
   }
   /* USER CODE END StartDefaultTask */
 }

@@ -20,13 +20,14 @@
 #include "main.h"
 #include "cmsis_os.h"
 #include "crc.h"
+#include "dma.h"
 #include "dma2d.h"
 #include "i2c.h"
 #include "ltdc.h"
 #include "spi.h"
 #include "tim.h"
 #include "usart.h"
-#include "usb_host.h"
+#include "usb_otg.h"
 #include "gpio.h"
 #include "fmc.h"
 
@@ -97,6 +98,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_CRC_Init();
   MX_DMA2D_Init();
   MX_FMC_Init();
@@ -105,6 +107,8 @@ int main(void)
   MX_SPI5_Init();
   MX_TIM1_Init();
   MX_USART1_UART_Init();
+  MX_UART5_Init();
+  MX_USB_OTG_HS_HCD_Init();
   /* USER CODE BEGIN 2 */
 
   /* USER CODE END 2 */

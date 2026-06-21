@@ -2,33 +2,57 @@
  * @file gfx.c
  * @brief RGB565 framebuffer graphics primitives for the STM32F429I-DISCO.
  *
- * The framebuffer lives in SDRAM at 0xD0000000 (LTDC layer 1). Drawing is
- * plain CPU writes (no DMA2D dependency for the core primitives); gfx_blit
- * variants could be accelerated later if needed.
+ * Double-buffered: two framebuffers in SDRAM (FB_A, FB_B). All draw calls
+ * target the back buffer; gfx_present() + gfx_wait_vsync() swap front/back
+ * at the LTDC vertical blanking via display_sync.
  */
 #include "gfx.h"
 #include "bsp_sdram.h"
+#include "display_sync.h"
 #include <string.h>
 
-static volatile uint16_t *g_fb = (volatile uint16_t *)BSP_SDRAM_BASE_ADDR;
+static volatile uint16_t *const FB_A =
+    (volatile uint16_t *)GFX_FB_A_ADDR;
+static volatile uint16_t *const FB_B =
+    (volatile uint16_t *)GFX_FB_B_ADDR;
+
+/* LTDC starts scanning FB_A (CubeMX layer 0 config), so the CPU draws into
+ * FB_B first. After each gfx_wait_vsync(), g_back flips to the buffer the
+ * LTDC just released. */
+static volatile uint16_t *g_back = FB_B;
 
 void gfx_init(void)
 {
-    g_fb = (volatile uint16_t *)BSP_SDRAM_BASE_ADDR;
-    gfx_clear(GFX_BLACK);
+    /* Clear both buffers so neither shows garbage on the first swap. */
+    volatile uint32_t *p32a = (volatile uint32_t *)FB_A;
+    volatile uint32_t *p32b = (volatile uint32_t *)FB_B;
+    for (int i = 0; i < GFX_FB_PIXELS / 2; i++) { p32a[i] = 0; p32b[i] = 0; }
+    g_back = FB_B;
+    display_sync_init((uint32_t)FB_A);   /* LTDC is already showing FB_A */
 }
 
 uint16_t *gfx_framebuffer(void)
 {
-    return (uint16_t *)g_fb;
+    return (uint16_t *)g_back;
+}
+
+void gfx_present(void)
+{
+    display_sync_request((uint32_t)g_back);
+}
+
+void gfx_wait_vsync(void)
+{
+    display_sync_wait();
+    /* The LTDC has now taken over the buffer we just presented. The other
+     * one is free for the next frame. */
+    g_back = (g_back == FB_A) ? FB_B : FB_A;
 }
 
 void gfx_clear(gfx_color_t color)
 {
-    /* Word-fill the framebuffer. We treat it as uint32_t to halve the loop
-     * count: RGB565 pairs into 32 bits naturally on little-endian. */
     uint32_t packed = ((uint32_t)color << 16) | (uint32_t)color;
-    volatile uint32_t *p32 = (volatile uint32_t *)g_fb;
+    volatile uint32_t *p32 = (volatile uint32_t *)g_back;
     for (int i = 0; i < GFX_FB_PIXELS / 2; i++) {
         p32[i] = packed;
     }
@@ -36,7 +60,7 @@ void gfx_clear(gfx_color_t color)
 
 static inline void put_pixel_unchecked(int x, int y, gfx_color_t color)
 {
-    g_fb[y * GFX_LCD_WIDTH + x] = color;
+    g_back[y * GFX_LCD_WIDTH + x] = color;
 }
 
 void gfx_put_pixel(int x, int y, gfx_color_t color)
@@ -48,7 +72,6 @@ void gfx_put_pixel(int x, int y, gfx_color_t color)
 void gfx_fill_rect(int x, int y, int w, int h, gfx_color_t color)
 {
     if (w <= 0 || h <= 0) return;
-    /* Clip to screen bounds. */
     int x0 = x, y0 = y;
     int x1 = x + w - 1, y1 = y + h - 1;
     if (x0 < 0) x0 = 0;
@@ -58,7 +81,7 @@ void gfx_fill_rect(int x, int y, int w, int h, gfx_color_t color)
     if (x0 > x1 || y0 > y1)   return;
 
     for (int yy = y0; yy <= y1; yy++) {
-        volatile uint16_t *row = &g_fb[yy * GFX_LCD_WIDTH + x0];
+        volatile uint16_t *row = &g_back[yy * GFX_LCD_WIDTH + x0];
         /* Manual fill so the compiler can use 16-bit stores efficiently. */
         int ww = x1 - x0 + 1;
         for (int xx = 0; xx < ww; xx++) {
@@ -157,7 +180,7 @@ void gfx_fill_triangle(int x0, int y0, int x1, int y1, int x2, int y2, gfx_color
         if (xa > xb) { int t = xa; xa = xb; xb = t; }
         if (xa < 0) xa = 0;
         if (xb >= GFX_LCD_WIDTH) xb = GFX_LCD_WIDTH - 1;
-        volatile uint16_t *row = &g_fb[y * GFX_LCD_WIDTH + xa];
+        volatile uint16_t *row = &g_back[y * GFX_LCD_WIDTH + xa];
         for (int x = xa; x <= xb; x++) {
             *row++ = color;
         }
@@ -174,7 +197,7 @@ void gfx_blend_pixel(int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_t a)
     }
     /* Source premultiplied by alpha, destination by (255 - alpha), in RGB565
      * space. Convert dst to 8-bit, blend, re-quantize. */
-    uint16_t dst = g_fb[y * GFX_LCD_WIDTH + x];
+    uint16_t dst = g_back[y * GFX_LCD_WIDTH + x];
     uint8_t dr = (dst >> 11) & 0x1F; dr = (dr << 3) | (dr >> 2);
     uint8_t dg = (dst >>  5) & 0x3F; dg = (dg << 2) | (dg >> 4);
     uint8_t db = (dst      ) & 0x1F; db = (db << 3) | (db >> 2);
@@ -194,7 +217,7 @@ void gfx_blit_rgb565(const uint16_t *src, int x, int y, int w, int h, int src_st
         for (int i = 0; i < w; i++) {
             int dx = x + i;
             if (dx < 0 || dx >= GFX_LCD_WIDTH) continue;
-            g_fb[dy * GFX_LCD_WIDTH + dx] = src[j * src_stride + i];
+            g_back[dy * GFX_LCD_WIDTH + dx] = src[j * src_stride + i];
         }
     }
 }
