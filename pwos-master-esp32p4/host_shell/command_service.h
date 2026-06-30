@@ -67,6 +67,15 @@ typedef int (*pwos_command_job_fn)(
     size_t *out_len,
     uint32_t deadline_ms);
 
+typedef int (*pwos_command_llm_fn)(
+    void *ctx,
+    const char *hostname,   /* NULL = 本地 */
+    const char *prompt,     /* NULL 时读 status/result */
+    uint8_t *output,
+    size_t output_cap,
+    size_t *out_len,
+    uint32_t deadline_ms);
+
 typedef struct {
     void *io_ctx;
     pwos_command_read_fn read_path;
@@ -75,6 +84,7 @@ typedef struct {
     pwos_command_stat_fn stat;
     pwos_command_rpc_fn rpc;
     pwos_command_job_fn job;
+    pwos_command_llm_fn llm;
     uint32_t default_deadline_ms;
 } pwos_command_service_config_t;
 

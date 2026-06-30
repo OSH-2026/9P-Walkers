@@ -246,6 +246,40 @@ static int shell_job(
         args, output, output_cap, out_len, deadline_ms);
 }
 
+/*
+ * shell_llm — llm 命令的后端。
+ * prompt != NULL → 提交 prompt 触发推理
+ * prompt == NULL → 读取 status 或 result（由 args 决定，但这里简化为总返回 result）
+ */
+static int shell_llm(
+    void *ctx,
+    const char *hostname,
+    const char *prompt,
+    uint8_t *output,
+    size_t output_cap,
+    size_t *out_len,
+    uint32_t deadline_ms)
+{
+    (void)ctx;
+    if (prompt != NULL) {
+        /* 提交 prompt */
+        int rc = pwos_host_rpc_runtime_llm_submit(
+            hostname, prompt, deadline_ms);
+        if (rc != 0) return rc;
+        *out_len = 0u;
+        return 0;
+    }
+    /* prompt == NULL → 读取结果 */
+    {
+        uint16_t len = (uint16_t)(output_cap > 65535u ? 65535u : output_cap);
+        int rc = pwos_host_rpc_runtime_llm_result(
+            hostname, output, &len, deadline_ms);
+        if (rc != 0) return rc;
+        *out_len = len;
+        return 0;
+    }
+}
+
 int pwos_host_shell_runtime_build_config(
     pwos_command_service_config_t *out_config)
 {
@@ -259,6 +293,7 @@ int pwos_host_shell_runtime_build_config(
     out_config->stat = shell_stat;
     out_config->rpc = shell_rpc;
     out_config->job = shell_job;
+    out_config->llm = shell_llm;
     out_config->default_deadline_ms = PWOS_COMMAND_DEFAULT_DEADLINE_MS;
     return 0;
 }

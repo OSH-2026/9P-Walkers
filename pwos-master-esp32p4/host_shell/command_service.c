@@ -254,6 +254,91 @@ static int execute_echo(
     return 0;
 }
 
+/*
+ * llm 命令：交互式 LLM 推理
+ *   llm <prompt>              → 本地推理
+ *   llm @<hostname> <prompt>  → 远程推理（指定主机）
+ *   llm status                → 本地推理状态
+ *   llm result                → 本地推理结果
+ *   llm @<hostname> status    → 远程推理状态
+ *   llm @<hostname> result    → 远程推理结果
+ */
+static int execute_llm(
+    pwos_command_service_t *service,
+    char *args,
+    output_builder_t *output)
+{
+    char *hostname = NULL;
+    char *prompt = NULL;
+    uint8_t buf[PWOS_COMMAND_READ_CAP];
+    size_t out_len = 0u;
+    int rc;
+
+    if (args == NULL || args[0] == '\0') {
+        output_append(output,
+            "usage: llm <prompt>\r\n"
+            "       llm @<host> <prompt>\r\n"
+            "       llm status | result | @<host> status | @<host> result\r\n");
+        return -(int)M9P_ERR_EINVAL;
+    }
+
+    /* 解析 @hostname 前缀 */
+    if (args[0] == '@') {
+        char *space = strchr(args, ' ');
+        if (space == NULL) {
+            output_append(output, "llm: missing prompt after @hostname\r\n");
+            return -(int)M9P_ERR_EINVAL;
+        }
+        *space = '\0';
+        hostname = args + 1u;
+        prompt = trim_left(space + 1u);
+    } else {
+        prompt = args;
+    }
+
+    if (prompt[0] == '\0') {
+        output_append(output, "llm: empty prompt\r\n");
+        return -(int)M9P_ERR_EINVAL;
+    }
+
+    /* status / result 子命令 */
+    if (strcmp(prompt, "status") == 0) {
+        rc = service->config.llm(
+            service->config.io_ctx, hostname, NULL,
+            buf, sizeof(buf), &out_len, service->config.default_deadline_ms);
+        if (rc != 0) {
+            output_append(output, "llm status: %s (%d)\r\n", error_name(rc), rc);
+            return rc;
+        }
+        output_append(output, "%.*s\r\n", (int)out_len, (char *)buf);
+        return 0;
+    }
+
+    if (strcmp(prompt, "result") == 0) {
+        rc = service->config.llm(
+            service->config.io_ctx, hostname, NULL,
+            buf, sizeof(buf), &out_len, service->config.default_deadline_ms);
+        if (rc != 0) {
+            output_append(output, "llm result: %s (%d)\r\n", error_name(rc), rc);
+            return rc;
+        }
+        output_append(output, "%.*s\r\n", (int)out_len, (char *)buf);
+        return 0;
+    }
+
+    /* 提交 prompt 触发推理 */
+    rc = service->config.llm(
+        service->config.io_ctx, hostname, prompt,
+        buf, sizeof(buf), &out_len, service->config.default_deadline_ms);
+    if (rc != 0) {
+        output_append(output, "llm submit: %s (%d)\r\n", error_name(rc), rc);
+        return rc;
+    }
+    output_append(output, "llm: prompt submitted to %s\r\n",
+        hostname != NULL ? hostname : "local");
+    return 0;
+}
+
 static int execute_fault(
     pwos_command_service_t *service,
     char *args,
@@ -475,7 +560,8 @@ int pwos_command_service_init(
     const pwos_command_service_config_t *config)
 {
     if (service == NULL || config == NULL || config->read_path == NULL ||
-        config->write_path == NULL || config->list == NULL || config->stat == NULL) {
+        config->write_path == NULL || config->list == NULL || config->stat == NULL ||
+        config->llm == NULL) {
         return -(int)M9P_ERR_EINVAL;
     }
 
@@ -555,6 +641,8 @@ int pwos_command_service_execute(
         rc = execute_rpc(service, args, PWOS_COMMAND_RPC_ONEWAY, &builder);
     } else if (strcmp(command, "job") == 0) {
         rc = execute_job(service, args, &builder);
+    } else if (strcmp(command, "llm") == 0) {
+        rc = execute_llm(service, args, &builder);
     } else if (strcmp(command, "mesh") == 0) {
         rc = execute_cat(service, "/host/sys/topology", &builder);
     } else if (strcmp(command, "sessions") == 0) {

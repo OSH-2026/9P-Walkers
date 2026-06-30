@@ -1201,3 +1201,182 @@ int pwos_host_rpc_runtime_write_path(
     return -1;
 #endif
 }
+
+/* ===== 分布式推理接口 ===== */
+
+#ifdef ESP_PLATFORM
+static runtime_peer_t *find_peer_hostname_locked(const char *hostname)
+{
+    size_t i;
+
+    for (i = 0u; i < PWOS_HOST_RPC_MAX_PEERS; ++i) {
+        if (g_host_rpc.peers[i].used != 0u &&
+            strcmp(g_host_rpc.peers[i].snapshot.hostname, hostname) == 0) {
+            return &g_host_rpc.peers[i];
+        }
+    }
+    return NULL;
+}
+#endif
+
+int pwos_host_rpc_runtime_llm_submit(
+    const char *hostname,
+    const char *prompt,
+    uint32_t deadline_ms)
+{
+#ifdef ESP_PLATFORM
+    if (prompt == NULL || prompt[0] == '\0') return -(int)M9P_ERR_EINVAL;
+
+    /* hostname 为 NULL 或空 -> 本地推理 */
+    if (hostname == NULL || hostname[0] == '\0') {
+        uint16_t written = 0u;
+        return pwos_dist_inference_service_write(
+            "/llm/prompt", (const uint8_t *)prompt,
+            (uint16_t)strlen(prompt), &written, deadline_ms);
+    }
+
+    /* 远程推理：按 hostname 查找 peer，通过 TCP 发送 write_node */
+    {
+        pwos_host_rpc_peer_client_config_t config;
+        pwos_host_rpc_peer_client_t client;
+        exchange_target_t target;
+        runtime_peer_t *peer;
+        uint16_t written = 0u;
+        int rc;
+
+        runtime_lock();
+        peer = find_peer_hostname_locked(hostname);
+        if (peer == NULL || peer->snapshot.ip[0] == '\0') {
+            runtime_unlock();
+            return PWOS_SESSION_ERR_NO_ROUTE;
+        }
+        memset(&target, 0, sizeof(target));
+        (void)snprintf(target.ip, sizeof(target.ip), "%s", peer->snapshot.ip);
+        target.port = peer->snapshot.port;
+        runtime_unlock();
+
+        memset(&config, 0, sizeof(config));
+        config.io_ctx = &target;
+        config.exchange = tcp_exchange;
+        if (pwos_host_rpc_peer_client_init(&client, &config) != 0) {
+            return -(int)M9P_ERR_EIO;
+        }
+        rc = pwos_host_rpc_peer_client_write_node(
+            &client, "llm", "/prompt",
+            (const uint8_t *)prompt, (uint16_t)strlen(prompt),
+            &written, deadline_ms);
+        runtime_lock();
+        if (rc == 0) ++g_host_rpc.status.remote_writes;
+        else { ++g_host_rpc.status.client_errors; g_host_rpc.status.last_error = rc; }
+        runtime_unlock();
+        return rc;
+    }
+#else
+    (void)hostname; (void)prompt; (void)deadline_ms;
+    return -1;
+#endif
+}
+
+int pwos_host_rpc_runtime_llm_result(
+    const char *hostname,
+    uint8_t *out,
+    uint16_t *in_out_len,
+    uint32_t deadline_ms)
+{
+#ifdef ESP_PLATFORM
+    if (out == NULL || in_out_len == NULL) return -(int)M9P_ERR_EINVAL;
+
+    if (hostname == NULL || hostname[0] == '\0') {
+        return pwos_dist_inference_service_read(
+            "/llm/result", out, in_out_len, deadline_ms);
+    }
+
+    {
+        pwos_host_rpc_peer_client_config_t config;
+        pwos_host_rpc_peer_client_t client;
+        exchange_target_t target;
+        runtime_peer_t *peer;
+        int rc;
+
+        runtime_lock();
+        peer = find_peer_hostname_locked(hostname);
+        if (peer == NULL || peer->snapshot.ip[0] == '\0') {
+            runtime_unlock();
+            return PWOS_SESSION_ERR_NO_ROUTE;
+        }
+        memset(&target, 0, sizeof(target));
+        (void)snprintf(target.ip, sizeof(target.ip), "%s", peer->snapshot.ip);
+        target.port = peer->snapshot.port;
+        runtime_unlock();
+
+        memset(&config, 0, sizeof(config));
+        config.io_ctx = &target;
+        config.exchange = tcp_exchange;
+        if (pwos_host_rpc_peer_client_init(&client, &config) != 0) {
+            return -(int)M9P_ERR_EIO;
+        }
+        rc = pwos_host_rpc_peer_client_read_node(
+            &client, "llm", "/result", out, in_out_len, deadline_ms);
+        runtime_lock();
+        if (rc == 0) ++g_host_rpc.status.remote_reads;
+        else { ++g_host_rpc.status.client_errors; g_host_rpc.status.last_error = rc; }
+        runtime_unlock();
+        return rc;
+    }
+#else
+    (void)hostname; (void)out; (void)in_out_len; (void)deadline_ms;
+    return -1;
+#endif
+}
+
+int pwos_host_rpc_runtime_llm_status(
+    const char *hostname,
+    uint8_t *out,
+    uint16_t *in_out_len,
+    uint32_t deadline_ms)
+{
+#ifdef ESP_PLATFORM
+    if (out == NULL || in_out_len == NULL) return -(int)M9P_ERR_EINVAL;
+
+    if (hostname == NULL || hostname[0] == '\0') {
+        return pwos_dist_inference_service_read(
+            "/llm/status", out, in_out_len, deadline_ms);
+    }
+
+    {
+        pwos_host_rpc_peer_client_config_t config;
+        pwos_host_rpc_peer_client_t client;
+        exchange_target_t target;
+        runtime_peer_t *peer;
+        int rc;
+
+        runtime_lock();
+        peer = find_peer_hostname_locked(hostname);
+        if (peer == NULL || peer->snapshot.ip[0] == '\0') {
+            runtime_unlock();
+            return PWOS_SESSION_ERR_NO_ROUTE;
+        }
+        memset(&target, 0, sizeof(target));
+        (void)snprintf(target.ip, sizeof(target.ip), "%s", peer->snapshot.ip);
+        target.port = peer->snapshot.port;
+        runtime_unlock();
+
+        memset(&config, 0, sizeof(config));
+        config.io_ctx = &target;
+        config.exchange = tcp_exchange;
+        if (pwos_host_rpc_peer_client_init(&client, &config) != 0) {
+            return -(int)M9P_ERR_EIO;
+        }
+        rc = pwos_host_rpc_peer_client_read_node(
+            &client, "llm", "/status", out, in_out_len, deadline_ms);
+        runtime_lock();
+        if (rc == 0) ++g_host_rpc.status.remote_reads;
+        runtime_unlock();
+        return rc;
+    }
+#else
+    (void)hostname; (void)out; (void)in_out_len; (void)deadline_ms;
+    return -1;
+#endif
+}
+

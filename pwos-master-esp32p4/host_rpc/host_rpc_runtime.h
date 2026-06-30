@@ -80,6 +80,33 @@ int pwos_host_rpc_runtime_write_path(
     uint16_t *out_written,
     uint32_t deadline_ms);
 
+/*
+ * 分布式推理：向指定主机（hostname）或本机（NULL）提交 prompt。
+ * hostname 为 NULL 时走本地 dist_inference_service。
+ * 返回 0 成功，其余为错误码。
+ */
+int pwos_host_rpc_runtime_llm_submit(
+    const char *hostname,
+    const char *prompt,
+    uint32_t deadline_ms);
+
+/*
+ * 分布式推理：读取指定主机（hostname）或本机（NULL）的推理结果。
+ * hostname 为 NULL 时走本地 dist_inference_service。
+ */
+int pwos_host_rpc_runtime_llm_result(
+    const char *hostname,
+    uint8_t *out,
+    uint16_t *in_out_len,
+    uint32_t deadline_ms);
+
+/* 读取推理状态 JSON。hostname 为 NULL 时走本地。 */
+int pwos_host_rpc_runtime_llm_status(
+    const char *hostname,
+    uint8_t *out,
+    uint16_t *in_out_len,
+    uint32_t deadline_ms);
+
 #ifdef __cplusplus
 }
 #endif

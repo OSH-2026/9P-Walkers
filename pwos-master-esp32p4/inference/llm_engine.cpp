@@ -1099,10 +1099,12 @@ void generate(
         }
         pos++;
 
-        // data-dependent terminating condition: the BOS (=1) token delimits sequences
+        /* token 1 是 </s>（EOS）。stories260K 模型很小，容易过早输出 EOS。
+         * 回退 pos 重试同一位置——sampler 每次用不同随机种子，不会死循环。 */
         if (next == 1)
         {
-            break;
+            pos--;
+            continue;
         }
 
         // print the token as string, decode it with the Tokenizer object
