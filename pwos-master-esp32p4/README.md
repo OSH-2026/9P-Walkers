@@ -1,7 +1,7 @@
 # PWOS ESP32-P4 Coordinator
 
-`pwos-master-esp32p4` 当前默认固件运行 M4-M9 coordinator、session、并发 VFS、
-从机 RPC、Job System、有线 LAN 和异步 WebShell。
+`pwos-master-esp32p4` 当前默认固件运行 M4-M10 coordinator、session、并发 VFS、
+从机 RPC、Job System、主机间 RPC、有线 LAN 和异步 WebShell。
 P4 会通过统一的 `/mcuN/...` 路径周期读取
 各节点 `/sys/health`，验证 `DATA_MINI9P` 数据面闭环。旧 Lua、legacy mesh host
 service 和旧 VFS bridge 已删除；当前 WebShell 只接入新的 `cluster_vfs`。
@@ -25,9 +25,16 @@ service 和旧 VFS bridge 已删除；当前 WebShell 只接入新的 `cluster_v
 - TX 帧之间保留 2 ms guard，覆盖 STM32 ReceiveToIdle 的 DMA rearm 空窗。
 - 周期执行 `cluster_vfs_read_path("/mcuN/sys/health")`，验证数据面转发闭环。
 - 使用 ESP32-P4 Function EV Board 的 IP101 PHY（地址 1、reset GPIO 51）接入 LAN。
-- HTTP 提供 `/`、`/health`、`/ws`，mDNS 主机名为 `pwos.local`。
+- HTTP 提供 `/`、`/health`、`/ws`，mDNS 主机名按 Ethernet MAC 生成为
+  `pwos-xxxx.local`，避免多主机重名。
+- `_pwos._tcp` 发布 TCP/9909；主机使用有界 CBOR RPC 执行 advertise、拓扑同步和
+  跨主机节点 read/write。
+- 主机按持久化 `epoch`、`priority`、`host_uid` 选出 leader；leader 统一分配全局
+  `mcuN` 名称，follower 保留本机 `owner_target` 映射。
+- coordinator 周期发送 `CTRL_HOST_ADVERTISE`；STM32 见到直接可达的 leader 后，只接受
+  该入口端口发来的 lease、地址和路由控制帧。
 - WebSocket 回调只入队，单独 worker 执行命令；结果用 fd generation 隔离客户端。
-- 本地 `/host/sys/{health,links,topology,routes,sessions,jobs,web,log}` 提供状态快照。
+- 本地 `/host/sys/{health,links,topology,routes,sessions,jobs,hosts,web,log}` 提供状态快照。
 - 通过日志输出节点数、收发帧、register、lease、route、mini9P、parse error 等统计。
 
 ## 目录结构
@@ -46,7 +53,8 @@ pwos-master-esp32p4/
 │   ├── session_manager.c
 │   ├── session_manager.h
 │   └── tests/
-├── host_rpc/             # DATA_RPC client
+├── slave_rpc/            # MCU DATA_RPC client
+├── host_rpc/             # TCP/mDNS/CBOR 主机间平面
 ├── host_jobs/            # DATA_JOB manager 与 WebShell job 命令
 ├── host_api/
 │   ├── cluster_vfs.c
@@ -95,16 +103,25 @@ cmake --build /tmp/pwos-host-session-tests
 cmake -S pwos-master-esp32p4/host_shell/tests -B /tmp/pwos-command-service-tests
 cmake --build /tmp/pwos-command-service-tests
 ctest --test-dir /tmp/pwos-command-service-tests --output-on-failure
+
+cmake -S pwos-shared/host_rpc/tests -B /tmp/pwos-host-rpc-protocol-tests
+cmake --build /tmp/pwos-host-rpc-protocol-tests
+ctest --test-dir /tmp/pwos-host-rpc-protocol-tests --output-on-failure
+
+cmake -S pwos-master-esp32p4/host_rpc/tests -B /tmp/pwos-host-rpc-endpoint-tests
+cmake --build /tmp/pwos-host-rpc-endpoint-tests
+ctest --test-dir /tmp/pwos-host-rpc-endpoint-tests --output-on-failure
 ```
 
 ## WebShell
 
-DHCP 成功后打开 `http://pwos.local/` 或串口日志中的 IPv4 地址。常用命令：
+DHCP 成功后打开串口日志给出的 `http://pwos-xxxx.local/` 或 IPv4 地址。常用命令：
 
 ```text
 ls /
 cat /mcu1/sys/health
 cat /host/sys/sessions
+hosts
 net status
 fault mcu2 status
 fault mcu2 drop port 0 20
@@ -129,5 +146,5 @@ job retry <lost-id>
 
 ## 下一步
 
-按 `docs/logs/refactor/M9-job-system.md` 完成两节点 Job 生命周期、取消、LOST/retry
-和控制面并行性上板验收；通过后进入 M10 主机间平面。
+按 `docs/logs/refactor/M10-host-rpc-multihost.md` 使用两块 P4、两个独立 MCU 子树完成
+发现、选主、全局命名、跨主机 read/write 和断网切主验收。

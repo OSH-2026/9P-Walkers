@@ -7,6 +7,7 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "http_server.h"
+#include "host_rpc_runtime.h"
 #include "lan_runtime.h"
 #include "pwos_coordinator_runtime.h"
 #include "websocket_console.h"
@@ -38,6 +39,7 @@ static const host_node_t g_host_nodes[] = {
     {"/host/sys/web", "web", 0u, PWOS_HOST_QID_BASE + 7u},
     {"/host/sys/log", "log", 0u, PWOS_HOST_QID_BASE + 8u},
     {"/host/sys/jobs", "jobs", 0u, PWOS_HOST_QID_BASE + 9u},
+    {"/host/sys/hosts", "hosts", 0u, PWOS_HOST_QID_BASE + 10u},
 };
 
 static void text_append(text_buffer_t *buffer, const char *format, ...)
@@ -100,17 +102,20 @@ static void render_health(text_buffer_t *output)
     pwos_cluster_vfs_stats_t vfs;
     pwos_rpc_client_stats_t rpc;
     pwos_job_manager_stats_t jobs;
+    pwos_host_rpc_runtime_status_t hosts;
 
     memset(&runtime, 0, sizeof(runtime));
     memset(&sessions, 0, sizeof(sessions));
     memset(&vfs, 0, sizeof(vfs));
     memset(&rpc, 0, sizeof(rpc));
     memset(&jobs, 0, sizeof(jobs));
+    memset(&hosts, 0, sizeof(hosts));
     pwos_coordinator_runtime_get_stats(&runtime);
     pwos_coordinator_runtime_get_session_stats(&sessions);
     pwos_coordinator_runtime_get_vfs_stats(&vfs);
     pwos_coordinator_runtime_get_rpc_stats(&rpc);
     pwos_coordinator_runtime_get_job_stats(&jobs);
+    pwos_host_rpc_runtime_get_status(&hosts);
     text_append(output, "status=ok\n");
     text_append(output, "uptime_ms=%llu\n",
         (unsigned long long)(esp_timer_get_time() / 1000));
@@ -138,6 +143,11 @@ static void render_health(text_buffer_t *output)
         (unsigned long)jobs.submitted,
         (unsigned long)jobs.lost,
         (unsigned long)jobs.transport_errors);
+    text_append(output, "host_role=%s host_peers=%u host_nodes=%u host_rpc_errors=%lu\n",
+        pwos_host_role_name(hosts.local_role),
+        hosts.peer_count,
+        hosts.topology_nodes,
+        (unsigned long)(hosts.server_errors + hosts.client_errors));
     text_append(output, "vfs_last_error=%ld\n", (long)vfs.last_error);
 }
 
@@ -328,6 +338,87 @@ static void render_jobs(text_buffer_t *output)
     }
 }
 
+static void render_hosts(text_buffer_t *output)
+{
+    pwos_host_rpc_runtime_status_t status;
+    size_t i;
+
+    memset(&status, 0, sizeof(status));
+    pwos_host_rpc_runtime_get_status(&status);
+    text_append(output,
+        "host=%s initialized=%u server=%u discovery=%u role=%s "
+        "uid=%08lx-%08lx-%08lx epoch=%lu priority=%u "
+        "leader=%08lx-%08lx-%08lx peers=%u nodes=%u\n",
+        status.hostname[0] == '\0' ? "-" : status.hostname,
+        status.initialized,
+        status.server_started,
+        status.discovery_started,
+        pwos_host_role_name(status.local_role),
+        (unsigned long)status.local_uid[0],
+        (unsigned long)status.local_uid[1],
+        (unsigned long)status.local_uid[2],
+        (unsigned long)status.local_epoch,
+        status.local_priority,
+        (unsigned long)status.leader_uid[0],
+        (unsigned long)status.leader_uid[1],
+        (unsigned long)status.leader_uid[2],
+        status.peer_count,
+        status.topology_nodes);
+    text_append(output,
+        "server accepted=%lu requests=%lu errors=%lu discovery=%lu/%lu "
+        "advertise=%lu/%lu sync=%lu/%lu client=%lu errors=%lu "
+        "remote_io=%lu/%lu last_error=%ld\n",
+        (unsigned long)status.accepted,
+        (unsigned long)status.server_requests,
+        (unsigned long)status.server_errors,
+        (unsigned long)status.discovery_results,
+        (unsigned long)status.discovery_queries,
+        (unsigned long)status.advertise_ok,
+        (unsigned long)status.advertise_fail,
+        (unsigned long)status.topology_sync_ok,
+        (unsigned long)status.topology_sync_fail,
+        (unsigned long)status.client_calls,
+        (unsigned long)status.client_errors,
+        (unsigned long)status.remote_reads,
+        (unsigned long)status.remote_writes,
+        (long)status.last_error);
+    for (i = 0u; i < PWOS_HOST_RPC_MAX_PEERS; ++i) {
+        pwos_host_rpc_peer_snapshot_t peer;
+
+        if (pwos_host_rpc_runtime_get_peer(i, &peer) != 0) continue;
+        text_append(output,
+            "peer host=%s ip=%s port=%u role=%s uid=%08lx-%08lx-%08lx "
+            "epoch=%lu priority=%u last_seen=%lu\n",
+            peer.hostname,
+            peer.ip,
+            peer.port,
+            pwos_host_role_name(peer.role),
+            (unsigned long)peer.uid[0],
+            (unsigned long)peer.uid[1],
+            (unsigned long)peer.uid[2],
+            (unsigned long)peer.epoch,
+            peer.priority,
+            (unsigned long)peer.last_seen_ms);
+    }
+    for (i = 0u; i < PWOS_HOST_RPC_TOPOLOGY_MAX_NODES; ++i) {
+        pwos_host_rpc_topology_node_t node;
+
+        if (pwos_host_rpc_runtime_get_topology_node(i, &node) != 0) break;
+        text_append(output,
+            "node global=%s owner_target=%s owner=%08lx-%08lx-%08lx "
+            "uid=%08lx-%08lx-%08lx boot=%lu\n",
+            node.global_target,
+            node.owner_target,
+            (unsigned long)node.owner_uid[0],
+            (unsigned long)node.owner_uid[1],
+            (unsigned long)node.owner_uid[2],
+            (unsigned long)node.node_uid[0],
+            (unsigned long)node.node_uid[1],
+            (unsigned long)node.node_uid[2],
+            (unsigned long)node.boot_id);
+    }
+}
+
 static void render_web(text_buffer_t *output)
 {
     pwos_lan_runtime_status_t lan;
@@ -341,7 +432,8 @@ static void render_web(text_buffer_t *output)
     pwos_http_server_get_status(&http);
     pwos_websocket_console_get_status(&websocket);
     text_append(output,
-        "lan initialized=%u started=%u link=%u dhcp=%u ip=%s netmask=%s gateway=%s mdns=%u last_error=%ld\n",
+        "lan host=%s initialized=%u started=%u link=%u dhcp=%u ip=%s netmask=%s gateway=%s mdns=%u host_rpc_mdns=%u last_error=%ld\n",
+        lan.hostname[0] == '\0' ? "-" : lan.hostname,
         lan.initialized,
         lan.started,
         lan.link_up,
@@ -350,6 +442,7 @@ static void render_web(text_buffer_t *output)
         lan.netmask[0] == '\0' ? "-" : lan.netmask,
         lan.gateway[0] == '\0' ? "-" : lan.gateway,
         lan.mdns_ready,
+        lan.host_rpc_mdns_ready,
         (long)lan.last_error);
     text_append(output,
         "http started=%u port=%u root=%lu health=%lu ws_requests=%lu errors=%lu\n",
@@ -379,15 +472,18 @@ static void render_log(text_buffer_t *output)
     pwos_session_manager_stats_t sessions;
     pwos_rpc_client_stats_t rpc;
     pwos_job_manager_stats_t jobs;
+    pwos_host_rpc_runtime_status_t hosts;
 
     memset(&runtime, 0, sizeof(runtime));
     memset(&sessions, 0, sizeof(sessions));
     memset(&rpc, 0, sizeof(rpc));
     memset(&jobs, 0, sizeof(jobs));
+    memset(&hosts, 0, sizeof(hosts));
     pwos_coordinator_runtime_get_stats(&runtime);
     pwos_coordinator_runtime_get_session_stats(&sessions);
     pwos_coordinator_runtime_get_rpc_stats(&rpc);
     pwos_coordinator_runtime_get_job_stats(&jobs);
+    pwos_host_rpc_runtime_get_status(&hosts);
     text_append(output,
         "rx_frames=%lu tx_frames=%lu parse_errors=%lu tx_errors=%lu "
         "register=%lu assign=%lu renew=%lu route=%lu data_rx=%lu\n",
@@ -441,6 +537,24 @@ static void render_log(text_buffer_t *output)
         (unsigned long)jobs.transport_errors,
         (unsigned long)jobs.remote_errors,
         (long)jobs.last_error);
+    text_append(output,
+        "host_rpc role=%s peers=%u nodes=%u accepted=%lu requests=%lu server_error=%lu "
+        "discovery=%lu/%lu advertise=%lu/%lu sync=%lu/%lu client=%lu/%lu last_error=%ld\n",
+        pwos_host_role_name(hosts.local_role),
+        hosts.peer_count,
+        hosts.topology_nodes,
+        (unsigned long)hosts.accepted,
+        (unsigned long)hosts.server_requests,
+        (unsigned long)hosts.server_errors,
+        (unsigned long)hosts.discovery_results,
+        (unsigned long)hosts.discovery_queries,
+        (unsigned long)hosts.advertise_ok,
+        (unsigned long)hosts.advertise_fail,
+        (unsigned long)hosts.topology_sync_ok,
+        (unsigned long)hosts.topology_sync_fail,
+        (unsigned long)hosts.client_calls,
+        (unsigned long)hosts.client_errors,
+        (long)hosts.last_error);
 }
 
 int pwos_host_observability_read(
@@ -481,6 +595,8 @@ int pwos_host_observability_read(
         render_log(&output);
     } else if (strcmp(path, "/host/sys/jobs") == 0) {
         render_jobs(&output);
+    } else if (strcmp(path, "/host/sys/hosts") == 0) {
+        render_hosts(&output);
     }
     *in_out_len = (uint16_t)output.len;
     return 0;

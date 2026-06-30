@@ -8,6 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "host_shell_runtime.h"
+#include "host_rpc_runtime.h"
 #include "http_server.h"
 #include "lan_runtime.h"
 #include "pwos_coordinator_runtime.h"
@@ -52,6 +53,11 @@ void app_main(void)
     rc = pwos_lan_runtime_start();
     if (rc != 0) {
         ESP_LOGE(TAG, "LAN service unavailable rc=%d", rc);
+    } else {
+        rc = pwos_host_rpc_runtime_start();
+        if (rc != 0) {
+            ESP_LOGE(TAG, "host RPC service unavailable rc=%d", rc);
+        }
     }
 
     rc = pwos_host_shell_runtime_build_config(&command_config);

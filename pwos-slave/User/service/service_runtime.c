@@ -119,6 +119,17 @@ static void render_health(diag_writer_t *writer)
         (unsigned long)node.local_uid[2],
         (unsigned long)node.lease_epoch,
         (unsigned long)node.lease_ms);
+    diag_printf(writer,
+        "authority valid=%u port=%u uid=%08lx-%08lx-%08lx epoch=%lu priority=%u advertise_rx=%lu rejected_ctrl=%lu\n",
+        node.authority_valid,
+        node.authority_port,
+        (unsigned long)node.authority_uid[0],
+        (unsigned long)node.authority_uid[1],
+        (unsigned long)node.authority_uid[2],
+        (unsigned long)node.authority_epoch,
+        node.authority_priority,
+        (unsigned long)node.host_advertise_rx,
+        (unsigned long)node.nonleader_ctrl_drop);
 }
 
 static void render_tasks(diag_writer_t *writer)
@@ -436,13 +447,15 @@ static void render_log(pwos_service_runtime_t *runtime, diag_writer_t *writer)
 
     pwos_node_control_get_snapshot(&node);
     diag_printf(writer,
-        "control register_tx=%lu assign_rx=%lu renew_tx=%lu lease_ack_rx=%lu link_state_tx=%lu route_rx=%lu forward_fail=%lu no_route=%lu bad=%lu\n",
+        "control register_tx=%lu assign_rx=%lu renew_tx=%lu lease_ack_rx=%lu link_state_tx=%lu route_rx=%lu host_adv=%lu rejected_ctrl=%lu forward_fail=%lu no_route=%lu bad=%lu\n",
         (unsigned long)node.register_tx,
         (unsigned long)node.assign_rx,
         (unsigned long)node.renew_tx,
         (unsigned long)node.lease_ack_rx,
         (unsigned long)node.link_state_tx,
         (unsigned long)node.route_update_rx,
+        (unsigned long)node.host_advertise_rx,
+        (unsigned long)node.nonleader_ctrl_drop,
         (unsigned long)node.forward_fail,
         (unsigned long)node.drop_no_route,
         (unsigned long)node.bad_ctrl_frames);

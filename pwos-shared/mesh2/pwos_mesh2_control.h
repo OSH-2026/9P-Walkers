@@ -18,6 +18,7 @@ extern "C" {
 #define PWOS_MESH2_LEASE_ACK_PAYLOAD_LEN 28u
 #define PWOS_MESH2_LINK_STATE_PAYLOAD_LEN 24u
 #define PWOS_MESH2_ROUTE_UPDATE_PAYLOAD_LEN 12u
+#define PWOS_MESH2_HOST_ADVERTISE_PAYLOAD_LEN 28u
 
 #define PWOS_MESH2_NODE_CAP_RELAY 0x00000001u
 #define PWOS_MESH2_NODE_CAP_COORDINATOR 0x00000002u
@@ -28,6 +29,10 @@ extern "C" {
 
 #define PWOS_MESH2_ROUTE_SET 1u
 #define PWOS_MESH2_ROUTE_DELETE 2u
+
+#define PWOS_MESH2_HOST_ROLE_OBSERVER 0u
+#define PWOS_MESH2_HOST_ROLE_FOLLOWER 1u
+#define PWOS_MESH2_HOST_ROLE_LEADER 2u
 
 typedef struct {
     uint32_t uid[3];
@@ -72,6 +77,15 @@ typedef struct {
     uint8_t next_hop;
     uint8_t action;
 } pwos_mesh2_route_update_t;
+
+typedef struct {
+    uint32_t host_uid[3];
+    uint32_t epoch;
+    uint32_t cluster_id;
+    uint16_t priority;
+    uint8_t role;
+    uint8_t flags;
+} pwos_mesh2_host_advertise_t;
 
 pwos_status_t pwos_mesh2_encode_node_register(
     const pwos_mesh2_node_register_t *msg,
@@ -138,6 +152,17 @@ pwos_status_t pwos_mesh2_decode_route_update(
     const uint8_t *payload,
     size_t payload_len,
     pwos_mesh2_route_update_t *out_msg);
+
+pwos_status_t pwos_mesh2_encode_host_advertise(
+    const pwos_mesh2_host_advertise_t *msg,
+    uint8_t *payload,
+    size_t payload_cap,
+    size_t *out_len);
+
+pwos_status_t pwos_mesh2_decode_host_advertise(
+    const uint8_t *payload,
+    size_t payload_len,
+    pwos_mesh2_host_advertise_t *out_msg);
 
 #ifdef __cplusplus
 }

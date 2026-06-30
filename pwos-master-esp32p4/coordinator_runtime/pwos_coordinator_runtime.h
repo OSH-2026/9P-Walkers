@@ -14,10 +14,18 @@
 extern "C" {
 #endif
 
+#ifndef PWOS_COORDINATOR_UART_PORT
 #define PWOS_COORDINATOR_UART_PORT 1
+#endif
+#ifndef PWOS_COORDINATOR_UART_TX_PIN
 #define PWOS_COORDINATOR_UART_TX_PIN 37
+#endif
+#ifndef PWOS_COORDINATOR_UART_RX_PIN
 #define PWOS_COORDINATOR_UART_RX_PIN 38
+#endif
+#ifndef PWOS_COORDINATOR_UART_BAUD_RATE
 #define PWOS_COORDINATOR_UART_BAUD_RATE 1000000
+#endif
 
 typedef struct {
     uint8_t initialized;
@@ -40,6 +48,7 @@ typedef struct {
     uint32_t lease_ack_tx;
     uint32_t link_state_rx;
     uint32_t route_update_tx;
+    uint32_t host_advertise_tx;
     uint32_t data_rx;
     uint32_t mini9p_tx;
     uint32_t mini9p_rx;

@@ -1,0 +1,31 @@
+menu "9P-Walkers ESP32-S3"
+
+config PWOS_WIFI_SSID
+    string "WiFi SSID"
+    default "pwos-network"
+
+config PWOS_WIFI_PASSWORD
+    string "WiFi password"
+    default "pwos-network"
+
+config PWOS_S3_UART_PORT
+    int "STM32 UART port"
+    range 1 2
+    default 1
+
+config PWOS_S3_UART_TX_GPIO
+    int "STM32 UART TX GPIO"
+    range 0 48
+    default 17
+
+config PWOS_S3_UART_RX_GPIO
+    int "STM32 UART RX GPIO"
+    range 0 48
+    default 18
+
+config PWOS_S3_UART_BAUD_RATE
+    int "STM32 UART baud rate"
+    range 115200 5000000
+    default 1000000
+
+endmenu

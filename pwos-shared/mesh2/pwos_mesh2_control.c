@@ -338,3 +338,60 @@ pwos_status_t pwos_mesh2_decode_route_update(
     }
     return PWOS_OK;
 }
+
+pwos_status_t pwos_mesh2_encode_host_advertise(
+    const pwos_mesh2_host_advertise_t *msg,
+    uint8_t *payload,
+    size_t payload_cap,
+    size_t *out_len)
+{
+    pwos_status_t status = check_encode_args(
+        msg, payload, payload_cap,
+        PWOS_MESH2_HOST_ADVERTISE_PAYLOAD_LEN, out_len);
+
+    if (status != PWOS_OK) {
+        return status;
+    }
+    if (msg->role > PWOS_MESH2_HOST_ROLE_LEADER) {
+        return PWOS_E_BAD_LENGTH;
+    }
+    memset(payload, 0, PWOS_MESH2_HOST_ADVERTISE_PAYLOAD_LEN);
+    payload[0] = PWOS_MESH2_CONTROL_VERSION;
+    payload[1] = msg->role;
+    payload[2] = msg->flags;
+    put_le32(payload + 4u, msg->epoch);
+    put_le16(payload + 8u, msg->priority);
+    put_le32(payload + 12u, msg->host_uid[0]);
+    put_le32(payload + 16u, msg->host_uid[1]);
+    put_le32(payload + 20u, msg->host_uid[2]);
+    put_le32(payload + 24u, msg->cluster_id);
+    *out_len = PWOS_MESH2_HOST_ADVERTISE_PAYLOAD_LEN;
+    return PWOS_OK;
+}
+
+pwos_status_t pwos_mesh2_decode_host_advertise(
+    const uint8_t *payload,
+    size_t payload_len,
+    pwos_mesh2_host_advertise_t *out_msg)
+{
+    pwos_status_t status = check_decode_args(
+        payload, payload_len,
+        PWOS_MESH2_HOST_ADVERTISE_PAYLOAD_LEN, out_msg);
+
+    if (status != PWOS_OK) {
+        return status;
+    }
+    memset(out_msg, 0, sizeof(*out_msg));
+    out_msg->role = payload[1];
+    out_msg->flags = payload[2];
+    out_msg->epoch = get_le32(payload + 4u);
+    out_msg->priority = get_le16(payload + 8u);
+    out_msg->host_uid[0] = get_le32(payload + 12u);
+    out_msg->host_uid[1] = get_le32(payload + 16u);
+    out_msg->host_uid[2] = get_le32(payload + 20u);
+    out_msg->cluster_id = get_le32(payload + 24u);
+    if (out_msg->role > PWOS_MESH2_HOST_ROLE_LEADER) {
+        return PWOS_E_BAD_LENGTH;
+    }
+    return PWOS_OK;
+}

@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "host_observability.h"
+#include "host_rpc_runtime.h"
 #include "pwos_coordinator_runtime.h"
 
 #define PWOS_HOST_PERM_READ 0x01u
@@ -15,6 +16,19 @@ static int is_host_path(const char *path)
         (strcmp(path, "/host") == 0 || strncmp(path, "/host/", 6u) == 0);
 }
 
+static int find_dirent(
+    const struct m9p_dirent *entries,
+    size_t count,
+    const char *name)
+{
+    size_t i;
+
+    for (i = 0u; i < count; ++i) {
+        if (strcmp(entries[i].name, name) == 0) return (int)i;
+    }
+    return -1;
+}
+
 static int shell_read(
     void *ctx,
     const char *path,
@@ -22,12 +36,19 @@ static int shell_read(
     uint16_t *in_out_len,
     uint32_t deadline_ms)
 {
+    int rc;
+
     (void)ctx;
     if (is_host_path(path)) {
         return pwos_host_observability_read(path, buf, in_out_len);
     }
-    return pwos_coordinator_runtime_read_path(
+    rc = pwos_coordinator_runtime_read_path(
         path, buf, in_out_len, deadline_ms);
+    if (rc == PWOS_SESSION_ERR_NO_ROUTE || rc == -(int)M9P_ERR_ENOENT) {
+        rc = pwos_host_rpc_runtime_read_path(
+            path, buf, in_out_len, deadline_ms);
+    }
+    return rc;
 }
 
 static int shell_write(
@@ -38,12 +59,19 @@ static int shell_write(
     uint16_t *out_written,
     uint32_t deadline_ms)
 {
+    int rc;
+
     (void)ctx;
     if (is_host_path(path)) {
         return -(int)M9P_ERR_EPERM;
     }
-    return pwos_coordinator_runtime_write_path(
+    rc = pwos_coordinator_runtime_write_path(
         path, data, len, out_written, deadline_ms);
+    if (rc == PWOS_SESSION_ERR_NO_ROUTE || rc == -(int)M9P_ERR_ENOENT) {
+        rc = pwos_host_rpc_runtime_write_path(
+            path, data, len, out_written, deadline_ms);
+    }
+    return rc;
 }
 
 static int shell_list(
@@ -96,6 +124,43 @@ static int shell_list(
         return rc;
     }
     *out_count += remote_count;
+    {
+        pwos_host_rpc_runtime_status_t host_status;
+        size_t i;
+
+        memset(&host_status, 0, sizeof(host_status));
+        pwos_host_rpc_runtime_get_status(&host_status);
+        /* leader 分配的全局名可能与本机 coordinator 的 owner_target 不同。 */
+        for (i = 0u; i < PWOS_HOST_RPC_TOPOLOGY_MAX_NODES; ++i) {
+            pwos_host_rpc_topology_node_t node;
+            int owner_index;
+
+            if (pwos_host_rpc_runtime_get_topology_node(i, &node) != 0) break;
+            if (memcmp(node.owner_uid, host_status.local_uid, sizeof(node.owner_uid)) != 0 ||
+                strcmp(node.owner_target, node.global_target) == 0) continue;
+            owner_index = find_dirent(entries, *out_count, node.owner_target);
+            if (owner_index >= 0 &&
+                find_dirent(entries, *out_count, node.global_target) < 0) {
+                (void)snprintf(entries[owner_index].name,
+                    sizeof(entries[owner_index].name), "%s", node.global_target);
+            }
+        }
+        for (i = 0u; *out_count < max_entries; ++i) {
+            pwos_host_rpc_topology_node_t node;
+            struct m9p_dirent *entry;
+
+            if (pwos_host_rpc_runtime_get_topology_node(i, &node) != 0) break;
+            if (find_dirent(entries, *out_count, node.global_target) >= 0) continue;
+            entry = &entries[*out_count];
+            memset(entry, 0, sizeof(*entry));
+            entry->qid.type = (uint8_t)(M9P_QID_DIR | M9P_QID_VIRTUAL);
+            entry->qid.object_id = 0x7100u + (uint32_t)i;
+            entry->perm = PWOS_HOST_PERM_READ;
+            entry->flags = (uint8_t)(M9P_STAT_DIR | M9P_STAT_VIRTUAL);
+            (void)snprintf(entry->name, sizeof(entry->name), "%s", node.global_target);
+            ++*out_count;
+        }
+    }
     return 0;
 }
 

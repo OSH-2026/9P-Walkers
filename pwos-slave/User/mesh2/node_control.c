@@ -17,6 +17,8 @@
 #define PWOS_NODE_DEFAULT_LEASE_MS 10000u
 #define PWOS_NODE_DEFAULT_TTL 8u
 #define PWOS_NODE_DIRECT_ROUTE_VERSION 0u
+#define PWOS_NODE_HOST_ADVERTISE_TIMEOUT_MS 5000u
+#define PWOS_NODE_CLUSTER_ID 0x50574F53u
 
 typedef struct {
     uint8_t valid;
@@ -49,10 +51,52 @@ static uint16_t g_next_seq;
 static pwos_node_route_t g_routes[PWOS_NODE_CONTROL_MAX_ROUTES];
 static pwos_pending_register_t g_pending[PWOS_NODE_CONTROL_MAX_PENDING];
 static pwos_node_control_snapshot_t g_stats;
+static uint8_t g_authority_valid;
+static uint8_t g_authority_port;
+static uint32_t g_authority_uid[3];
+static uint32_t g_authority_epoch;
+static uint16_t g_authority_priority;
+static uint32_t g_authority_last_tick;
 
 static uint8_t uid_equal(const uint32_t a[3], const uint32_t b[3])
 {
     return a[0] == b[0] && a[1] == b[1] && a[2] == b[2];
+}
+
+static int host_candidate_compare(
+    uint32_t epoch,
+    uint16_t priority,
+    const uint32_t uid[3])
+{
+    size_t i;
+
+    if (epoch != g_authority_epoch) return epoch > g_authority_epoch ? 1 : -1;
+    if (priority != g_authority_priority) return priority > g_authority_priority ? 1 : -1;
+    for (i = 0u; i < 3u; ++i) {
+        if (uid[i] != g_authority_uid[i]) return uid[i] > g_authority_uid[i] ? 1 : -1;
+    }
+    return 0;
+}
+
+static int control_from_authority(uint8_t ingress_port)
+{
+    if (g_authority_valid == 0u || ingress_port == g_authority_port) {
+        return 1;
+    }
+    ++g_stats.nonleader_ctrl_drop;
+    return 0;
+}
+
+static int select_control_upstream(uint8_t *out_port)
+{
+    if (out_port == NULL) {
+        return -1;
+    }
+    if (g_authority_valid != 0u) {
+        *out_port = g_authority_port;
+        return 0;
+    }
+    return pwos_port_manager_select_upstream(out_port);
 }
 
 static uint8_t is_local_identity(const uint32_t uid[3], uint32_t boot_id)
@@ -562,10 +606,15 @@ static int handle_addr_assign(
     return 1;
 }
 
-static int handle_lease_ack(const pwos_link_frame_view_t *view)
+static int handle_lease_ack(
+    const pwos_link_frame_view_t *view,
+    uint8_t ingress_port)
 {
     pwos_mesh2_lease_ack_t ack;
 
+    if (!control_from_authority(ingress_port)) {
+        return 1;
+    }
     if (pwos_mesh2_decode_lease_ack(view->payload, view->payload_len, &ack) != PWOS_OK) {
         ++g_stats.bad_ctrl_frames;
         return 1;
@@ -606,15 +655,62 @@ static int handle_node_register(
     return 1;
 }
 
-static int handle_route_update(const pwos_link_frame_view_t *view)
+static int handle_route_update(
+    const pwos_link_frame_view_t *view,
+    uint8_t ingress_port)
 {
     pwos_mesh2_route_update_t update;
 
+    if (!control_from_authority(ingress_port)) {
+        return 1;
+    }
     if (pwos_mesh2_decode_route_update(view->payload, view->payload_len, &update) != PWOS_OK) {
         ++g_stats.bad_ctrl_frames;
         return 1;
     }
     (void)apply_route_update(&update);
+    return 1;
+}
+
+static int handle_host_advertise(
+    const pwos_link_frame_view_t *view,
+    uint8_t ingress_port)
+{
+    pwos_mesh2_host_advertise_t advertise;
+    int better;
+
+    if (pwos_mesh2_decode_host_advertise(
+            view->payload, view->payload_len, &advertise) != PWOS_OK ||
+        advertise.cluster_id != PWOS_NODE_CLUSTER_ID) {
+        ++g_stats.bad_ctrl_frames;
+        return 1;
+    }
+    ++g_stats.host_advertise_rx;
+    /* 只有明确的 leader 才启用控制面过滤；仅见 follower 时维持单主兼容。 */
+    if (advertise.role != PWOS_MESH2_HOST_ROLE_LEADER) {
+        return 1;
+    }
+    better = g_authority_valid == 0u ? 1 : host_candidate_compare(
+        advertise.epoch, advertise.priority, advertise.host_uid);
+    if (better >= 0) {
+        uint8_t changed_port = g_authority_valid != 0u &&
+            g_authority_port != ingress_port;
+
+        g_authority_valid = 1u;
+        g_authority_port = ingress_port;
+        memcpy(g_authority_uid, advertise.host_uid, sizeof(g_authority_uid));
+        g_authority_epoch = advertise.epoch;
+        g_authority_priority = advertise.priority;
+        g_authority_last_tick = (uint32_t)xTaskGetTickCount();
+        if (changed_port != 0u && g_state == PWOS_NODE_ASSIGNED) {
+            /* leader 端口切换必须重新注册，旧 lease/route 不再继续使用。 */
+            g_state = PWOS_NODE_OFFLINE;
+            g_local_addr = PWOS_LINK_ADDR_UNASSIGNED;
+            g_lease_epoch = 0u;
+            clear_routes();
+            pwos_port_manager_set_mesh_assigned(0u, PWOS_LINK_ADDR_UNASSIGNED);
+        }
+    }
     return 1;
 }
 
@@ -654,6 +750,12 @@ void pwos_node_control_init(void)
     g_last_link_state_tick = 0u;
     g_next_seq = 0u;
     g_state = PWOS_NODE_OFFLINE;
+    g_authority_valid = 0u;
+    g_authority_port = PWOS_LINK_ADDR_UNASSIGNED;
+    memset(g_authority_uid, 0, sizeof(g_authority_uid));
+    g_authority_epoch = 0u;
+    g_authority_priority = 0u;
+    g_authority_last_tick = 0u;
     pwos_port_manager_set_mesh_assigned(0u, PWOS_LINK_ADDR_UNASSIGNED);
 }
 
@@ -665,15 +767,26 @@ void pwos_node_control_tick(void)
 
     now = (uint32_t)xTaskGetTickCount();
 
+    if (g_authority_valid != 0u &&
+        (uint32_t)(now - g_authority_last_tick) >=
+            pdMS_TO_TICKS(PWOS_NODE_HOST_ADVERTISE_TIMEOUT_MS)) {
+        g_authority_valid = 0u;
+    }
+
     if (g_state != PWOS_NODE_ASSIGNED) {
         if ((g_last_register_tick == 0u ||
              (uint32_t)(now - g_last_register_tick) >= pdMS_TO_TICKS(PWOS_NODE_REGISTER_INTERVAL_MS)) &&
-            pwos_port_manager_select_upstream(&upstream_port) == 0) {
+            select_control_upstream(&upstream_port) == 0) {
             (void)send_register(upstream_port);
         }
         g_stats.state = g_state;
         g_stats.local_addr = g_local_addr;
         g_stats.upstream_port = g_upstream_port;
+        g_stats.authority_valid = g_authority_valid;
+        g_stats.authority_port = g_authority_port;
+        memcpy(g_stats.authority_uid, g_authority_uid, sizeof(g_stats.authority_uid));
+        g_stats.authority_epoch = g_authority_epoch;
+        g_stats.authority_priority = g_authority_priority;
         return;
     }
 
@@ -703,6 +816,11 @@ void pwos_node_control_tick(void)
     g_stats.lease_ms = g_lease_ms;
     g_stats.last_register_tick = g_last_register_tick;
     g_stats.last_renew_tick = g_last_renew_tick;
+    g_stats.authority_valid = g_authority_valid;
+    g_stats.authority_port = g_authority_port;
+    memcpy(g_stats.authority_uid, g_authority_uid, sizeof(g_stats.authority_uid));
+    g_stats.authority_epoch = g_authority_epoch;
+    g_stats.authority_priority = g_authority_priority;
 }
 
 int pwos_node_control_handle_rx(pwos_frame_block_t *block)
@@ -733,11 +851,14 @@ int pwos_node_control_handle_rx(pwos_frame_block_t *block)
     case PWOS_LINK_TYPE_CTRL_NODE_REGISTER:
         return handle_node_register(&view, block->port_id);
     case PWOS_LINK_TYPE_CTRL_ADDR_ASSIGN:
+        if (!control_from_authority(block->port_id)) return 1;
         return handle_addr_assign(&view, block->port_id);
     case PWOS_LINK_TYPE_CTRL_LEASE_ACK:
-        return handle_lease_ack(&view);
+        return handle_lease_ack(&view, block->port_id);
     case PWOS_LINK_TYPE_CTRL_ROUTE_UPDATE:
-        return handle_route_update(&view);
+        return handle_route_update(&view, block->port_id);
+    case PWOS_LINK_TYPE_CTRL_HOST_ADVERTISE:
+        return handle_host_advertise(&view, block->port_id);
     case PWOS_LINK_TYPE_CTRL_LINK_STATE:
     case PWOS_LINK_TYPE_CTRL_LEASE_RENEW:
         return route_or_drop(&view);

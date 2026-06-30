@@ -154,6 +154,36 @@ static void test_link_frame_integration(void)
     CHECK(view.payload_len == PWOS_MESH2_ADDR_ASSIGN_PAYLOAD_LEN);
 }
 
+static void test_host_advertise_roundtrip(void)
+{
+    pwos_mesh2_host_advertise_t in = {
+        .host_uid = {0x11223344u, 0x55667788u, 0x99AABBCCu},
+        .epoch = 1234u,
+        .cluster_id = 0x50574F53u,
+        .priority = 200u,
+        .role = PWOS_MESH2_HOST_ROLE_LEADER,
+        .flags = 1u,
+    };
+    pwos_mesh2_host_advertise_t out;
+    uint8_t payload[PWOS_MESH2_HOST_ADVERTISE_PAYLOAD_LEN];
+    size_t len = 0u;
+
+    CHECK(pwos_mesh2_encode_host_advertise(
+        &in, payload, sizeof(payload), &len) == PWOS_OK);
+    CHECK(len == PWOS_MESH2_HOST_ADVERTISE_PAYLOAD_LEN);
+    CHECK(pwos_mesh2_decode_host_advertise(payload, len, &out) == PWOS_OK);
+    CHECK(out.host_uid[0] == in.host_uid[0]);
+    CHECK(out.host_uid[1] == in.host_uid[1]);
+    CHECK(out.host_uid[2] == in.host_uid[2]);
+    CHECK(out.epoch == in.epoch);
+    CHECK(out.cluster_id == in.cluster_id);
+    CHECK(out.priority == in.priority);
+    CHECK(out.role == in.role);
+    CHECK(out.flags == in.flags);
+    payload[1] = 0xFFu;
+    CHECK(pwos_mesh2_decode_host_advertise(payload, len, &out) == PWOS_E_BAD_LENGTH);
+}
+
 int main(void)
 {
     test_node_register_roundtrip();
@@ -161,6 +191,7 @@ int main(void)
     test_link_state_roundtrip();
     test_route_update_roundtrip();
     test_link_frame_integration();
+    test_host_advertise_roundtrip();
 
     if (g_failures != 0) {
         printf("pwos mesh2 control tests failed: %d\n", g_failures);

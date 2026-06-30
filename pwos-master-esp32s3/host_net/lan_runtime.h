@@ -30,7 +30,6 @@ typedef struct {
     int32_t last_error;
 } pwos_lan_runtime_status_t;
 
-/* 启动有线网络。失败只返回错误，不会中止 coordinator。 */
 int pwos_lan_runtime_start(void);
 
 int pwos_lan_runtime_publish_host_rpc(

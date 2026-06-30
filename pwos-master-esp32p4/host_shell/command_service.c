@@ -531,7 +531,7 @@ int pwos_command_service_execute(
     } else if (strcmp(command, "help") == 0) {
         output_append(&builder,
             "help  ls [path]  cat <path>  stat <path>\r\n"
-            "echo <text> > <path>  mesh  sessions  net status  host\r\n"
+            "echo <text> > <path>  mesh  sessions  hosts  net status  host\r\n"
             "rpc <mcuN> <service.method> [payload] [--deadline=<ms>]\r\n"
             "stream <mcuN> <service.method> [payload] [--deadline=<ms>]\r\n"
             "notify <mcuN> <service.method> [payload] [--deadline=<ms>]\r\n"
@@ -559,6 +559,8 @@ int pwos_command_service_execute(
         rc = execute_cat(service, "/host/sys/topology", &builder);
     } else if (strcmp(command, "sessions") == 0) {
         rc = execute_cat(service, "/host/sys/sessions", &builder);
+    } else if (strcmp(command, "hosts") == 0) {
+        rc = execute_cat(service, "/host/sys/hosts", &builder);
     } else if (strcmp(command, "host") == 0) {
         rc = execute_cat(service, "/host/sys/health", &builder);
     } else if (strcmp(command, "net") == 0 && strcmp(args, "status") == 0) {

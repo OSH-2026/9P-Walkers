@@ -11,6 +11,7 @@
 #include "esp_eth_phy_ip101.h"
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_netif.h"
 #include "freertos/FreeRTOS.h"
 #include "mdns.h"
@@ -108,6 +109,7 @@ static void got_ip_event_handler(
     void *event_data)
 {
     ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+    char hostname[PWOS_LAN_HOSTNAME_CAP];
 
     (void)arg;
     (void)event_base;
@@ -125,21 +127,27 @@ static void got_ip_event_handler(
         IP2STR(&event->ip_info.gw));
     g_lan.status.has_ip = 1u;
     ++g_lan.status.got_ip_events;
+    memcpy(hostname, g_lan.status.hostname, sizeof(hostname));
     portEXIT_CRITICAL(&g_lan.lock);
 
-    ESP_LOGI(TAG, "got ip " IPSTR ", open http://" PWOS_LAN_HOSTNAME ".local/",
-        IP2STR(&event->ip_info.ip));
+    ESP_LOGI(TAG, "got ip " IPSTR ", open http://%s.local/",
+        IP2STR(&event->ip_info.ip), hostname);
 }
 
 static esp_err_t setup_mdns(void)
 {
     esp_err_t error;
+    char hostname[PWOS_LAN_HOSTNAME_CAP];
+
+    portENTER_CRITICAL(&g_lan.lock);
+    memcpy(hostname, g_lan.status.hostname, sizeof(hostname));
+    portEXIT_CRITICAL(&g_lan.lock);
 
     error = mdns_init();
     if (error != ESP_OK) {
         return error;
     }
-    error = mdns_hostname_set(PWOS_LAN_HOSTNAME);
+    error = mdns_hostname_set(hostname);
     if (error == ESP_OK) {
         error = mdns_instance_name_set("9P-Walkers Coordinator");
     }
@@ -164,6 +172,8 @@ int pwos_lan_runtime_start(void)
     esp_eth_mac_t *mac = NULL;
     esp_eth_phy_t *phy = NULL;
     esp_err_t error;
+    uint8_t eth_mac[6];
+    char hostname[PWOS_LAN_HOSTNAME_CAP];
 
     portENTER_CRITICAL(&g_lan.lock);
     ++g_lan.status.start_attempts;
@@ -171,6 +181,25 @@ int pwos_lan_runtime_start(void)
         portEXIT_CRITICAL(&g_lan.lock);
         return 0;
     }
+    portEXIT_CRITICAL(&g_lan.lock);
+
+    error = esp_read_mac(eth_mac, ESP_MAC_ETH);
+    if (error != ESP_OK) {
+        goto fail;
+    }
+    (void)snprintf(
+        hostname,
+        sizeof(hostname),
+        PWOS_LAN_HOSTNAME_PREFIX "-%02x%02x",
+        eth_mac[4],
+        eth_mac[5]);
+    portENTER_CRITICAL(&g_lan.lock);
+    memcpy(g_lan.status.mac, eth_mac, sizeof(eth_mac));
+    (void)snprintf(
+        g_lan.status.hostname,
+        sizeof(g_lan.status.hostname),
+        "%s",
+        hostname);
     portEXIT_CRITICAL(&g_lan.lock);
 
     error = esp_netif_init();
@@ -187,7 +216,7 @@ int pwos_lan_runtime_start(void)
         error = ESP_ERR_NO_MEM;
         goto fail;
     }
-    error = esp_netif_set_hostname(g_lan.netif, PWOS_LAN_HOSTNAME);
+    error = esp_netif_set_hostname(g_lan.netif, hostname);
     if (error != ESP_OK) {
         goto fail;
     }
@@ -301,4 +330,37 @@ void pwos_lan_runtime_get_status(pwos_lan_runtime_status_t *out_status)
     portENTER_CRITICAL(&g_lan.lock);
     *out_status = g_lan.status;
     portEXIT_CRITICAL(&g_lan.lock);
+}
+
+int pwos_lan_runtime_publish_host_rpc(
+    const uint32_t uid[3],
+    uint32_t epoch,
+    uint16_t priority,
+    uint16_t port)
+{
+    char uid_text[25];
+    char epoch_text[11];
+    char priority_text[6];
+    mdns_txt_item_t txt[4];
+    esp_err_t error;
+
+    if (uid == NULL || port == 0u) {
+        return (int)ESP_ERR_INVALID_ARG;
+    }
+    (void)snprintf(uid_text, sizeof(uid_text), "%08lx%08lx%08lx",
+        (unsigned long)uid[0], (unsigned long)uid[1], (unsigned long)uid[2]);
+    (void)snprintf(epoch_text, sizeof(epoch_text), "%lu", (unsigned long)epoch);
+    (void)snprintf(priority_text, sizeof(priority_text), "%u", priority);
+    txt[0] = (mdns_txt_item_t){"v", "1"};
+    txt[1] = (mdns_txt_item_t){"uid", uid_text};
+    txt[2] = (mdns_txt_item_t){"epoch", epoch_text};
+    txt[3] = (mdns_txt_item_t){"priority", priority_text};
+    error = mdns_service_add(
+        NULL, "_pwos", "_tcp", port, txt, sizeof(txt) / sizeof(txt[0]));
+    if (error == ESP_OK) {
+        portENTER_CRITICAL(&g_lan.lock);
+        g_lan.status.host_rpc_mdns_ready = 1u;
+        portEXIT_CRITICAL(&g_lan.lock);
+    }
+    return (int)error;
 }

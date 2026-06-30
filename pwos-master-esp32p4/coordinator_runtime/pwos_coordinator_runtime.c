@@ -20,6 +20,7 @@
 #include "cluster_vfs.h"
 #include "job_command.h"
 #include "job_manager.h"
+#include "host_rpc_runtime.h"
 #include "pwos_link_frame.h"
 #include "pwos_link_parser.h"
 #include "pwos_mesh2_control.h"
@@ -40,6 +41,7 @@
 #define PWOS_COORDINATOR_READ_SLICE_SIZE 128
 #define PWOS_COORDINATOR_HELLO_INTERVAL_MS 500u
 #define PWOS_COORDINATOR_REPORT_INTERVAL_MS 5000u
+#define PWOS_COORDINATOR_HOST_ADVERTISE_INTERVAL_MS 1000u
 #define PWOS_COORDINATOR_MINI9P_PROBE_INTERVAL_MS 10000u
 #define PWOS_COORDINATOR_MINI9P_DEADLINE_MS 1000u
 #define PWOS_COORDINATOR_MINI9P_HEALTH_READ_LEN 32u
@@ -265,6 +267,41 @@ static int send_mesh2_payload(
         PWOS_COORDINATOR_DEFAULT_TTL,
         payload,
         payload_len);
+}
+
+static int send_host_advertise(pwos_coordinator_runtime_t *runtime)
+{
+    pwos_host_rpc_runtime_status_t host;
+    pwos_mesh2_host_advertise_t advertise;
+    uint8_t payload[PWOS_MESH2_HOST_ADVERTISE_PAYLOAD_LEN];
+    size_t payload_len = 0u;
+
+    memset(&host, 0, sizeof(host));
+    pwos_host_rpc_runtime_get_status(&host);
+    if (host.initialized == 0u) {
+        return 0;
+    }
+    memset(&advertise, 0, sizeof(advertise));
+    memcpy(advertise.host_uid, host.local_uid, sizeof(advertise.host_uid));
+    advertise.epoch = host.local_epoch;
+    advertise.cluster_id = 0x50574F53u; /* "PWOS" */
+    advertise.priority = host.local_priority;
+    advertise.role = host.local_role;
+    if (pwos_mesh2_encode_host_advertise(
+            &advertise,
+            payload,
+            sizeof(payload),
+            &payload_len) != PWOS_OK ||
+        send_mesh2_payload(
+            runtime,
+            (uint8_t)PWOS_LINK_TYPE_CTRL_HOST_ADVERTISE,
+            PWOS_LINK_ADDR_UNASSIGNED,
+            payload,
+            (uint16_t)payload_len) != 0) {
+        return -1;
+    }
+    ++runtime->stats.host_advertise_tx;
+    return 0;
 }
 
 static int handle_node_register(
@@ -725,6 +762,7 @@ static void log_status(pwos_coordinator_runtime_t *runtime)
         " hello=%" PRIu32 "/%" PRIu32
         " reg=%" PRIu32 " assign=%" PRIu32
         " renew=%" PRIu32 " route=%" PRIu32
+        " host_adv=%" PRIu32
         " m9p=%" PRIu32 "/%" PRIu32 "/%" PRIu32 "/%" PRIu32
         " rpc=%" PRIu32 "/%" PRIu32 "/%" PRIu32
         " job=%" PRIu32 "/%" PRIu32 "/%" PRIu32 " lost=%" PRIu32
@@ -741,6 +779,7 @@ static void log_status(pwos_coordinator_runtime_t *runtime)
         runtime->stats.assign_tx,
         runtime->stats.lease_renew_rx,
         runtime->stats.route_update_tx,
+        runtime->stats.host_advertise_tx,
         runtime->stats.mini9p_probe_ok,
         runtime->stats.mini9p_probe_fail,
         runtime->stats.mini9p_tx,
@@ -966,6 +1005,7 @@ static void coordinator_task(void *arg)
     uint8_t rx_buf[PWOS_COORDINATOR_READ_SLICE_SIZE];
     TickType_t last_hello = 0u;
     TickType_t last_report = 0u;
+    TickType_t last_host_advertise = 0u;
 
     for (;;) {
         TickType_t now = xTaskGetTickCount();
@@ -975,6 +1015,13 @@ static void coordinator_task(void *arg)
             (uint32_t)(now - last_hello) >= pdMS_TO_TICKS(PWOS_COORDINATOR_HELLO_INTERVAL_MS)) {
             (void)send_hello(runtime, (uint8_t)PWOS_LINK_TYPE_LINK_HELLO);
             last_hello = now;
+        }
+
+        if (last_host_advertise == 0u ||
+            (uint32_t)(now - last_host_advertise) >=
+                pdMS_TO_TICKS(PWOS_COORDINATOR_HOST_ADVERTISE_INTERVAL_MS)) {
+            (void)send_host_advertise(runtime);
+            last_host_advertise = now;
         }
 
         rx_len = uart_read_bytes(

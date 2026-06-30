@@ -27,3 +27,4 @@ M3-port-manager.md
 - `M7-webshell-observability.md`
 - `M8-slave-rpc.md`
 - `M9-job-system.md`
+- `M10-host-rpc-multihost.md`

@@ -55,6 +55,13 @@ typedef struct {
     uint32_t bad_ctrl_frames;
     uint32_t local_data_tx;
     uint32_t local_data_tx_fail;
+    uint8_t authority_valid;
+    uint8_t authority_port;
+    uint32_t authority_uid[3];
+    uint32_t authority_epoch;
+    uint16_t authority_priority;
+    uint32_t host_advertise_rx;
+    uint32_t nonleader_ctrl_drop;
 } pwos_node_control_snapshot_t;
 
 void pwos_node_control_init(void);
