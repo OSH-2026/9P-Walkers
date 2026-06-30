@@ -11,6 +11,7 @@
 #include "mini9p_protocol.h"
 #include "pwos_coordinator_runtime.h"
 #include "session_manager.h"
+#include "dist_inference_service.h"
 
 #ifdef ESP_PLATFORM
 #include "esp_log.h"
@@ -515,6 +516,13 @@ static int service_read_node(
     char full_path[PWOS_HOST_RPC_TARGET_CAP + PWOS_HOST_RPC_PATH_CAP + 2u];
 
     (void)ctx;
+    /* target == "llm" 时由分布式推理服务处理，不走 coordinator -> STM32 链路。 */
+    if (strcmp(target, "llm") == 0) {
+        if (snprintf(full_path, sizeof(full_path), "/llm%s", path) >=
+            (int)sizeof(full_path)) return -(int)M9P_ERR_EMSIZE;
+        return pwos_dist_inference_service_read(
+            full_path, data, in_out_len, deadline_ms);
+    }
     if (snprintf(full_path, sizeof(full_path), "/%s%s", target, path) >=
         (int)sizeof(full_path)) return -(int)M9P_ERR_EMSIZE;
     return pwos_coordinator_runtime_read_path(
@@ -533,6 +541,13 @@ static int service_write_node(
     char full_path[PWOS_HOST_RPC_TARGET_CAP + PWOS_HOST_RPC_PATH_CAP + 2u];
 
     (void)ctx;
+    /* target == "llm" 时由分布式推理服务处理，不走 coordinator -> STM32 链路。 */
+    if (strcmp(target, "llm") == 0) {
+        if (snprintf(full_path, sizeof(full_path), "/llm%s", path) >=
+            (int)sizeof(full_path)) return -(int)M9P_ERR_EMSIZE;
+        return pwos_dist_inference_service_write(
+            full_path, data, data_len, out_written, deadline_ms);
+    }
     if (snprintf(full_path, sizeof(full_path), "/%s%s", target, path) >=
         (int)sizeof(full_path)) return -(int)M9P_ERR_EMSIZE;
     return pwos_coordinator_runtime_write_path(
@@ -1096,6 +1111,11 @@ int pwos_host_rpc_runtime_read_path(
     int rc;
 
     if (g_host_rpc.status.initialized == 0u) return PWOS_SESSION_ERR_NO_ROUTE;
+    /* /llm/ 路径由分布式推理服务本地处理，不查拓扑表。 */
+    if (strncmp(path, "/llm/", 5u) == 0) {
+        return pwos_dist_inference_service_read(
+            path, data, in_out_len, deadline_ms);
+    }
     rc = resolve_topology_path(
         path, &peer, owner_target, remote_path, &local_owner);
     if (rc != 0) return rc;
@@ -1145,6 +1165,11 @@ int pwos_host_rpc_runtime_write_path(
     int rc;
 
     if (g_host_rpc.status.initialized == 0u) return PWOS_SESSION_ERR_NO_ROUTE;
+    /* /llm/ 路径由分布式推理服务本地处理，不查拓扑表。 */
+    if (strncmp(path, "/llm/", 5u) == 0) {
+        return pwos_dist_inference_service_write(
+            path, data, data_len, out_written, deadline_ms);
+    }
     rc = resolve_topology_path(
         path, &peer, owner_target, remote_path, &local_owner);
     if (rc != 0) return rc;

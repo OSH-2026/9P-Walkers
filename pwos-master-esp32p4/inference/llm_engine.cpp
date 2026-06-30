@@ -5,8 +5,7 @@
  * 
  * Slight modifications added to make it ESP32 friendly
  */
-#include <Arduino.h>
-#include "llm.h"
+#include "llm_engine.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
@@ -15,9 +14,14 @@
 #include <string.h>
 #include <fcntl.h>
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "esp_system.h"
-#include "esp_dsp.h"
+#include "esp_timer.h"
 #include "esp_attr.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 #define MAP_FAILED NULL
 #define munmap(ptr, length) custom_munmap(ptr)
 #define close(fd) custom_close(fd)
@@ -42,11 +46,10 @@ T* safe_alloc(size_t num_elements) {
         ptr = (T*)heap_caps_calloc(num_elements, sizeof(T), MALLOC_CAP_INTERNAL);
     }
     
-    // 3. 终极防线：如果还是失败，绝对不返回 NULL 坑害后面的程序，直接报错死锁！
+    // 初始化阶段无法恢复时立即终止，避免带着空指针进入矩阵计算。
     if (ptr == nullptr) {
-        Serial0.printf("\n[致命错误] 内存分配失败！尝试申请大小: %d 字节\n", total_size);
-        Serial0.flush();
-        while(true) { delay(100); } // 将程序死锁在这里，防止引发硬件 Panic
+        ESP_LOGE("LLM", "内存分配失败，申请大小=%zu", total_size);
+        abort();
     }
     
     return ptr;
@@ -315,10 +318,7 @@ void softmax(v4sf *x, int size)
 
 void matmul_task(void *params)
 {
-    const TickType_t xDelay = 1 / portTICK_PERIOD_MS;
     MatMulTaskParams *p = (MatMulTaskParams *)params;
-    TaskHandle_t current_task = xTaskGetCurrentTaskHandle();
-    char *tName = pcTaskGetName(current_task);
     // ESP_LOGI(TAG, "Created Task %s", tName);
     for (;;)
     {
@@ -344,10 +344,7 @@ void matmul_task(void *params)
 
 void forward_task(void *params)
 {
-    const TickType_t xDelay = 1 / portTICK_PERIOD_MS;
     ForwardTaskParams *t_params = (ForwardTaskParams *)params;
-    TaskHandle_t current_task = xTaskGetCurrentTaskHandle();
-    char *tName = pcTaskGetName(current_task);
     // ESP_LOGI(TAG, "Created Task %s", tName);
     for (;;)
     {
@@ -715,13 +712,13 @@ void safe_printf(char *piece)
             return; // bad byte, don't print it
         }
     }
-    Serial0.printf("%s", piece);
+    printf("%s", piece);
 }
 
-int str_lookup(char *str, TokenIndex *sorted_vocab, int vocab_size)
+int str_lookup(const char *str, TokenIndex *sorted_vocab, int vocab_size)
 {
     // efficiently find the perfect match for str in vocab, return its index or -1 if not found
-    TokenIndex tok = {.str = str}; // acts as the key to search for
+    TokenIndex tok = {.str = str, .id = 0}; // acts as the key to search for
     TokenIndex *res = (TokenIndex*)bsearch(&tok, sorted_vocab, vocab_size, sizeof(TokenIndex), compare_tokens);
     return res != NULL ? res->id : -1;
 }
@@ -1040,21 +1037,30 @@ int sample(Sampler *sampler, v4sf *logits)
 
 long time_in_ms()
 {
-    // return time in milliseconds, for benchmarking the model speed
-    struct timespec time;
-    clock_gettime(CLOCK_REALTIME, &time);
-    return time.tv_sec * 1000 + time.tv_nsec / 1000000;
+    return (long)(esp_timer_get_time() / 1000);
 }
 
 // ----------------------------------------------------------------------------
 // generation loop
 
-void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, char *prompt, int steps, generated_complete_cb cb_done)
+void generate(
+    Transformer *transformer,
+    Tokenizer *tokenizer,
+    Sampler *sampler,
+    char *prompt,
+    int steps,
+    generated_piece_cb cb_piece,
+    generated_complete_cb cb_done,
+    void *cb_ctx)
 {
-    char *empty_prompt = "";
+    char empty_prompt[] = "";
     if (prompt == NULL)
     {
         prompt = empty_prompt;
+    }
+    /* KV cache 仅为 seq_len 个位置分配，旧工程的 1024 会越界写内存。 */
+    if (steps <= 0 || steps > transformer->config.seq_len) {
+        steps = transformer->config.seq_len;
     }
 
     // encode the (string) prompt into tokens sequence
@@ -1101,7 +1107,8 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
 
         // print the token as string, decode it with the Tokenizer object
         char *piece = decode(tokenizer, token, next);
-        safe_printf(piece); // same as printf("%s", piece), but skips "unsafe" bytes
+        if (cb_piece != NULL) cb_piece(cb_ctx, piece);
+        else safe_printf(piece);
         fflush(stdout);
         token = next;
 
@@ -1111,7 +1118,7 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
             start = time_in_ms();
         }
     }
-    Serial0.printf("\n");
+    printf("\n");
 
     // report achieved tok/s (pos-1 because the timer starts after first iteration)
     if (pos > 1)
@@ -1119,7 +1126,7 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
         long end = time_in_ms();
         float tks = (pos - 1) / (double)(end - start) * 1000;
         fprintf(stderr, "achieved tok/s: %f\n", tks);
-        cb_done(tks);
+        if (cb_done != NULL) cb_done(cb_ctx, tks);
     }
 
     free(prompt_tokens);
@@ -1129,7 +1136,7 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
 void read_stdin(const char *guide, char *buffer, size_t bufsize)
 {
     // read a line from stdin, up to but not including \n
-    Serial0.printf("%s", guide);
+    printf("%s", guide);
     if (fgets(buffer, bufsize, stdin) != NULL)
     {
         size_t len = strlen(buffer);

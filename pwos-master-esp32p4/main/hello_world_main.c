@@ -12,6 +12,8 @@
 #include "http_server.h"
 #include "lan_runtime.h"
 #include "pwos_coordinator_runtime.h"
+#include "dist_inference_service.h"
+#include "inference_runtime.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "pwos_main";
@@ -66,6 +68,13 @@ void app_main(void)
     }
     if (rc != 0) {
         ESP_LOGE(TAG, "WebShell service unavailable rc=%d", rc);
+    }
+
+    /* 分布式推理服务 + LLM 推理引擎 */
+    (void)pwos_dist_inference_service_init();
+    rc = pwos_inference_runtime_start();
+    if (rc != 0) {
+        ESP_LOGE(TAG, "inference unavailable rc=%d", rc);
     }
 
     for (;;) {

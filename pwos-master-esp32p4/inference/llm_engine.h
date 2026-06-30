@@ -1,5 +1,5 @@
-#ifndef LLM_H
-#define LLM_H
+#ifndef PWOS_LLM_ENGINE_H
+#define PWOS_LLM_ENGINE_H
 
 /**
  * Original author of this:
@@ -10,11 +10,6 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/semphr.h"
-#include "freertos/task.h"
-#include "freertos/event_groups.h"
 
 typedef float v4sf;
 
@@ -32,7 +27,7 @@ typedef struct {
 } Sampler;
 
 typedef struct {
-    char *str;
+    const char *str;
     int id;
 } TokenIndex;
 
@@ -106,15 +101,24 @@ typedef struct {
 
 
 
-typedef void (*generated_complete_cb)(float tokens_ps);
+typedef void (*generated_piece_cb)(void *ctx, const char *piece);
+typedef void (*generated_complete_cb)(void *ctx, float tokens_ps);
 
 void build_transformer(Transformer *t, char* checkpoint_path);
 void build_tokenizer(Tokenizer* t, char* tokenizer_path, int vocab_size);
 void build_sampler(Sampler* sampler, int vocab_size, float temperature, float topp, unsigned long long rng_seed);
-void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, char *prompt, int steps, generated_complete_cb cb_done);
+void generate(
+    Transformer *transformer,
+    Tokenizer *tokenizer,
+    Sampler *sampler,
+    char *prompt,
+    int steps,
+    generated_piece_cb cb_piece,
+    generated_complete_cb cb_done,
+    void *cb_ctx);
 void free_sampler(Sampler* sampler);
 void free_transformer(Transformer* t);
 void free_tokenizer(Tokenizer* t);
 
 
-#endif
+#endif /* PWOS_LLM_ENGINE_H */

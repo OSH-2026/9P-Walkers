@@ -7,6 +7,7 @@ idf_component_register(
         "../host_net/lan_runtime.c"
         "../inference/llm_engine.cpp"
         "../inference/inference_runtime.cpp"
+        "../inference/dist_inference_service.c"
         "${PWOS_P4_DIR}/coordinator_runtime/pwos_coordinator_runtime.c"
         "${PWOS_P4_DIR}/host_coordinator/host_coordinator.c"
         "${PWOS_P4_DIR}/host_sessions/session_manager.c"

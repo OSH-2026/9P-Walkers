@@ -12,10 +12,14 @@ set(PWOS_HOST_RPC_DIR "${CMAKE_CURRENT_LIST_DIR}/../host_rpc")
 set(PWOS_SLAVE_RPC_DIR "${CMAKE_CURRENT_LIST_DIR}/../slave_rpc")
 set(PWOS_HOST_JOBS_DIR "${CMAKE_CURRENT_LIST_DIR}/../host_jobs")
 set(PWOS_WEB_DIR "${CMAKE_CURRENT_LIST_DIR}/../web")
+set(PWOS_INFERENCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../inference")
 
 idf_component_register(
     SRCS
         "hello_world_main.c"
+        "../inference/llm_engine.cpp"
+        "../inference/inference_runtime.cpp"
+        "../inference/dist_inference_service.c"
         "../coordinator_runtime/pwos_coordinator_runtime.c"
         "../host_coordinator/host_coordinator.c"
         "../host_sessions/session_manager.c"
@@ -59,10 +63,12 @@ idf_component_register(
         nvs_flash
         ip101
         spi_flash
+        spiffs
         heap
         log
     INCLUDE_DIRS
         "."
+        "../inference"
         "../coordinator_runtime"
         "../host_coordinator"
         "../host_sessions"
@@ -79,3 +85,6 @@ idf_component_register(
         "${PWOS_SHARED_RPC_DIR}"
         "${PWOS_SHARED_JOB_DIR}"
         "${PWOS_SHARED_HOST_RPC_DIR}")
+
+spiffs_create_partition_image(model "${CMAKE_CURRENT_LIST_DIR}/../model" FLASH_IN_PROJECT)
+

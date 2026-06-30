@@ -8,6 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "host_rpc_runtime.h"
+#include "dist_inference_service.h"
 #include "inference_runtime.h"
 #include "lan_runtime.h"
 #include "pwos_coordinator_runtime.h"
@@ -49,6 +50,7 @@ extern "C" void app_main(void)
         rc = pwos_host_rpc_runtime_start();
         if (rc != 0) ESP_LOGE(TAG, "host RPC unavailable rc=%d", rc);
     }
+    (void)pwos_dist_inference_service_init();
     rc = pwos_inference_runtime_start();
     if (rc != 0) ESP_LOGE(TAG, "inference unavailable rc=%d", rc);
 
