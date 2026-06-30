@@ -88,6 +88,18 @@ static const struct local_vfs_node k_nodes[] = {
     {"/compute/caps", NULL, {{M9P_QID_VIRTUAL | M9P_QID_READONLY, 0u, 1u, 17u}, M9P_SERVER_PERM_READ, M9P_STAT_VIRTUAL, 0u, 0u, "caps"}},
     {"/compute/load", NULL, {{M9P_QID_VIRTUAL | M9P_QID_READONLY, 0u, 1u, 18u}, M9P_SERVER_PERM_READ, M9P_STAT_VIRTUAL, 0u, 0u, "load"}},
     {"/compute/jobs", NULL, {{M9P_QID_VIRTUAL | M9P_QID_READONLY, 0u, 1u, 19u}, M9P_SERVER_PERM_READ, M9P_STAT_VIRTUAL, 0u, 0u, "jobs"}},
+    {
+        "/display",
+        NULL,
+        {{M9P_QID_DIR | M9P_QID_VIRTUAL | M9P_QID_READONLY, 0u, 1u, 20u},
+         M9P_SERVER_PERM_READ,
+         M9P_STAT_DIR | M9P_STAT_VIRTUAL,
+         0u,
+         0u,
+         "display"},
+    },
+    {"/display/status", NULL, {{M9P_QID_VIRTUAL | M9P_QID_READONLY, 0u, 1u, 21u}, M9P_SERVER_PERM_READ, M9P_STAT_VIRTUAL, 0u, 0u, "status"}},
+    {"/display/tile", NULL, {{M9P_QID_VIRTUAL, 0u, 1u, 22u}, M9P_SERVER_PERM_WRITE, M9P_STAT_VIRTUAL, 0u, 0u, "tile"}},
 };
 
 /**

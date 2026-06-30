@@ -13,6 +13,18 @@ set(PWOS_SLAVE_RPC_DIR "${CMAKE_CURRENT_LIST_DIR}/../slave_rpc")
 set(PWOS_HOST_JOBS_DIR "${CMAKE_CURRENT_LIST_DIR}/../host_jobs")
 set(PWOS_WEB_DIR "${CMAKE_CURRENT_LIST_DIR}/../web")
 set(PWOS_INFERENCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../inference")
+set(PWOS_RENDER_DIR "${CMAKE_CURRENT_LIST_DIR}/../render")
+
+file(GLOB PWOS_LUA_SRCS "${CMAKE_CURRENT_LIST_DIR}/../lua/*.c")
+list(REMOVE_ITEM PWOS_LUA_SRCS
+    "${CMAKE_CURRENT_LIST_DIR}/../lua/lua.c"
+    "${CMAKE_CURRENT_LIST_DIR}/../lua/luac.c"
+    "${CMAKE_CURRENT_LIST_DIR}/../lua/lcorolib.c"
+    "${CMAKE_CURRENT_LIST_DIR}/../lua/ldblib.c"
+    "${CMAKE_CURRENT_LIST_DIR}/../lua/liolib.c"
+    "${CMAKE_CURRENT_LIST_DIR}/../lua/loadlib.c"
+    "${CMAKE_CURRENT_LIST_DIR}/../lua/loslib.c"
+    "${CMAKE_CURRENT_LIST_DIR}/../lua/lutf8lib.c")
 
 idf_component_register(
     SRCS
@@ -20,6 +32,7 @@ idf_component_register(
         "../inference/llm_engine.cpp"
         "../inference/inference_runtime.cpp"
         "../inference/dist_inference_service.c"
+        "../render/lua_render_runtime.c"
         "../coordinator_runtime/pwos_coordinator_runtime.c"
         "../host_coordinator/host_coordinator.c"
         "../host_sessions/session_manager.c"
@@ -46,8 +59,10 @@ idf_component_register(
         "${PWOS_SHARED_JOB_DIR}/pwos_job_protocol.c"
         "${PWOS_SHARED_HOST_RPC_DIR}/pwos_host_rpc_protocol.c"
         "${PWOS_SHARED_HOST_RPC_DIR}/pwos_host_election.c"
+        ${PWOS_LUA_SRCS}
     EMBED_FILES
         "../web/index.html"
+        "../render/whitted_scheduler.lua"
     PRIV_REQUIRES
         freertos
         esp_driver_uart
@@ -69,6 +84,8 @@ idf_component_register(
     INCLUDE_DIRS
         "."
         "../inference"
+        "../render"
+        "../lua"
         "../coordinator_runtime"
         "../host_coordinator"
         "../host_sessions"

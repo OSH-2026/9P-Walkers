@@ -107,6 +107,24 @@ int pwos_coordinator_runtime_job_command(
     size_t *out_len,
     uint32_t deadline_ms);
 
+/* Lua 调度器使用的结构化 job API，避免解析 shell 文本。 */
+int pwos_coordinator_runtime_job_submit(
+    const char *target,
+    uint8_t kernel,
+    const uint8_t *input,
+    uint16_t input_len,
+    uint32_t deadline_ms,
+    uint32_t *out_host_job_id,
+    uint16_t *out_remote_status);
+
+int pwos_coordinator_runtime_job_result(
+    uint32_t host_job_id,
+    uint32_t deadline_ms,
+    uint8_t *out_result,
+    uint16_t *in_out_len,
+    pwos_job_entry_t *out_entry,
+    uint16_t *out_remote_status);
+
 int pwos_coordinator_runtime_rpc_call(
     const char *target,
     const char *service,

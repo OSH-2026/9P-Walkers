@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "pwos_smallpt.h"
+
 static void worker_lock(pwos_compute_worker_t *worker)
 {
     if (worker != NULL && worker->config.lock != NULL) {
@@ -144,6 +146,18 @@ static uint16_t validate_input(
         *out_work_total = (uint32_t)width * height;
         return PWOS_JOB_STATUS_OK;
     }
+    case PWOS_JOB_KERNEL_RAYTRACE_TILE:
+    {
+        pwos_render_request_t request;
+
+        if (pwos_render_decode_request(input, input_len, &request) != 0 ||
+            pwos_render_result_len(&request) > PWOS_COMPUTE_RESULT_CAP) {
+            return PWOS_JOB_STATUS_BAD_REQUEST;
+        }
+        *out_result_len = pwos_render_result_len(&request);
+        *out_work_total = (uint32_t)request.tile_w * request.tile_h;
+        return PWOS_JOB_STATUS_OK;
+    }
     default:
         return PWOS_JOB_STATUS_UNSUPPORTED;
     }
@@ -163,6 +177,12 @@ static void prepare_result(pwos_compute_job_t *job)
         job->result[0] = job->input[0];
         job->result[1] = job->input[1];
         pwos_job_put_le16(job->result + 2u, pwos_job_get_le16(job->input + 2u));
+    } else if (job->kernel == PWOS_JOB_KERNEL_RAYTRACE_TILE) {
+        pwos_render_request_t request;
+
+        if (pwos_render_decode_request(job->input, job->input_len, &request) == 0) {
+            pwos_render_write_result_header(&request, job->result);
+        }
     }
 }
 
@@ -444,6 +464,23 @@ static void step_mandelbrot(pwos_compute_job_t *job)
     ++job->work_index;
 }
 
+static void step_raytrace_tile(pwos_compute_job_t *job)
+{
+    pwos_render_request_t request;
+    uint16_t pixel;
+    uint32_t offset;
+
+    if (pwos_render_decode_request(job->input, job->input_len, &request) != 0) {
+        job->state = PWOS_JOB_STATE_FAILED;
+        return;
+    }
+    pixel = pwos_smallpt_render_pixel(&request, job->work_index);
+    offset = PWOS_RENDER_RESULT_HEADER_LEN + job->work_index * 2u;
+    job->result[offset] = (uint8_t)(pixel & 0xFFu);
+    job->result[offset + 1u] = (uint8_t)(pixel >> 8);
+    ++job->work_index;
+}
+
 int pwos_compute_worker_step(pwos_compute_worker_t *worker)
 {
     pwos_compute_job_t *job = NULL;
@@ -488,6 +525,7 @@ int pwos_compute_worker_step(pwos_compute_worker_t *worker)
     case PWOS_JOB_KERNEL_VECTOR_ADD: step_vector_add(job); break;
     case PWOS_JOB_KERNEL_MATMUL: step_matmul(job); break;
     case PWOS_JOB_KERNEL_MANDELBROT: step_mandelbrot(job); break;
+    case PWOS_JOB_KERNEL_RAYTRACE_TILE: step_raytrace_tile(job); break;
     default:
         job->state = PWOS_JOB_STATE_FAILED;
         ++worker->stats.failed;

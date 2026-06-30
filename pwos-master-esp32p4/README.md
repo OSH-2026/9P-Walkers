@@ -148,3 +148,24 @@ job retry <lost-id>
 
 按 `docs/logs/refactor/M10-host-rpc-multihost.md` 使用两块 P4、两个独立 MCU 子树完成
 发现、选主、全局命名、跨主机 read/write 和断网切主验收。
+
+## Lua 并行光线追踪
+
+P4 启动后会创建 `lua_render` 任务，自动执行
+`render/whitted_scheduler.lua`。脚本枚举当前可达 MCU，把 120x160 的
+Whitted 经典场景拆成最大 8x7 的 tile，并让每个在线节点同时计算一个
+`raytrace_tile` job。完成的 RGB565 tile 会写入带显示屏节点的
+`/display/tile`，F429 再以 2 倍最近邻缩放持续更新 240x320 LCD。
+
+运行时可用下面两个路径确认计算和显示进度：
+
+```text
+cat /mcu3/display/status
+cat /mcu3/compute/jobs
+```
+
+P4 日志中每完成一帧会输出：
+
+```text
+pwos_lua_render: frame=1 complete tiles=345 workers=3 display=mcu3
+```

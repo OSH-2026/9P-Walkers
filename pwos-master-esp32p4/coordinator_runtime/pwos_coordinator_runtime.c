@@ -84,11 +84,9 @@ typedef struct {
 
 static pwos_coordinator_runtime_t g_runtime;
 
-#ifdef ESP_PLATFORM
 static int find_rpc_route(
     const char *target,
     pwos_cluster_vfs_route_t *out_route);
-#endif
 
 #ifdef ESP_PLATFORM
 static const char *TAG = "pwos_coord";
@@ -1448,6 +1446,53 @@ int pwos_coordinator_runtime_job_command(
         output_cap,
         out_len,
         deadline_ms);
+}
+
+int pwos_coordinator_runtime_job_submit(
+    const char *target,
+    uint8_t kernel,
+    const uint8_t *input,
+    uint16_t input_len,
+    uint32_t deadline_ms,
+    uint32_t *out_host_job_id,
+    uint16_t *out_remote_status)
+{
+    pwos_cluster_vfs_route_t route;
+    int rc;
+
+    if (g_runtime.initialized == 0u) return PWOS_SESSION_ERR_NO_ROUTE;
+    rc = find_rpc_route(target, &route);
+    if (rc != 0) return rc;
+    return pwos_job_manager_submit(
+        &g_runtime.jobs,
+        target,
+        route.addr,
+        route.boot_id,
+        kernel,
+        input,
+        input_len,
+        deadline_ms,
+        out_host_job_id,
+        out_remote_status);
+}
+
+int pwos_coordinator_runtime_job_result(
+    uint32_t host_job_id,
+    uint32_t deadline_ms,
+    uint8_t *out_result,
+    uint16_t *in_out_len,
+    pwos_job_entry_t *out_entry,
+    uint16_t *out_remote_status)
+{
+    if (g_runtime.initialized == 0u) return PWOS_SESSION_ERR_NO_ROUTE;
+    return pwos_job_manager_result(
+        &g_runtime.jobs,
+        host_job_id,
+        deadline_ms,
+        out_result,
+        in_out_len,
+        out_entry,
+        out_remote_status);
 }
 
 static int find_rpc_route(

@@ -8,6 +8,12 @@
 
 static int g_failures;
 
+static const uint8_t k_long_diagnostics[] =
+    "id=0 name=UART5 state=PEER rx=123 tx=456 hello=10/10 ack=10/10\\n"
+    "id=0 dma=1 rx_bytes=1234 rx_frames=40 tx_bytes=5678 tx_frames=50\\n"
+    "id=1 name=USART6 state=PEER rx=789 tx=987 hello=20/20 ack=20/20\\n"
+    "id=1 dma=1 rx_bytes=4321 rx_frames=60 tx_bytes=8765 tx_frames=70\\n";
+
 #define CHECK(expr) do { \
     if (!(expr)) { \
         ++g_failures; \
@@ -210,6 +216,24 @@ static int fake_build_response(
                 response_cap,
                 response_len) ? 0 : -(int)M9P_ERR_EMSIZE;
         }
+        if (strcmp(link->last_walk_path, "/sys/ports") == 0) {
+            const uint32_t total = (uint32_t)(sizeof(k_long_diagnostics) - 1u);
+            uint16_t count = 0u;
+
+            if (request.offset < total) {
+                uint32_t remaining = total - request.offset;
+
+                count = request.count < remaining ?
+                    request.count : (uint16_t)remaining;
+            }
+            return m9p_build_rread(
+                frame.tag,
+                count > 0u ? k_long_diagnostics + request.offset : NULL,
+                count,
+                response,
+                response_cap,
+                response_len) ? 0 : -(int)M9P_ERR_EMSIZE;
+        }
         return m9p_build_rread(frame.tag, NULL, 0u, response, response_cap, response_len) ?
             0 : -(int)M9P_ERR_EMSIZE;
     }
@@ -291,7 +315,24 @@ static void test_read_path_uses_session_manager(void)
     CHECK(strcmp(env.link.last_walk_path, "/sys/health") == 0);
     CHECK(env.link.attach_count == 1u);
     CHECK(env.link.open_count == 1u);
-    CHECK(env.link.read_count == 1u);
+    CHECK(env.link.read_count == 2u); /* 数据块 + EOF */
+    CHECK(env.link.clunk_count == 1u);
+}
+
+static void test_read_path_continues_until_eof(void)
+{
+    test_env_t env;
+    uint8_t buf[512];
+    uint16_t len = sizeof(buf);
+
+    init_env(&env);
+    memset(buf, 0, sizeof(buf));
+
+    CHECK(pwos_cluster_vfs_read_path(
+        &env.vfs, "/mcu1/sys/ports", buf, &len, 1000u) == 0);
+    CHECK(len == sizeof(k_long_diagnostics) - 1u);
+    CHECK(memcmp(buf, k_long_diagnostics, len) == 0);
+    CHECK(env.link.read_count > 1u);
     CHECK(env.link.clunk_count == 1u);
 }
 
@@ -349,6 +390,7 @@ int main(void)
 {
     test_sync_names_and_root_list();
     test_read_path_uses_session_manager();
+    test_read_path_continues_until_eof();
     test_boot_change_forces_reattach();
     test_offline_returns_no_route();
     test_deadline_is_not_eagain_retry();

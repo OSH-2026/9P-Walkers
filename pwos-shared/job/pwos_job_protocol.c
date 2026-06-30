@@ -71,7 +71,7 @@ static int kind_valid(uint8_t kind)
 static int fields_valid(uint8_t state, uint8_t kernel, uint16_t status)
 {
     return state <= PWOS_JOB_STATE_LOST &&
-        kernel <= PWOS_JOB_KERNEL_MANDELBROT &&
+        kernel <= PWOS_JOB_KERNEL_RAYTRACE_TILE &&
         status <= PWOS_JOB_STATUS_CANCELLED;
 }
 
@@ -189,6 +189,7 @@ const char *pwos_job_kernel_name(uint8_t kernel)
     case PWOS_JOB_KERNEL_VECTOR_ADD: return "vector_add";
     case PWOS_JOB_KERNEL_MATMUL: return "matmul";
     case PWOS_JOB_KERNEL_MANDELBROT: return "mandelbrot";
+    case PWOS_JOB_KERNEL_RAYTRACE_TILE: return "raytrace_tile";
     default: return "none";
     }
 }

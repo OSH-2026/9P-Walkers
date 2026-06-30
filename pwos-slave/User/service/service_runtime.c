@@ -361,7 +361,7 @@ static void render_compute_caps(
     pwos_compute_worker_get_stats(&runtime->compute, &stats);
     diag_printf(writer,
         "cpu=stm32f407 slots=%u input=%u result=%u active=%u queued=%u "
-        "kernels=hash,vector_add,matmul,mandelbrot\n",
+        "kernels=hash,vector_add,matmul,mandelbrot,raytrace_tile\n",
         PWOS_COMPUTE_MAX_JOBS,
         PWOS_COMPUTE_INPUT_CAP,
         PWOS_COMPUTE_RESULT_CAP,

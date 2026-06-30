@@ -30,6 +30,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     User/bsp/display_sync.c
     User/gfx/gfx.c
     User/app/cube_demo.c
+    User/app/render_display.c
     # pwos-slave core
     ${PWOS_USER_DIR}/os/frame_pool.c
     ${PWOS_USER_DIR}/rtos/pwos_queues.c
@@ -54,6 +55,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${PWOS_SHARED_DIR}/mini9p/mini9p_server.c
     ${PWOS_SHARED_DIR}/rpc/pwos_rpc_protocol.c
     ${PWOS_SHARED_DIR}/job/pwos_job_protocol.c
+    ${PWOS_SHARED_DIR}/render/pwos_smallpt.c
 )
 
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
@@ -75,6 +77,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${PWOS_SHARED_DIR}/mini9p
     ${PWOS_SHARED_DIR}/rpc
     ${PWOS_SHARED_DIR}/job
+    ${PWOS_SHARED_DIR}/render
 )
 
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
@@ -86,4 +89,3 @@ list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)
 target_link_libraries(${CMAKE_PROJECT_NAME}
     stm32cubemx
 )
-

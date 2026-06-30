@@ -126,11 +126,43 @@ static void test_mandelbrot_progress_and_cancel(void)
     assert(snapshot.state == PWOS_JOB_STATE_CANCELLED);
 }
 
+static void test_raytrace_tile(void)
+{
+    pwos_compute_worker_t worker;
+    pwos_compute_job_snapshot_t snapshot;
+    uint8_t input[18] = {
+        1u, 1u, 0u, 0u, 8u, 7u, 120u, 160u, 1u, 3u,
+        7u, 0u, 0x78u, 0x56u, 0x34u, 0x12u, 0u, 0u,
+    };
+    uint8_t result[128];
+    uint16_t result_len = sizeof(result);
+    uint32_t job_id;
+    size_t i;
+    int any_nonzero = 0;
+
+    assert(pwos_compute_worker_init(&worker, NULL) == 0);
+    assert(pwos_compute_worker_submit(
+        &worker, 0u, PWOS_JOB_KERNEL_RAYTRACE_TILE,
+        input, sizeof(input), &job_id) == PWOS_JOB_STATUS_OK);
+    run_until_terminal(&worker, job_id, &snapshot);
+    assert(snapshot.state == PWOS_JOB_STATE_DONE);
+    assert(pwos_compute_worker_get_result(
+        &worker, 0u, job_id, result, sizeof(result),
+        &result_len, NULL) == PWOS_JOB_STATUS_OK);
+    assert(result_len == 124u);
+    assert(result[0] == 1u && result[4] == 8u && result[5] == 7u);
+    for (i = 12u; i < result_len; ++i) {
+        if (result[i] != 0u) any_nonzero = 1;
+    }
+    assert(any_nonzero);
+}
+
 int main(void)
 {
     test_matmul();
     test_hash_and_vector();
     test_mandelbrot_progress_and_cancel();
+    test_raytrace_tile();
     puts("pwos compute worker tests passed");
     return 0;
 }

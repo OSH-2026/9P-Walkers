@@ -19,6 +19,7 @@
 #include "pwos_link_frame.h"
 #include "pwos_tasks.h"
 #include "rpc_service.h"
+#include "render_display.h"
 #include "stm32f4xx_hal.h"
 #include "uart_dma_port.h"
 
@@ -360,8 +361,8 @@ static void render_compute_caps(
 
     pwos_compute_worker_get_stats(&runtime->compute, &stats);
     diag_printf(writer,
-        "cpu=stm32f407 slots=%u input=%u result=%u active=%u queued=%u "
-        "kernels=hash,vector_add,matmul,mandelbrot\n",
+        "cpu=stm32f429 slots=%u input=%u result=%u active=%u queued=%u "
+        "kernels=hash,vector_add,matmul,mandelbrot,raytrace_tile\n",
         PWOS_COMPUTE_MAX_JOBS,
         PWOS_COMPUTE_INPUT_CAP,
         PWOS_COMPUTE_RESULT_CAP,
@@ -601,6 +602,20 @@ static int service_vfs_read(
         render_compute_load(runtime, &writer);
     } else if (strcmp(path, "/compute/jobs") == 0) {
         render_compute_jobs(runtime, &writer);
+    } else if (strcmp(path, "/display/status") == 0) {
+        pwos_render_display_status_t status;
+
+        pwos_render_display_get_status(&status);
+        diag_printf(&writer,
+            "ready=%u frame=%u dirty=%u tiles=%lu presents=%lu rejected=%lu canvas=%ux%u\n",
+            status.initialized,
+            status.frame_id,
+            status.dirty,
+            (unsigned long)status.tiles_received,
+            (unsigned long)status.frames_presented,
+            (unsigned long)status.rejected_tiles,
+            PWOS_RENDER_CANVAS_WIDTH,
+            PWOS_RENDER_CANVAS_HEIGHT);
     } else {
         return -(int)M9P_ERR_ENOENT;
     }
@@ -620,10 +635,17 @@ static int service_vfs_write(
     int rc;
 
     (void)ctx;
-    if (path == NULL || out_count == NULL || offset != 0u ||
-        strcmp(path, "/sys/fault") != 0) {
+    if (path == NULL || out_count == NULL || offset != 0u) {
         return -(int)M9P_ERR_EINVAL;
     }
+    if (strcmp(path, "/display/tile") == 0) {
+        rc = pwos_render_display_apply_tile(data, count);
+        if (rc == -2) return -(int)M9P_ERR_EAGAIN;
+        if (rc != 0) return -(int)M9P_ERR_EINVAL;
+        *out_count = count;
+        return 0;
+    }
+    if (strcmp(path, "/sys/fault") != 0) return -(int)M9P_ERR_EINVAL;
     rc = pwos_fault_control_command(data, count);
     if (rc == -2) {
         return -(int)M9P_ERR_ENOTSUP;

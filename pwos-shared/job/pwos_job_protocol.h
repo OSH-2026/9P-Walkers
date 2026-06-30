@@ -45,6 +45,7 @@ typedef enum {
     PWOS_JOB_KERNEL_VECTOR_ADD = 2,
     PWOS_JOB_KERNEL_MATMUL = 3,
     PWOS_JOB_KERNEL_MANDELBROT = 4,
+    PWOS_JOB_KERNEL_RAYTRACE_TILE = 5,
 } pwos_job_kernel_t;
 
 typedef enum {

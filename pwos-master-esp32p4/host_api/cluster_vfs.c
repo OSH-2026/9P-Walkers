@@ -933,9 +933,17 @@ int pwos_cluster_vfs_read_path(
     uint32_t deadline_ms)
 {
     uint16_t fd = 0xFFFFu;
+    uint16_t capacity;
+    uint16_t total = 0u;
     struct m9p_qid qid;
     int rc;
     int close_rc;
+
+    if (in_out_len == NULL || (*in_out_len > 0u && buf == NULL)) {
+        return -(int)M9P_ERR_EINVAL;
+    }
+    capacity = *in_out_len;
+    *in_out_len = 0u;
 
     rc = pwos_cluster_vfs_open(vfs, path, M9P_OREAD, deadline_ms, &fd);
     if (rc != 0) {
@@ -952,7 +960,20 @@ int pwos_cluster_vfs_read_path(
         return rc;
     }
 
-    rc = pwos_cluster_vfs_read(vfs, fd, buf, in_out_len, deadline_ms);
+    while (total < capacity) {
+        uint16_t chunk = (uint16_t)(capacity - total);
+
+        rc = pwos_cluster_vfs_read(
+            vfs, fd, buf + total, &chunk, deadline_ms);
+        if (rc != 0) {
+            break;
+        }
+        total = (uint16_t)(total + chunk);
+        if (chunk == 0u) {
+            break;
+        }
+    }
+    *in_out_len = total;
     close_rc = pwos_cluster_vfs_close(vfs, fd, deadline_ms);
     if (rc != 0) {
         return rc;

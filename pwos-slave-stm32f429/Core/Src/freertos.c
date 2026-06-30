@@ -28,7 +28,7 @@
 #include "bsp_sdram.h"
 #include "bsp_lcd.h"
 #include "gfx.h"
-#include "cube_demo.h"
+#include "render_display.h"
 /* USER CODE END Includes */
 /* pwos-slave includes */
 #include "frame_pool.h"
@@ -206,15 +206,27 @@ void StartDefaultTask(void const * argument)
     }
   }
   gfx_init();
+  if (pwos_render_display_init() != 0) {
+    for (;;) {
+      osDelay(1000);
+    }
+  }
 
-  /* Demo loop: render to back buffer, present at next VSYNC, wait for swap.
-   * The LTDC scans the front buffer continuously; we never touch it, so
-   * the panel shows complete frames only (no tearing). */
+  /*
+   * LCD 默认任务由 CubeMX 以 osPriorityNormal 创建。若 VSYNC 信号量已经就绪，
+   * gfx_wait_vsync() 会立即返回，导致该任务持续占用 CPU，饿死 compute/app/diag。
+   */
+  vTaskPrioritySet(NULL, tskIDLE_PRIORITY + 1U);
+
+  /* 只在 Lua 调度器送来新 tile 时刷新，逐块形成完整光线追踪画面。 */
   for(;;)
   {
-    cube_demo_step();
-    gfx_present();
-    gfx_wait_vsync();
+    if (pwos_render_display_step() != 0) {
+      gfx_present();
+      gfx_wait_vsync();
+    }
+    /* VSYNC 信号量有积压时，也至少让低优先级任务获得一次调度机会。 */
+    osDelay(1);
   }
   /* USER CODE END StartDefaultTask */
 }

@@ -66,6 +66,7 @@ set(PWOS_SHARED_MESH2_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mesh2)
 set(PWOS_SHARED_MINI9P_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/mini9p)
 set(PWOS_SHARED_RPC_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/rpc)
 set(PWOS_SHARED_JOB_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/job)
+set(PWOS_SHARED_RENDER_DIR ${CMAKE_SOURCE_DIR}/../pwos-shared/render)
 
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${PWOS_USER_OS_DIR}/frame_pool.c
@@ -88,6 +89,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${PWOS_SHARED_MINI9P_DIR}/mini9p_server.c
     ${PWOS_SHARED_RPC_DIR}/pwos_rpc_protocol.c
     ${PWOS_SHARED_JOB_DIR}/pwos_job_protocol.c
+    ${PWOS_SHARED_RENDER_DIR}/pwos_smallpt.c
 )
 
 # Add include paths
@@ -106,6 +108,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${PWOS_SHARED_MINI9P_DIR}
     ${PWOS_SHARED_RPC_DIR}
     ${PWOS_SHARED_JOB_DIR}
+    ${PWOS_SHARED_RENDER_DIR}
 )
 
 # Add project symbols (macros)
