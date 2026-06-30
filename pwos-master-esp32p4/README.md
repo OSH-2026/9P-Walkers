@@ -1,7 +1,7 @@
 # PWOS ESP32-P4 Coordinator
 
-`pwos-master-esp32p4` 当前默认固件运行 M4-M8 coordinator、session、并发 VFS、
-从机 RPC、有线 LAN 和异步 WebShell。
+`pwos-master-esp32p4` 当前默认固件运行 M4-M9 coordinator、session、并发 VFS、
+从机 RPC、Job System、有线 LAN 和异步 WebShell。
 P4 会通过统一的 `/mcuN/...` 路径周期读取
 各节点 `/sys/health`，验证 `DATA_MINI9P` 数据面闭环。旧 Lua、legacy mesh host
 service 和旧 VFS bridge 已删除；当前 WebShell 只接入新的 `cluster_vfs`。
@@ -18,6 +18,8 @@ service 和旧 VFS bridge 已删除；当前 WebShell 只接入新的 `cluster_v
 - 使用全局 wire tag 和 `(src_addr, tag)` pending 表匹配并发响应。
 - mini9P 与 RPC 共用 pending 表，并按 `data_type` 隔离；RPC 支持 unary、流式聚合、
   单向通知、deadline 和超时后 CANCEL。
+- `DATA_JOB` 与 mini9P/RPC 共用 typed pending；`job_manager` 跟踪进度、结果、取消、
+  LOST 和 retry，保留 16 个有界静态 job 槽。
 - coordinator RX 任务是唯一 UART 接收消费者，探测 worker 只等待 semaphore。
 - `cluster_vfs` 用 mutex 和 generation 保护 route/fd，链路等待期间不持全局锁。
 - TX 帧之间保留 2 ms guard，覆盖 STM32 ReceiveToIdle 的 DMA rearm 空窗。
@@ -25,7 +27,7 @@ service 和旧 VFS bridge 已删除；当前 WebShell 只接入新的 `cluster_v
 - 使用 ESP32-P4 Function EV Board 的 IP101 PHY（地址 1、reset GPIO 51）接入 LAN。
 - HTTP 提供 `/`、`/health`、`/ws`，mDNS 主机名为 `pwos.local`。
 - WebSocket 回调只入队，单独 worker 执行命令；结果用 fd generation 隔离客户端。
-- 本地 `/host/sys/{health,links,topology,routes,sessions,web,log}` 提供状态快照。
+- 本地 `/host/sys/{health,links,topology,routes,sessions,jobs,web,log}` 提供状态快照。
 - 通过日志输出节点数、收发帧、register、lease、route、mini9P、parse error 等统计。
 
 ## 目录结构
@@ -45,6 +47,7 @@ pwos-master-esp32p4/
 │   ├── session_manager.h
 │   └── tests/
 ├── host_rpc/             # DATA_RPC client
+├── host_jobs/            # DATA_JOB manager 与 WebShell job 命令
 ├── host_api/
 │   ├── cluster_vfs.c
 │   ├── host_observability.c
@@ -112,9 +115,19 @@ rpc mcu2 system.delay 50 --deadline=500
 rpc mcu2 system.delay 500 --deadline=50
 notify mcu1 system.notify event
 stream mcu2 system.stream 0123456789012345678901234567890123456789
+job caps mcu1
+job submit mcu1 hash hello
+job submit mcu1 vector_add 8
+job submit mcu2 matmul
+job submit mcu2 mandelbrot 16 16 80
+job list
+job status <id>
+job result <id>
+job cancel <id>
+job retry <lost-id>
 ```
 
 ## 下一步
 
-M8 unary 已上板通过。按 `docs/logs/refactor/M8-slave-rpc.md` 完成 streaming
-多 chunk、流式 deadline 和恢复测试；通过后进入 M9 Job System。
+按 `docs/logs/refactor/M9-job-system.md` 完成两节点 Job 生命周期、取消、LOST/retry
+和控制面并行性上板验收；通过后进入 M10 主机间平面。

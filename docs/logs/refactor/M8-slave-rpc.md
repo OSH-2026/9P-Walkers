@@ -2,7 +2,7 @@
 
 日期：2026-06-30  
 基线：`f8c368f` 之后的工作树  
-状态：unary 阶段已上板通过；streaming 代码与构建完成，等待上板验收
+状态：完成，unary 与 streaming 均已上板通过
 
 ## 范围
 
@@ -79,3 +79,6 @@ cat /mcu2/sys/sessions
    mini9P 都能再次成功，不需要重启 P4。
 
 以上通过后，M8 完成并进入 M9 Job System。
+
+2026-06-30，上述 streaming、deadline 与恢复检查通过，mini9P health 和 RPC ping
+保持正常。M8 结束。

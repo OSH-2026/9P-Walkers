@@ -26,6 +26,7 @@ typedef struct {
     char rpc_payload[128];
     uint8_t rpc_mode;
     uint16_t rpc_status;
+    char job_args[128];
 } fake_io_t;
 
 static int fake_read(
@@ -151,6 +152,25 @@ static int fake_rpc(
     return 0;
 }
 
+static int fake_job(
+    void *ctx,
+    const char *args,
+    char *output,
+    size_t output_cap,
+    size_t *out_len,
+    uint32_t deadline_ms)
+{
+    fake_io_t *io = (fake_io_t *)ctx;
+    static const char reply[] = "id=7 state=queued\r\n";
+
+    io->last_deadline = deadline_ms;
+    snprintf(io->job_args, sizeof(io->job_args), "%s", args);
+    assert(output_cap > sizeof(reply));
+    memcpy(output, reply, sizeof(reply));
+    *out_len = sizeof(reply) - 1u;
+    return 0;
+}
+
 static void init_service(pwos_command_service_t *service, fake_io_t *io)
 {
     pwos_command_service_config_t config;
@@ -164,6 +184,7 @@ static void init_service(pwos_command_service_t *service, fake_io_t *io)
     config.list = fake_list;
     config.stat = fake_stat;
     config.rpc = fake_rpc;
+    config.job = fake_job;
     config.default_deadline_ms = 1500u;
     CHECK(pwos_command_service_init(service, &config) == 0);
 }
@@ -303,6 +324,23 @@ static void test_rpc_commands(void)
     CHECK(strstr(output, "stream chunks=2 bytes=4") != NULL);
 }
 
+static void test_job_command(void)
+{
+    pwos_command_service_t service;
+    fake_io_t io;
+    char output[512];
+
+    init_service(&service, &io);
+    CHECK(execute(
+        &service,
+        "job submit mcu1 matmul",
+        output,
+        sizeof(output)) == 0);
+    CHECK(strcmp(io.job_args, "submit mcu1 matmul") == 0);
+    CHECK(io.last_deadline == 1500u);
+    CHECK(strcmp(output, "id=7 state=queued\r\n") == 0);
+}
+
 int main(void)
 {
     test_paths_and_aliases();
@@ -310,6 +348,7 @@ int main(void)
     test_write_and_stat();
     test_fault_command();
     test_rpc_commands();
+    test_job_command();
 
     if (g_failures != 0) {
         printf("pwos command service tests failed: %d\n", g_failures);

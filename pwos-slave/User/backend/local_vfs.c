@@ -8,6 +8,7 @@
  * - /
  * - /sys
  * - /sys 下的运行时诊断文件
+ * - /compute 下的计算能力与 job 快照
  *
  * 服务器仍然负责 fid/会话语义。local_vfs 仅通过 m9p_server_ops 回答
  * 基于路径的资源回调。
@@ -74,6 +75,19 @@ static const struct local_vfs_node k_nodes[] = {
     /* 兼容此前现场调试使用的路径。 */
     {"/sys/info", NULL, {{M9P_QID_VIRTUAL | M9P_QID_READONLY, 0u, 1u, 14u}, M9P_SERVER_PERM_READ, M9P_STAT_VIRTUAL, 0u, 0u, "info"}},
     {"/sys/uart", NULL, {{M9P_QID_VIRTUAL | M9P_QID_READONLY, 0u, 1u, 15u}, M9P_SERVER_PERM_READ, M9P_STAT_VIRTUAL, 0u, 0u, "uart"}},
+    {
+        "/compute",
+        NULL,
+        {{M9P_QID_DIR | M9P_QID_VIRTUAL | M9P_QID_READONLY, 0u, 1u, 16u},
+         M9P_SERVER_PERM_READ,
+         M9P_STAT_DIR | M9P_STAT_VIRTUAL,
+         0u,
+         0u,
+         "compute"},
+    },
+    {"/compute/caps", NULL, {{M9P_QID_VIRTUAL | M9P_QID_READONLY, 0u, 1u, 17u}, M9P_SERVER_PERM_READ, M9P_STAT_VIRTUAL, 0u, 0u, "caps"}},
+    {"/compute/load", NULL, {{M9P_QID_VIRTUAL | M9P_QID_READONLY, 0u, 1u, 18u}, M9P_SERVER_PERM_READ, M9P_STAT_VIRTUAL, 0u, 0u, "load"}},
+    {"/compute/jobs", NULL, {{M9P_QID_VIRTUAL | M9P_QID_READONLY, 0u, 1u, 19u}, M9P_SERVER_PERM_READ, M9P_STAT_VIRTUAL, 0u, 0u, "jobs"}},
 };
 
 /**

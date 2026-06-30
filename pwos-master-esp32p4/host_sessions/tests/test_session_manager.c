@@ -8,6 +8,9 @@
 #include <time.h>
 
 #include "mini9p_protocol.h"
+#include "job_manager.h"
+#include "job_command.h"
+#include "pwos_job_protocol.h"
 #include "pwos_rpc_protocol.h"
 #include "rpc_client.h"
 #include "session_manager.h"
@@ -196,6 +199,87 @@ static int fake_send(
     uint32_t send_number;
     int rc;
 
+    if (data_type == 0x82u) {
+        pwos_job_frame_view_t request;
+        const uint8_t *response_payload = NULL;
+        uint8_t response_kind;
+        uint8_t response_state;
+        uint8_t result[4];
+        uint16_t response_payload_len = 0u;
+        uint32_t remote_job_id;
+        uint32_t result_len = 0u;
+
+        if (pwos_job_decode(payload, payload_len, &request) != 0) {
+            return -(int)M9P_ERR_EINVAL;
+        }
+        (void)pthread_mutex_lock(&link->mutex);
+        send_number = ++link->send_count;
+        if (send_number <= sizeof(link->wire_tags) / sizeof(link->wire_tags[0])) {
+            link->wire_tags[send_number - 1u] = request.request_id;
+        }
+        mode = link->mode;
+        (void)pthread_cond_broadcast(&link->cond);
+        (void)pthread_mutex_unlock(&link->mutex);
+        if (mode == FAKE_SEND_DROP) {
+            return 0;
+        }
+
+        remote_job_id = request.job_id == 0u ? 77u : request.job_id;
+        response_state = PWOS_JOB_STATE_DONE;
+        switch (request.kind) {
+        case PWOS_JOB_KIND_CAPS_REQUEST:
+            response_kind = PWOS_JOB_KIND_CAPS_RESPONSE;
+            response_state = PWOS_JOB_STATE_EMPTY;
+            response_payload = (const uint8_t *)"hash,matmul";
+            response_payload_len = 11u;
+            remote_job_id = 0u;
+            break;
+        case PWOS_JOB_KIND_SUBMIT:
+            response_kind = PWOS_JOB_KIND_SUBMIT_ACK;
+            response_state = PWOS_JOB_STATE_QUEUED;
+            break;
+        case PWOS_JOB_KIND_STATUS_REQUEST:
+            response_kind = PWOS_JOB_KIND_STATUS_RESPONSE;
+            result_len = 4u;
+            break;
+        case PWOS_JOB_KIND_RESULT_REQUEST:
+            response_kind = PWOS_JOB_KIND_RESULT_RESPONSE;
+            pwos_job_put_le32(result, 0x12345678u);
+            response_payload = result;
+            response_payload_len = sizeof(result);
+            result_len = sizeof(result);
+            break;
+        case PWOS_JOB_KIND_CANCEL_REQUEST:
+            response_kind = PWOS_JOB_KIND_CANCEL_ACK;
+            response_state = PWOS_JOB_STATE_CANCELLED;
+            break;
+        default:
+            return -(int)M9P_ERR_EINVAL;
+        }
+        if (pwos_job_encode(
+                response_kind,
+                response_state,
+                request.kernel,
+                request.request_id,
+                PWOS_JOB_STATUS_OK,
+                remote_job_id,
+                response_state == PWOS_JOB_STATE_DONE ? 1000u : 0u,
+                result_len,
+                response_payload,
+                response_payload_len,
+                response,
+                sizeof(response),
+                &response_len) != 0) {
+            return -(int)M9P_ERR_EINVAL;
+        }
+        return pwos_session_manager_deliver_data(
+            link->manager,
+            data_type,
+            dst_addr,
+            request.request_id,
+            response,
+            response_len) == 1 ? 0 : -(int)M9P_ERR_EIO;
+    }
     if (data_type == 0x81u) {
         pwos_rpc_frame_view_t request;
         size_t rpc_response_len = 0u;
@@ -712,6 +796,171 @@ static void test_rpc_client_call_notify_and_timeout_cancel(void)
     destroy_env(&env);
 }
 
+static void test_job_manager_lifecycle_and_retry(void)
+{
+    test_env_t env;
+    pwos_job_manager_t jobs;
+    pwos_job_entry_t entry;
+    pwos_job_manager_stats_t stats;
+    uint8_t caps[32];
+    uint8_t result[16];
+    uint16_t length;
+    uint16_t remote_status = UINT16_MAX;
+    uint32_t job_id = 0u;
+    uint32_t retry_id = 0u;
+
+    init_env(&env);
+    CHECK(pwos_session_manager_update_node(&env.manager, 8u, 80u) == 0);
+    CHECK(pwos_job_manager_init(&jobs, &env.manager, NULL) == 0);
+
+    length = sizeof(caps);
+    CHECK(pwos_job_manager_caps(
+        &jobs, 8u, 80u, caps, &length, 50u, &remote_status) == 0);
+    CHECK(remote_status == PWOS_JOB_STATUS_OK);
+    CHECK(length == 11u);
+    CHECK(memcmp(caps, "hash,matmul", length) == 0);
+
+    CHECK(pwos_job_manager_submit(
+        &jobs,
+        "mcu1",
+        8u,
+        80u,
+        PWOS_JOB_KERNEL_HASH,
+        (const uint8_t *)"abc",
+        3u,
+        50u,
+        &job_id,
+        &remote_status) == 0);
+    CHECK(job_id != 0u);
+    CHECK(remote_status == PWOS_JOB_STATUS_OK);
+    CHECK(pwos_job_manager_get(&jobs, job_id, &entry) == 0);
+    CHECK(entry.state == PWOS_JOB_STATE_QUEUED);
+    CHECK(entry.remote_job_id == 77u);
+    CHECK(pwos_job_manager_mark_node_lost(
+        &jobs, 8u, 81u, PWOS_SESSION_ERR_STALE_BOOT) == 0u);
+
+    CHECK(pwos_job_manager_status(
+        &jobs, job_id, 50u, &entry, &remote_status) == 0);
+    CHECK(entry.state == PWOS_JOB_STATE_DONE);
+    CHECK(entry.progress_permille == 1000u);
+    CHECK(entry.result_len == 4u);
+
+    length = sizeof(result);
+    CHECK(pwos_job_manager_result(
+        &jobs,
+        job_id,
+        50u,
+        result,
+        &length,
+        &entry,
+        &remote_status) == 0);
+    CHECK(length == 4u);
+    CHECK(pwos_job_get_le32(result) == 0x12345678u);
+
+    CHECK(pwos_job_manager_cancel(
+        &jobs, job_id, 50u, &entry, &remote_status) == 0);
+    CHECK(entry.state == PWOS_JOB_STATE_CANCELLED);
+
+    env.link.mode = FAKE_SEND_DROP;
+    CHECK(pwos_job_manager_submit(
+        &jobs,
+        "mcu1",
+        8u,
+        80u,
+        PWOS_JOB_KERNEL_HASH,
+        (const uint8_t *)"retry",
+        5u,
+        1u,
+        &job_id,
+        &remote_status) == PWOS_SESSION_ERR_DEADLINE);
+    CHECK(pwos_job_manager_get(&jobs, job_id, &entry) == 0);
+    CHECK(entry.state == PWOS_JOB_STATE_LOST);
+
+    env.link.mode = FAKE_SEND_IMMEDIATE;
+    CHECK(pwos_job_manager_retry(
+        &jobs, job_id, 8u, 80u, 50u, &retry_id, &remote_status) == 0);
+    CHECK(retry_id != 0u && retry_id != job_id);
+    CHECK(pwos_job_manager_get(&jobs, retry_id, &entry) == 0);
+    CHECK(entry.state == PWOS_JOB_STATE_QUEUED);
+    CHECK(pwos_job_manager_mark_node_lost(
+        &jobs, 8u, 80u, PWOS_SESSION_ERR_STALE_BOOT) == 1u);
+    CHECK(pwos_job_manager_get(&jobs, retry_id, &entry) == 0);
+    CHECK(entry.state == PWOS_JOB_STATE_LOST);
+    CHECK(entry.last_error == PWOS_SESSION_ERR_STALE_BOOT);
+
+    pwos_job_manager_get_stats(&jobs, &stats);
+    CHECK(stats.submitted == 3u);
+    CHECK(stats.retried == 1u);
+    CHECK(stats.lost == 2u);
+    CHECK(stats.transport_errors == 1u);
+    destroy_env(&env);
+}
+
+static int resolve_test_target(
+    void *ctx,
+    const char *target,
+    uint8_t *out_addr,
+    uint32_t *out_boot_id)
+{
+    (void)ctx;
+    if (strcmp(target, "mcu1") != 0) {
+        return PWOS_SESSION_ERR_NO_ROUTE;
+    }
+    *out_addr = 8u;
+    *out_boot_id = 80u;
+    return 0;
+}
+
+static void test_job_command_surface(void)
+{
+    test_env_t env;
+    pwos_job_manager_t jobs;
+    pwos_job_command_t command;
+    pwos_job_command_config_t config;
+    char output[1024];
+    size_t output_len = 0u;
+
+    init_env(&env);
+    CHECK(pwos_session_manager_update_node(&env.manager, 8u, 80u) == 0);
+    CHECK(pwos_job_manager_init(&jobs, &env.manager, NULL) == 0);
+    memset(&config, 0, sizeof(config));
+    config.manager = &jobs;
+    config.resolve = resolve_test_target;
+    CHECK(pwos_job_command_init(&command, &config) == 0);
+
+    CHECK(pwos_job_command_execute(
+        &command, "caps mcu1", output, sizeof(output), &output_len, 50u) == 0);
+    CHECK(strstr(output, "hash,matmul") != NULL);
+    CHECK(output_len == strlen(output));
+
+    CHECK(pwos_job_command_execute(
+        &command,
+        "submit mcu1 hash hello",
+        output,
+        sizeof(output),
+        &output_len,
+        50u) == 0);
+    CHECK(strstr(output, "id=1") != NULL);
+    CHECK(strstr(output, "state=queued") != NULL);
+
+    CHECK(pwos_job_command_execute(
+        &command, "status 1", output, sizeof(output), &output_len, 50u) == 0);
+    CHECK(strstr(output, "state=done") != NULL);
+    CHECK(strstr(output, "progress=100.0%") != NULL);
+
+    CHECK(pwos_job_command_execute(
+        &command, "result 1", output, sizeof(output), &output_len, 50u) == 0);
+    CHECK(strstr(output, "hash=0x12345678") != NULL);
+
+    CHECK(pwos_job_command_execute(
+        &command, "list", output, sizeof(output), &output_len, 50u) == 0);
+    CHECK(strstr(output, "target=mcu1") != NULL);
+    CHECK(pwos_job_command_execute(
+        &command, "caps missing", output, sizeof(output), &output_len, 50u) ==
+        PWOS_SESSION_ERR_NO_ROUTE);
+    destroy_env(&env);
+}
+
 int main(void)
 {
     test_two_nodes_are_concurrent_and_tags_are_global();
@@ -720,6 +969,8 @@ int main(void)
     test_boot_change_cancels_old_request();
     test_generic_rpc_request_uses_typed_pending();
     test_rpc_client_call_notify_and_timeout_cancel();
+    test_job_manager_lifecycle_and_retry();
+    test_job_command_surface();
 
     if (g_failures != 0) {
         printf("pwos host session tests failed: %d\n", g_failures);

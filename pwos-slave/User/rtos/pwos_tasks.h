@@ -51,6 +51,7 @@ typedef enum {
     PWOS_TASK_PORT_MGR,      /* 端口管理任务 */
     PWOS_TASK_MESH_CTRL,     /* mesh 控制/数据处理任务 */
     PWOS_TASK_SERVICE,       /* 系统服务任务 */
+    PWOS_TASK_COMPUTE,       /* 低优先级计算 worker */
     PWOS_TASK_APP,           /* 应用任务 */
     PWOS_TASK_DIAG,          /* 诊断/监控任务 */
     PWOS_TASK_COUNT          /* 任务总数，不是有效任务 ID */

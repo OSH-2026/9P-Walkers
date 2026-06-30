@@ -9,6 +9,8 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 set(SERVICE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/..)
 set(SHARED_RPC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../../pwos-shared/rpc)
+set(COMPUTE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../compute)
+set(SHARED_JOB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../../pwos-shared/job)
 
 add_executable(pwos_rpc_service_test
     test_rpc_service.c
@@ -24,3 +26,17 @@ target_include_directories(pwos_rpc_service_test PRIVATE
 target_compile_options(pwos_rpc_service_test PRIVATE -Wall -Wextra -Werror)
 
 add_test(NAME pwos_rpc_service_test COMMAND pwos_rpc_service_test)
+
+add_executable(pwos_job_service_test
+    test_job_service.c
+    ${SERVICE_DIR}/job_service.c
+    ${COMPUTE_DIR}/compute_worker.c
+    ${SHARED_JOB_DIR}/pwos_job_protocol.c
+)
+target_include_directories(pwos_job_service_test PRIVATE
+    ${SERVICE_DIR}
+    ${COMPUTE_DIR}
+    ${SHARED_JOB_DIR}
+)
+target_compile_options(pwos_job_service_test PRIVATE -Wall -Wextra -Werror)
+add_test(NAME pwos_job_service_test COMMAND pwos_job_service_test)

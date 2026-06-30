@@ -59,8 +59,22 @@ int main(void)
     expect_true(ops->open(&vfs, "/", M9P_OREAD, &qid, &iounit) == 0, "open root dir");
     expect_true(ops->read(&vfs, "/", 0u, M9P_OREAD, data, sizeof(data), &count) == 0, "read root dir");
     entry_count = m9p_parse_dirents(data, count, entries, sizeof(entries) / sizeof(entries[0]));
-    expect_true(entry_count == 1u, "root dir entry count without lfs");
+    expect_true(entry_count == 2u, "root dir entry count without lfs");
     expect_true(strcmp(entries[0].name, "sys") == 0, "root contains sys");
+    expect_true(strcmp(entries[1].name, "compute") == 0, "root contains compute");
+
+    count = 0u;
+    expect_true(ops->stat(&vfs, "/compute", &stat) == 0, "stat compute");
+    expect_true((stat.flags & M9P_STAT_DIR) != 0u, "compute is dir");
+    expect_true(ops->read(
+        &vfs, "/compute", 0u, M9P_OREAD,
+        data, sizeof(data), &count) == 0, "read compute dir");
+    entry_count = m9p_parse_dirents(
+        data, count, entries, sizeof(entries) / sizeof(entries[0]));
+    expect_true(entry_count == 3u, "compute dir entry count");
+    expect_true(strcmp(entries[0].name, "caps") == 0, "compute contains caps");
+    expect_true(strcmp(entries[1].name, "load") == 0, "compute contains load");
+    expect_true(strcmp(entries[2].name, "jobs") == 0, "compute contains jobs");
 
     count = 0u;
     expect_true(ops->open(&vfs, "/sys", M9P_OREAD, &qid, &iounit) == 0, "open sys dir");

@@ -18,10 +18,13 @@
 #endif
 
 #include "cluster_vfs.h"
+#include "job_command.h"
+#include "job_manager.h"
 #include "pwos_link_frame.h"
 #include "pwos_link_parser.h"
 #include "pwos_mesh2_control.h"
 #include "pwos_rpc_protocol.h"
+#include "pwos_job_protocol.h"
 #include "rpc_client.h"
 #include "session_manager.h"
 
@@ -58,6 +61,8 @@ typedef struct {
     pwos_host_coordinator_t coordinator;
     pwos_session_manager_t sessions;
     pwos_rpc_client_t rpc_client;
+    pwos_job_manager_t jobs;
+    pwos_job_command_t job_command;
     pwos_cluster_vfs_t cluster_vfs;
     uint32_t mini9p_last_probe_tick[PWOS_HOST_COORDINATOR_MAX_NODES];
     pwos_coordinator_runtime_stats_t stats;
@@ -70,10 +75,17 @@ typedef struct {
     SemaphoreHandle_t session_client_mutex[PWOS_SESSION_MANAGER_MAX_SESSIONS];
     SemaphoreHandle_t pending_event[PWOS_SESSION_MANAGER_MAX_PENDING];
     SemaphoreHandle_t vfs_mutex;
+    SemaphoreHandle_t job_mutex;
 #endif
 } pwos_coordinator_runtime_t;
 
 static pwos_coordinator_runtime_t g_runtime;
+
+#ifdef ESP_PLATFORM
+static int find_rpc_route(
+    const char *target,
+    pwos_cluster_vfs_route_t *out_route);
+#endif
 
 #ifdef ESP_PLATFORM
 static const char *TAG = "pwos_coord";
@@ -262,6 +274,9 @@ static int handle_node_register(
     pwos_mesh2_node_register_t reg;
     pwos_mesh2_addr_assign_t assign;
     uint8_t payload[PWOS_MESH2_ADDR_ASSIGN_PAYLOAD_LEN];
+    uint8_t restarted = 0u;
+    uint8_t old_addr = 0u;
+    uint32_t old_boot_id = 0u;
     size_t payload_len = 0u;
 
     if (pwos_mesh2_decode_node_register(view->payload, view->payload_len, &reg) != PWOS_OK) {
@@ -269,6 +284,16 @@ static int handle_node_register(
         return -1;
     }
     coordinator_lock(runtime);
+    {
+        const pwos_host_node_entry_t *old =
+            pwos_host_coordinator_find_by_uid(&runtime->coordinator, reg.uid);
+
+        if (old != NULL && old->boot_id != reg.boot_id) {
+            restarted = 1u;
+            old_addr = old->addr;
+            old_boot_id = old->boot_id;
+        }
+    }
     if (pwos_host_coordinator_handle_register(&runtime->coordinator, &reg, &assign) != 0) {
         coordinator_unlock(runtime);
         ++runtime->stats.tx_errors;
@@ -276,6 +301,13 @@ static int handle_node_register(
     }
     runtime->stats.node_count = count_nodes(&runtime->coordinator);
     coordinator_unlock(runtime);
+    if (restarted != 0u) {
+        (void)pwos_job_manager_mark_node_lost(
+            &runtime->jobs,
+            old_addr,
+            old_boot_id,
+            PWOS_SESSION_ERR_STALE_BOOT);
+    }
     if (pwos_mesh2_encode_addr_assign(
             &assign, payload, sizeof(payload), &payload_len) != PWOS_OK) {
         ++runtime->stats.tx_errors;
@@ -481,6 +513,35 @@ static void handle_frame(
         }
         break;
     }
+    case PWOS_LINK_TYPE_DATA_JOB:
+    {
+        pwos_job_frame_view_t job_view;
+
+        ++runtime->stats.data_rx;
+        if (view->dst != PWOS_LINK_ADDR_HOST) {
+            break;
+        }
+        if (pwos_job_decode(view->payload, view->payload_len, &job_view) != 0 ||
+            (job_view.kind != PWOS_JOB_KIND_CAPS_RESPONSE &&
+             job_view.kind != PWOS_JOB_KIND_SUBMIT_ACK &&
+             job_view.kind != PWOS_JOB_KIND_STATUS_RESPONSE &&
+             job_view.kind != PWOS_JOB_KIND_RESULT_RESPONSE &&
+             job_view.kind != PWOS_JOB_KIND_CANCEL_ACK)) {
+            ++runtime->stats.job_malformed;
+            break;
+        }
+        rc = pwos_session_manager_deliver_data(
+            &runtime->sessions,
+            (uint8_t)PWOS_LINK_TYPE_DATA_JOB,
+            view->src,
+            job_view.request_id,
+            view->payload,
+            view->payload_len);
+        if (rc == 1) {
+            ++runtime->stats.job_rx;
+        }
+        break;
+    }
     default:
         if (pwos_link_type_is_data(view->type)) {
             ++runtime->stats.data_rx;
@@ -553,6 +614,8 @@ static int session_send_data(
         ++runtime->stats.mini9p_tx;
     } else if (data_type == (uint8_t)PWOS_LINK_TYPE_DATA_RPC) {
         ++runtime->stats.rpc_tx;
+    } else if (data_type == (uint8_t)PWOS_LINK_TYPE_DATA_JOB) {
+        ++runtime->stats.job_tx;
     }
     return 0;
 }
@@ -649,11 +712,13 @@ static void probe_one_due_node(pwos_coordinator_runtime_t *runtime)
     }
 }
 
-static void log_status(const pwos_coordinator_runtime_t *runtime)
+static void log_status(pwos_coordinator_runtime_t *runtime)
 {
     pwos_session_manager_stats_t session_stats;
+    pwos_job_manager_stats_t job_stats;
 
     pwos_session_manager_get_stats(&runtime->sessions, &session_stats);
+    pwos_job_manager_get_stats(&runtime->jobs, &job_stats);
     ESP_LOGI(TAG,
         "stats nodes=%u rx=%" PRIu32 "/%" PRIu32
         " tx=%" PRIu32 "/%" PRIu32
@@ -662,6 +727,7 @@ static void log_status(const pwos_coordinator_runtime_t *runtime)
         " renew=%" PRIu32 " route=%" PRIu32
         " m9p=%" PRIu32 "/%" PRIu32 "/%" PRIu32 "/%" PRIu32
         " rpc=%" PRIu32 "/%" PRIu32 "/%" PRIu32
+        " job=%" PRIu32 "/%" PRIu32 "/%" PRIu32 " lost=%" PRIu32
         " pending=%" PRIu32 "/%" PRIu32 " peak=%" PRIu32
         " parse_err=%" PRIu32 " tx_err=%" PRIu32,
         runtime->stats.node_count,
@@ -682,6 +748,10 @@ static void log_status(const pwos_coordinator_runtime_t *runtime)
         runtime->stats.rpc_tx,
         runtime->stats.rpc_rx,
         runtime->stats.rpc_malformed,
+        runtime->stats.job_tx,
+        runtime->stats.job_rx,
+        runtime->stats.job_malformed,
+        job_stats.lost,
         session_stats.pending_delivered,
         session_stats.pending_unmatched,
         session_stats.pending_peak,
@@ -780,6 +850,42 @@ static void cluster_vfs_unlock(void *ctx)
     (void)xSemaphoreGive(runtime->vfs_mutex);
 }
 
+static void job_manager_lock(void *ctx)
+{
+    pwos_coordinator_runtime_t *runtime = (pwos_coordinator_runtime_t *)ctx;
+
+    (void)xSemaphoreTake(runtime->job_mutex, portMAX_DELAY);
+}
+
+static void job_manager_unlock(void *ctx)
+{
+    pwos_coordinator_runtime_t *runtime = (pwos_coordinator_runtime_t *)ctx;
+
+    (void)xSemaphoreGive(runtime->job_mutex);
+}
+
+static int resolve_job_target(
+    void *ctx,
+    const char *target,
+    uint8_t *out_addr,
+    uint32_t *out_boot_id)
+{
+    pwos_cluster_vfs_route_t route;
+    int rc;
+
+    (void)ctx;
+    if (out_addr == NULL || out_boot_id == NULL) {
+        return -(int)M9P_ERR_EINVAL;
+    }
+    rc = find_rpc_route(target, &route);
+    if (rc != 0) {
+        return rc;
+    }
+    *out_addr = route.addr;
+    *out_boot_id = route.boot_id;
+    return 0;
+}
+
 static void delete_runtime_sync(pwos_coordinator_runtime_t *runtime)
 {
     size_t i;
@@ -803,6 +909,10 @@ static void delete_runtime_sync(pwos_coordinator_runtime_t *runtime)
         vSemaphoreDelete(runtime->vfs_mutex);
         runtime->vfs_mutex = NULL;
     }
+    if (runtime->job_mutex != NULL) {
+        vSemaphoreDelete(runtime->job_mutex);
+        runtime->job_mutex = NULL;
+    }
     if (runtime->session_mutex != NULL) {
         vSemaphoreDelete(runtime->session_mutex);
         runtime->session_mutex = NULL;
@@ -825,9 +935,10 @@ static int init_runtime_sync(pwos_coordinator_runtime_t *runtime)
     runtime->coordinator_mutex = xSemaphoreCreateMutex();
     runtime->session_mutex = xSemaphoreCreateMutex();
     runtime->vfs_mutex = xSemaphoreCreateMutex();
+    runtime->job_mutex = xSemaphoreCreateMutex();
     if (runtime->tx_mutex == NULL || runtime->coordinator_mutex == NULL ||
         runtime->session_mutex == NULL ||
-        runtime->vfs_mutex == NULL) {
+        runtime->vfs_mutex == NULL || runtime->job_mutex == NULL) {
         delete_runtime_sync(runtime);
         return -1;
     }
@@ -972,6 +1083,8 @@ int pwos_coordinator_runtime_start_default(void)
     {
         pwos_session_manager_config_t session_config;
         pwos_cluster_vfs_config_t vfs_config;
+        pwos_job_manager_config_t job_config;
+        pwos_job_command_config_t job_command_config;
 
         memset(&session_config, 0, sizeof(session_config));
         session_config.io_ctx = &g_runtime;
@@ -991,9 +1104,21 @@ int pwos_coordinator_runtime_start_default(void)
         vfs_config.lock_ctx = &g_runtime;
         vfs_config.lock = cluster_vfs_lock;
         vfs_config.unlock = cluster_vfs_unlock;
+        memset(&job_config, 0, sizeof(job_config));
+        job_config.lock_ctx = &g_runtime;
+        job_config.lock = job_manager_lock;
+        job_config.unlock = job_manager_unlock;
+        memset(&job_command_config, 0, sizeof(job_command_config));
+        job_command_config.manager = &g_runtime.jobs;
+        job_command_config.resolve_ctx = &g_runtime;
+        job_command_config.resolve = resolve_job_target;
         if (pwos_session_manager_init(&g_runtime.sessions, &session_config) != 0 ||
             pwos_rpc_client_init(
                 &g_runtime.rpc_client, &g_runtime.sessions) != 0 ||
+            pwos_job_manager_init(
+                &g_runtime.jobs, &g_runtime.sessions, &job_config) != 0 ||
+            pwos_job_command_init(
+                &g_runtime.job_command, &job_command_config) != 0 ||
             pwos_cluster_vfs_init_with_config(
                 &g_runtime.cluster_vfs,
                 &g_runtime.sessions,
@@ -1147,6 +1272,48 @@ void pwos_coordinator_runtime_get_rpc_stats(
         return;
     }
     pwos_rpc_client_get_stats(&g_runtime.rpc_client, out_stats);
+}
+
+void pwos_coordinator_runtime_get_job_stats(
+    pwos_job_manager_stats_t *out_stats)
+{
+    if (out_stats == NULL) {
+        return;
+    }
+    if (g_runtime.initialized == 0u) {
+        memset(out_stats, 0, sizeof(*out_stats));
+        return;
+    }
+    pwos_job_manager_get_stats(&g_runtime.jobs, out_stats);
+}
+
+int pwos_coordinator_runtime_get_job(
+    size_t index,
+    pwos_job_entry_t *out_job)
+{
+    if (g_runtime.initialized == 0u) {
+        return PWOS_SESSION_ERR_NO_ROUTE;
+    }
+    return pwos_job_manager_get_at(&g_runtime.jobs, index, out_job);
+}
+
+int pwos_coordinator_runtime_job_command(
+    const char *args,
+    char *output,
+    size_t output_cap,
+    size_t *out_len,
+    uint32_t deadline_ms)
+{
+    if (g_runtime.initialized == 0u) {
+        return PWOS_SESSION_ERR_NO_ROUTE;
+    }
+    return pwos_job_command_execute(
+        &g_runtime.job_command,
+        args,
+        output,
+        output_cap,
+        out_len,
+        deadline_ms);
 }
 
 static int find_rpc_route(

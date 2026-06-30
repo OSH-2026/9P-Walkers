@@ -37,6 +37,7 @@ static const host_node_t g_host_nodes[] = {
     {"/host/sys/sessions", "sessions", 0u, PWOS_HOST_QID_BASE + 6u},
     {"/host/sys/web", "web", 0u, PWOS_HOST_QID_BASE + 7u},
     {"/host/sys/log", "log", 0u, PWOS_HOST_QID_BASE + 8u},
+    {"/host/sys/jobs", "jobs", 0u, PWOS_HOST_QID_BASE + 9u},
 };
 
 static void text_append(text_buffer_t *buffer, const char *format, ...)
@@ -98,15 +99,18 @@ static void render_health(text_buffer_t *output)
     pwos_session_manager_stats_t sessions;
     pwos_cluster_vfs_stats_t vfs;
     pwos_rpc_client_stats_t rpc;
+    pwos_job_manager_stats_t jobs;
 
     memset(&runtime, 0, sizeof(runtime));
     memset(&sessions, 0, sizeof(sessions));
     memset(&vfs, 0, sizeof(vfs));
     memset(&rpc, 0, sizeof(rpc));
+    memset(&jobs, 0, sizeof(jobs));
     pwos_coordinator_runtime_get_stats(&runtime);
     pwos_coordinator_runtime_get_session_stats(&sessions);
     pwos_coordinator_runtime_get_vfs_stats(&vfs);
     pwos_coordinator_runtime_get_rpc_stats(&rpc);
+    pwos_coordinator_runtime_get_job_stats(&jobs);
     text_append(output, "status=ok\n");
     text_append(output, "uptime_ms=%llu\n",
         (unsigned long long)(esp_timer_get_time() / 1000));
@@ -130,6 +134,10 @@ static void render_health(text_buffer_t *output)
         (unsigned long)rpc.stream_rx,
         (unsigned long)rpc.stream_tx,
         (unsigned long)rpc.deadline_errors);
+    text_append(output, "jobs_submitted=%lu jobs_lost=%lu jobs_transport_errors=%lu\n",
+        (unsigned long)jobs.submitted,
+        (unsigned long)jobs.lost,
+        (unsigned long)jobs.transport_errors);
     text_append(output, "vfs_last_error=%ld\n", (long)vfs.last_error);
 }
 
@@ -269,6 +277,57 @@ static void render_sessions(text_buffer_t *output)
     }
 }
 
+static void render_jobs(text_buffer_t *output)
+{
+    pwos_job_manager_stats_t stats;
+    size_t i;
+    size_t count = 0u;
+
+    memset(&stats, 0, sizeof(stats));
+    pwos_coordinator_runtime_get_job_stats(&stats);
+    text_append(output,
+        "submitted=%lu status=%lu result=%lu cancelled=%lu retried=%lu "
+        "lost=%lu transport_errors=%lu remote_errors=%lu reused=%lu last_id=%lu last_error=%ld\n",
+        (unsigned long)stats.submitted,
+        (unsigned long)stats.status_requests,
+        (unsigned long)stats.result_requests,
+        (unsigned long)stats.cancelled,
+        (unsigned long)stats.retried,
+        (unsigned long)stats.lost,
+        (unsigned long)stats.transport_errors,
+        (unsigned long)stats.remote_errors,
+        (unsigned long)stats.slots_reused,
+        (unsigned long)stats.last_host_job_id,
+        (long)stats.last_error);
+    for (i = 0u; i < PWOS_JOB_MANAGER_MAX_JOBS; ++i) {
+        pwos_job_entry_t job;
+
+        if (pwos_coordinator_runtime_get_job(i, &job) != 0) {
+            continue;
+        }
+        text_append(output,
+            "id=%lu target=%s addr=%u boot=%lu remote=%lu kernel=%s state=%s "
+            "progress=%u.%u%% result=%lu status=%s(%u) error=%ld\n",
+            (unsigned long)job.host_job_id,
+            job.target,
+            job.addr,
+            (unsigned long)job.boot_id,
+            (unsigned long)job.remote_job_id,
+            pwos_job_kernel_name(job.kernel),
+            pwos_job_state_name(job.state),
+            job.progress_permille / 10u,
+            job.progress_permille % 10u,
+            (unsigned long)job.result_len,
+            pwos_job_status_name(job.remote_status),
+            job.remote_status,
+            (long)job.last_error);
+        ++count;
+    }
+    if (count == 0u) {
+        text_append(output, "(empty)\n");
+    }
+}
+
 static void render_web(text_buffer_t *output)
 {
     pwos_lan_runtime_status_t lan;
@@ -319,13 +378,16 @@ static void render_log(text_buffer_t *output)
     pwos_coordinator_runtime_stats_t runtime;
     pwos_session_manager_stats_t sessions;
     pwos_rpc_client_stats_t rpc;
+    pwos_job_manager_stats_t jobs;
 
     memset(&runtime, 0, sizeof(runtime));
     memset(&sessions, 0, sizeof(sessions));
     memset(&rpc, 0, sizeof(rpc));
+    memset(&jobs, 0, sizeof(jobs));
     pwos_coordinator_runtime_get_stats(&runtime);
     pwos_coordinator_runtime_get_session_stats(&sessions);
     pwos_coordinator_runtime_get_rpc_stats(&rpc);
+    pwos_coordinator_runtime_get_job_stats(&jobs);
     text_append(output,
         "rx_frames=%lu tx_frames=%lu parse_errors=%lu tx_errors=%lu "
         "register=%lu assign=%lu renew=%lu route=%lu data_rx=%lu\n",
@@ -364,6 +426,21 @@ static void render_log(text_buffer_t *output)
         (unsigned long)rpc.deadline_errors,
         (unsigned long)rpc.remote_errors,
         (long)rpc.last_error);
+    text_append(output,
+        "job_tx=%lu job_rx=%lu malformed=%lu submitted=%lu status=%lu result=%lu "
+        "cancelled=%lu retried=%lu lost=%lu transport_error=%lu remote_error=%lu last_error=%ld\n",
+        (unsigned long)runtime.job_tx,
+        (unsigned long)runtime.job_rx,
+        (unsigned long)runtime.job_malformed,
+        (unsigned long)jobs.submitted,
+        (unsigned long)jobs.status_requests,
+        (unsigned long)jobs.result_requests,
+        (unsigned long)jobs.cancelled,
+        (unsigned long)jobs.retried,
+        (unsigned long)jobs.lost,
+        (unsigned long)jobs.transport_errors,
+        (unsigned long)jobs.remote_errors,
+        (long)jobs.last_error);
 }
 
 int pwos_host_observability_read(
@@ -402,6 +479,8 @@ int pwos_host_observability_read(
         render_web(&output);
     } else if (strcmp(path, "/host/sys/log") == 0) {
         render_log(&output);
+    } else if (strcmp(path, "/host/sys/jobs") == 0) {
+        render_jobs(&output);
     }
     *in_out_len = (uint16_t)output.len;
     return 0;

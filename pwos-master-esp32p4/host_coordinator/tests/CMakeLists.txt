@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.16)
 
 project(pwos_host_coordinator_tests C)
 
+enable_testing()
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
@@ -22,3 +24,5 @@ target_include_directories(pwos_host_coordinator_test PRIVATE
     ${SHARED_MESH2_DIR}
     ${SHARED_LINK_DIR}
 )
+
+add_test(NAME pwos_host_coordinator_test COMMAND pwos_host_coordinator_test)

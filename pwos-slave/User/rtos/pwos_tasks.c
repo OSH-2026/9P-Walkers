@@ -17,7 +17,7 @@
  *   pwos_mesh_rx_send() ──► mesh_ctrl_task
  *        │
  *        ▼
- *   node_control 控制面/中继，或 service_task 处理本机 DATA_MINI9P/DATA_RPC
+ *   node_control 控制面/中继，或 service_task 处理本机 DATA_MINI9P/DATA_RPC/DATA_JOB
  *
  *   上层发送路径：
  *   pwos_link_tx_send() ──► link_tx_task ──► pwos_uart_dma_send()
@@ -61,6 +61,7 @@
 #define PWOS_STACK_PORT_MGR_WORDS 384u
 #define PWOS_STACK_MESH_CTRL_WORDS 512u
 #define PWOS_STACK_SERVICE_WORDS 768u
+#define PWOS_STACK_COMPUTE_WORDS 512u
 #define PWOS_STACK_APP_WORDS 384u
 #define PWOS_STACK_DIAG_WORDS 384u
 
@@ -75,6 +76,7 @@
 #define PWOS_PRIO_PORT_MGR (tskIDLE_PRIORITY + 4u)
 #define PWOS_PRIO_MESH_CTRL (tskIDLE_PRIORITY + 4u)
 #define PWOS_PRIO_SERVICE (tskIDLE_PRIORITY + 3u)
+#define PWOS_PRIO_COMPUTE (tskIDLE_PRIORITY + 1u)
 #define PWOS_PRIO_APP (tskIDLE_PRIORITY + 2u)
 #define PWOS_PRIO_DIAG (tskIDLE_PRIORITY + 1u)
 #define PWOS_LINK_TX_GUARD_MS 2u
@@ -101,6 +103,7 @@ static StaticTask_t g_link_tx_tcb;
 static StaticTask_t g_port_mgr_tcb;
 static StaticTask_t g_mesh_ctrl_tcb;
 static StaticTask_t g_service_tcb;
+static StaticTask_t g_compute_tcb;
 static StaticTask_t g_app_tcb;
 static StaticTask_t g_diag_tcb;
 
@@ -111,6 +114,7 @@ static StackType_t g_link_tx_stack[PWOS_STACK_LINK_TX_WORDS];
 static StackType_t g_port_mgr_stack[PWOS_STACK_PORT_MGR_WORDS];
 static StackType_t g_mesh_ctrl_stack[PWOS_STACK_MESH_CTRL_WORDS];
 static StackType_t g_service_stack[PWOS_STACK_SERVICE_WORDS];
+static StackType_t g_compute_stack[PWOS_STACK_COMPUTE_WORDS];
 static StackType_t g_app_stack[PWOS_STACK_APP_WORDS];
 static StackType_t g_diag_stack[PWOS_STACK_DIAG_WORDS];
 
@@ -127,6 +131,7 @@ static pwos_task_runtime_t g_task_runtime[PWOS_TASK_COUNT] = {
     [PWOS_TASK_PORT_MGR] = { .name = "port_mgr" },
     [PWOS_TASK_MESH_CTRL] = { .name = "mesh_ctrl" },
     [PWOS_TASK_SERVICE] = { .name = "service" },
+    [PWOS_TASK_COMPUTE] = { .name = "compute" },
     [PWOS_TASK_APP] = { .name = "app" },
     [PWOS_TASK_DIAG] = { .name = "diag" },
 };
@@ -310,8 +315,8 @@ static void mesh_ctrl_task(void *argument)
 /*
  * 系统服务任务。
  *
- * 处理本机 mini9P/RPC 请求，并推进延期 RPC。10ms 的接收超时限定了
- * deadline 响应的调度粒度，同时不会阻塞链路与控制面任务。
+ * 处理本机 mini9P/RPC/Job 控制请求，并推进延期 RPC。长计算不在本任务执行。
+ * 10ms 的接收超时限定 deadline 响应的调度粒度，同时不会阻塞控制面任务。
  */
 static void service_task(void *argument)
 {
@@ -327,6 +332,22 @@ static void service_task(void *argument)
         pwos_service_runtime_poll();
 
         note_heartbeat(PWOS_TASK_SERVICE);
+    }
+}
+
+/*
+ * 长计算只在此低优先级任务推进。每步之后至少让出 1 tick，保证链路、控制面、
+ * service 和 app 始终可以抢占。
+ */
+static void compute_worker_task(void *argument)
+{
+    (void)argument;
+
+    for (;;) {
+        int worked = pwos_service_runtime_compute_step();
+
+        note_heartbeat(PWOS_TASK_COMPUTE);
+        vTaskDelay(pdMS_TO_TICKS(worked != 0 ? 1u : 20u));
     }
 }
 
@@ -430,6 +451,7 @@ int pwos_tasks_start(void)
     memset(&g_port_mgr_tcb, 0, sizeof(g_port_mgr_tcb));
     memset(&g_mesh_ctrl_tcb, 0, sizeof(g_mesh_ctrl_tcb));
     memset(&g_service_tcb, 0, sizeof(g_service_tcb));
+    memset(&g_compute_tcb, 0, sizeof(g_compute_tcb));
     memset(&g_app_tcb, 0, sizeof(g_app_tcb));
     memset(&g_diag_tcb, 0, sizeof(g_diag_tcb));
 
@@ -445,6 +467,8 @@ int pwos_tasks_start(void)
         PWOS_STACK_MESH_CTRL_WORDS, PWOS_PRIO_MESH_CTRL, g_mesh_ctrl_stack, &g_mesh_ctrl_tcb);
     rc |= create_one_task(PWOS_TASK_SERVICE, service_task, "service",
         PWOS_STACK_SERVICE_WORDS, PWOS_PRIO_SERVICE, g_service_stack, &g_service_tcb);
+    rc |= create_one_task(PWOS_TASK_COMPUTE, compute_worker_task, "compute",
+        PWOS_STACK_COMPUTE_WORDS, PWOS_PRIO_COMPUTE, g_compute_stack, &g_compute_tcb);
     rc |= create_one_task(PWOS_TASK_APP, app_task, "app",
         PWOS_STACK_APP_WORDS, PWOS_PRIO_APP, g_app_stack, &g_app_tcb);
     rc |= create_one_task(PWOS_TASK_DIAG, diag_task, "diag",

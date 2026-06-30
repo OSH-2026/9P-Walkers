@@ -6,6 +6,7 @@
 
 #include "cluster_vfs.h"
 #include "host_coordinator.h"
+#include "job_manager.h"
 #include "rpc_client.h"
 #include "session_manager.h"
 
@@ -47,6 +48,9 @@ typedef struct {
     uint32_t rpc_tx;
     uint32_t rpc_rx;
     uint32_t rpc_malformed;
+    uint32_t job_tx;
+    uint32_t job_rx;
+    uint32_t job_malformed;
     uint8_t mini9p_last_addr;
     int32_t mini9p_last_error;
     uint32_t last_rx_tick;
@@ -77,6 +81,20 @@ void pwos_coordinator_runtime_get_vfs_stats(
 
 void pwos_coordinator_runtime_get_rpc_stats(
     pwos_rpc_client_stats_t *out_stats);
+
+void pwos_coordinator_runtime_get_job_stats(
+    pwos_job_manager_stats_t *out_stats);
+
+int pwos_coordinator_runtime_get_job(
+    size_t index,
+    pwos_job_entry_t *out_job);
+
+int pwos_coordinator_runtime_job_command(
+    const char *args,
+    char *output,
+    size_t output_cap,
+    size_t *out_len,
+    uint32_t deadline_ms);
 
 int pwos_coordinator_runtime_rpc_call(
     const char *target,

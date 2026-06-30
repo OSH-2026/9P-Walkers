@@ -5,9 +5,12 @@
 #include <string.h>
 
 #include "FreeRTOS.h"
+#include "semphr.h"
+#include "compute_worker.h"
 #include "fault_control.h"
 #include "frame_pool.h"
 #include "local_vfs.h"
+#include "job_service.h"
 #include "mini9p_protocol.h"
 #include "mini9p_server.h"
 #include "node_control.h"
@@ -24,6 +27,10 @@ typedef struct {
     struct local_vfs vfs;
     struct m9p_server server;
     pwos_rpc_service_t rpc;
+    pwos_compute_worker_t compute;
+    pwos_job_service_t jobs;
+    StaticSemaphore_t compute_mutex_cb;
+    SemaphoreHandle_t compute_mutex;
     uint8_t response_payload[PWOS_LINK_MAX_PAYLOAD_LEN];
     pwos_service_runtime_stats_t stats;
 } pwos_service_runtime_t;
@@ -249,6 +256,8 @@ static void render_routes(diag_writer_t *writer)
 
 static void render_sessions(pwos_service_runtime_t *runtime, diag_writer_t *writer)
 {
+    pwos_job_service_stats_t jobs;
+    pwos_compute_worker_stats_t compute;
     pwos_rpc_service_stats_t rpc;
     size_t i;
     size_t active = 0u;
@@ -291,6 +300,28 @@ static void render_sessions(pwos_service_runtime_t *runtime, diag_writer_t *writ
         rpc.last_call_id,
         pwos_rpc_status_name(rpc.last_status),
         rpc.last_status);
+    pwos_job_service_get_stats(&runtime->jobs, &jobs);
+    pwos_compute_worker_get_stats(&runtime->compute, &compute);
+    diag_printf(writer,
+        "job request=%lu response=%lu caps=%lu submit=%lu status=%lu result=%lu cancel=%lu bad=%lu send_fail=%lu active=%u queued=%u done=%lu failed=%lu cancelled=%lu steps=%lu last_job=%lu last_status=%s(%u)\n",
+        (unsigned long)jobs.request_rx,
+        (unsigned long)jobs.response_tx,
+        (unsigned long)jobs.caps_rx,
+        (unsigned long)jobs.submit_rx,
+        (unsigned long)jobs.status_rx,
+        (unsigned long)jobs.result_rx,
+        (unsigned long)jobs.cancel_rx,
+        (unsigned long)jobs.bad_frames,
+        (unsigned long)jobs.send_failures,
+        compute.active_jobs,
+        compute.queued_jobs,
+        (unsigned long)compute.completed,
+        (unsigned long)compute.failed,
+        (unsigned long)compute.cancelled,
+        (unsigned long)compute.steps,
+        (unsigned long)jobs.last_job_id,
+        pwos_job_status_name(jobs.last_status),
+        jobs.last_status);
     for (i = 0u; i < runtime->server.max_fids; ++i) {
         const struct m9p_server_fid *fid = &runtime->server.fids[i];
 
@@ -304,6 +335,77 @@ static void render_sessions(pwos_service_runtime_t *runtime, diag_writer_t *writ
             fid->mode,
             fid->iounit,
             fid->path);
+    }
+}
+
+static void render_compute_caps(
+    pwos_service_runtime_t *runtime,
+    diag_writer_t *writer)
+{
+    pwos_compute_worker_stats_t stats;
+
+    pwos_compute_worker_get_stats(&runtime->compute, &stats);
+    diag_printf(writer,
+        "cpu=stm32f407 slots=%u input=%u result=%u active=%u queued=%u "
+        "kernels=hash,vector_add,matmul,mandelbrot\n",
+        PWOS_COMPUTE_MAX_JOBS,
+        PWOS_COMPUTE_INPUT_CAP,
+        PWOS_COMPUTE_RESULT_CAP,
+        stats.active_jobs,
+        stats.queued_jobs);
+}
+
+static void render_compute_load(
+    pwos_service_runtime_t *runtime,
+    diag_writer_t *writer)
+{
+    pwos_compute_worker_stats_t stats;
+
+    pwos_compute_worker_get_stats(&runtime->compute, &stats);
+    diag_printf(writer,
+        "active=%u queued=%u slots=%u submitted=%lu started=%lu completed=%lu "
+        "failed=%lu cancelled=%lu rejected=%lu steps=%lu reused=%lu\n",
+        stats.active_jobs,
+        stats.queued_jobs,
+        PWOS_COMPUTE_MAX_JOBS,
+        (unsigned long)stats.submitted,
+        (unsigned long)stats.started,
+        (unsigned long)stats.completed,
+        (unsigned long)stats.failed,
+        (unsigned long)stats.cancelled,
+        (unsigned long)stats.rejected,
+        (unsigned long)stats.steps,
+        (unsigned long)stats.slots_reused);
+}
+
+static void render_compute_jobs(
+    pwos_service_runtime_t *runtime,
+    diag_writer_t *writer)
+{
+    size_t i;
+    size_t count = 0u;
+
+    for (i = 0u; i < PWOS_COMPUTE_MAX_JOBS; ++i) {
+        pwos_compute_job_snapshot_t job;
+
+        if (pwos_compute_worker_get_slot_snapshot(
+                &runtime->compute, i, &job) != 0) {
+            continue;
+        }
+        diag_printf(writer,
+            "id=%lu owner=%u kernel=%s state=%s progress=%u.%u%% result=%u log=%s\n",
+            (unsigned long)job.job_id,
+            job.owner_addr,
+            pwos_job_kernel_name(job.kernel),
+            pwos_job_state_name(job.state),
+            job.progress_permille / 10u,
+            job.progress_permille % 10u,
+            job.result_len,
+            job.log);
+        ++count;
+    }
+    if (count == 0u) {
+        diag_printf(writer, "(empty)\n");
     }
 }
 
@@ -330,6 +432,7 @@ static void render_log(pwos_service_runtime_t *runtime, diag_writer_t *writer)
 {
     pwos_node_control_snapshot_t node;
     pwos_rpc_service_stats_t rpc;
+    pwos_compute_worker_stats_t compute;
 
     pwos_node_control_get_snapshot(&node);
     diag_printf(writer,
@@ -370,6 +473,19 @@ static void render_log(pwos_service_runtime_t *runtime, diag_writer_t *writer)
         (unsigned long)rpc.not_found,
         (unsigned long)rpc.busy,
         (unsigned long)rpc.send_failures);
+    pwos_compute_worker_get_stats(&runtime->compute, &compute);
+    diag_printf(writer,
+        "compute submitted=%lu started=%lu completed=%lu failed=%lu cancelled=%lu rejected=%lu steps=%lu reused=%lu active=%u queued=%u\n",
+        (unsigned long)compute.submitted,
+        (unsigned long)compute.started,
+        (unsigned long)compute.completed,
+        (unsigned long)compute.failed,
+        (unsigned long)compute.cancelled,
+        (unsigned long)compute.rejected,
+        (unsigned long)compute.steps,
+        (unsigned long)compute.slots_reused,
+        compute.active_jobs,
+        compute.queued_jobs);
 }
 
 static void render_build(diag_writer_t *writer)
@@ -387,7 +503,7 @@ static void render_build(diag_writer_t *writer)
     const char *profile = "release";
 #endif
     diag_printf(writer,
-        "target=%s profile=%s built=%s %s protocol=mini9p,rpc-v1 mesh=mesh2\n",
+        "target=%s profile=%s built=%s %s protocol=mini9p,rpc-v1,job-v1 mesh=mesh2\n",
         target, profile, __DATE__, __TIME__);
 }
 
@@ -461,6 +577,12 @@ static int service_vfs_read(
         render_build(&writer);
     } else if (strcmp(path, "/sys/fault") == 0) {
         render_fault(&writer);
+    } else if (strcmp(path, "/compute/caps") == 0) {
+        render_compute_caps(runtime, &writer);
+    } else if (strcmp(path, "/compute/load") == 0) {
+        render_compute_load(runtime, &writer);
+    } else if (strcmp(path, "/compute/jobs") == 0) {
+        render_compute_jobs(runtime, &writer);
     } else {
         return -(int)M9P_ERR_ENOENT;
     }
@@ -528,6 +650,38 @@ static int rpc_send(
     return 0;
 }
 
+static int job_send(
+    void *ctx,
+    uint8_t dst_addr,
+    const uint8_t *payload,
+    uint16_t payload_len)
+{
+    pwos_service_runtime_t *runtime = (pwos_service_runtime_t *)ctx;
+    int rc = pwos_node_control_send_data(
+        (uint8_t)PWOS_LINK_TYPE_DATA_JOB, dst_addr, payload, payload_len);
+
+    if (rc != 0) {
+        ++runtime->stats.tx_failures;
+        return rc;
+    }
+    ++runtime->stats.job_tx;
+    return 0;
+}
+
+static void compute_lock(void *ctx)
+{
+    pwos_service_runtime_t *runtime = (pwos_service_runtime_t *)ctx;
+
+    (void)xSemaphoreTake(runtime->compute_mutex, portMAX_DELAY);
+}
+
+static void compute_unlock(void *ctx)
+{
+    pwos_service_runtime_t *runtime = (pwos_service_runtime_t *)ctx;
+
+    (void)xSemaphoreGive(runtime->compute_mutex);
+}
+
 static uint32_t rpc_now_ms(void *ctx)
 {
     (void)ctx;
@@ -538,8 +692,23 @@ int pwos_service_runtime_init(void)
 {
     struct local_vfs_config vfs_config;
     struct m9p_server_config server_config;
+    pwos_compute_worker_config_t compute_config;
 
     memset(&g_service, 0, sizeof(g_service));
+    g_service.compute_mutex = xSemaphoreCreateMutexStatic(
+        &g_service.compute_mutex_cb);
+    if (g_service.compute_mutex == NULL) {
+        return -1;
+    }
+    memset(&compute_config, 0, sizeof(compute_config));
+    compute_config.lock_ctx = &g_service;
+    compute_config.lock = compute_lock;
+    compute_config.unlock = compute_unlock;
+    if (pwos_compute_worker_init(&g_service.compute, &compute_config) != 0 ||
+        pwos_job_service_init(
+            &g_service.jobs, &g_service, job_send, &g_service.compute) != 0) {
+        return -1;
+    }
 
     local_vfs_get_default_config(&vfs_config);
     vfs_config.io_ctx = &g_service;
@@ -577,7 +746,8 @@ int pwos_service_runtime_accepts(const pwos_frame_block_t *block)
         return 0;
     }
     if (view.type != (uint8_t)PWOS_LINK_TYPE_DATA_MINI9P &&
-        view.type != (uint8_t)PWOS_LINK_TYPE_DATA_RPC) {
+        view.type != (uint8_t)PWOS_LINK_TYPE_DATA_RPC &&
+        view.type != (uint8_t)PWOS_LINK_TYPE_DATA_JOB) {
         return 0;
     }
 
@@ -599,6 +769,17 @@ void pwos_service_runtime_process(pwos_frame_block_t *block)
 
     g_service.stats.last_src = link_view.src;
     g_service.stats.last_dst = link_view.dst;
+    if (link_view.type == (uint8_t)PWOS_LINK_TYPE_DATA_JOB) {
+        ++g_service.stats.job_rx;
+        if (pwos_job_service_process(
+                &g_service.jobs,
+                link_view.src,
+                link_view.payload,
+                link_view.payload_len) != 0) {
+            ++g_service.stats.job_errors;
+        }
+        return;
+    }
     if (link_view.type == (uint8_t)PWOS_LINK_TYPE_DATA_RPC) {
         pwos_rpc_frame_view_t rpc_view;
 
@@ -665,6 +846,12 @@ void pwos_service_runtime_poll(void)
     if (g_service.initialized != 0u) {
         pwos_rpc_service_poll(&g_service.rpc);
     }
+}
+
+int pwos_service_runtime_compute_step(void)
+{
+    return g_service.initialized == 0u ? 0 :
+        pwos_compute_worker_step(&g_service.compute);
 }
 
 void pwos_service_runtime_get_stats(pwos_service_runtime_stats_t *out_stats)

@@ -59,6 +59,14 @@ typedef int (*pwos_command_rpc_fn)(
     uint16_t *out_status,
     uint16_t *out_chunk_count);
 
+typedef int (*pwos_command_job_fn)(
+    void *ctx,
+    const char *args,
+    char *output,
+    size_t output_cap,
+    size_t *out_len,
+    uint32_t deadline_ms);
+
 typedef struct {
     void *io_ctx;
     pwos_command_read_fn read_path;
@@ -66,6 +74,7 @@ typedef struct {
     pwos_command_list_fn list;
     pwos_command_stat_fn stat;
     pwos_command_rpc_fn rpc;
+    pwos_command_job_fn job;
     uint32_t default_deadline_ms;
 } pwos_command_service_config_t;
 

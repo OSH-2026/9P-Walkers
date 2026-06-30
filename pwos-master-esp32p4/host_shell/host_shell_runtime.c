@@ -168,6 +168,19 @@ static int shell_rpc(
         out_status);
 }
 
+static int shell_job(
+    void *ctx,
+    const char *args,
+    char *output,
+    size_t output_cap,
+    size_t *out_len,
+    uint32_t deadline_ms)
+{
+    (void)ctx;
+    return pwos_coordinator_runtime_job_command(
+        args, output, output_cap, out_len, deadline_ms);
+}
+
 int pwos_host_shell_runtime_build_config(
     pwos_command_service_config_t *out_config)
 {
@@ -180,6 +193,7 @@ int pwos_host_shell_runtime_build_config(
     out_config->list = shell_list;
     out_config->stat = shell_stat;
     out_config->rpc = shell_rpc;
+    out_config->job = shell_job;
     out_config->default_deadline_ms = PWOS_COMMAND_DEFAULT_DEADLINE_MS;
     return 0;
 }

@@ -431,6 +431,45 @@ static int execute_rpc(
     return 0;
 }
 
+static int execute_job(
+    pwos_command_service_t *service,
+    const char *args,
+    output_builder_t *output)
+{
+    size_t produced = 0u;
+    size_t remaining;
+    int rc;
+
+    if (service->config.job == NULL) {
+        output_append(output, "job: unavailable\r\n");
+        return -(int)M9P_ERR_ENOTSUP;
+    }
+    if (output->len >= output->cap) {
+        output->truncated = 1u;
+        return -(int)M9P_ERR_EMSIZE;
+    }
+    remaining = output->cap - output->len;
+    rc = service->config.job(
+        service->config.io_ctx,
+        args,
+        output->data + output->len,
+        remaining,
+        &produced,
+        service->config.default_deadline_ms);
+    if (produced >= remaining) {
+        output->len = output->cap - 1u;
+        output->data[output->len] = '\0';
+        output->truncated = 1u;
+        return rc == 0 ? -(int)M9P_ERR_EMSIZE : rc;
+    }
+    output->len += produced;
+    output->data[output->len] = '\0';
+    if (rc != 0 && produced == 0u) {
+        output_append(output, "job: error (%d)\r\n", rc);
+    }
+    return rc;
+}
+
 int pwos_command_service_init(
     pwos_command_service_t *service,
     const pwos_command_service_config_t *config)
@@ -496,6 +535,7 @@ int pwos_command_service_execute(
             "rpc <mcuN> <service.method> [payload] [--deadline=<ms>]\r\n"
             "stream <mcuN> <service.method> [payload] [--deadline=<ms>]\r\n"
             "notify <mcuN> <service.method> [payload] [--deadline=<ms>]\r\n"
+            "job <caps|submit|list|status|result|cancel|retry> ...\r\n"
             "fault <mcuN> <status|clear|drop|delay|corrupt|down|recover|reboot-self ...>\r\n");
     } else if (strcmp(command, "ls") == 0) {
         rc = execute_ls(service, args, &builder);
@@ -513,6 +553,8 @@ int pwos_command_service_execute(
         rc = execute_rpc(service, args, PWOS_COMMAND_RPC_STREAM, &builder);
     } else if (strcmp(command, "notify") == 0) {
         rc = execute_rpc(service, args, PWOS_COMMAND_RPC_ONEWAY, &builder);
+    } else if (strcmp(command, "job") == 0) {
+        rc = execute_job(service, args, &builder);
     } else if (strcmp(command, "mesh") == 0) {
         rc = execute_cat(service, "/host/sys/topology", &builder);
     } else if (strcmp(command, "sessions") == 0) {
