@@ -695,6 +695,10 @@ void pwos_node_control_tick(void)
     g_stats.state = g_state;
     g_stats.local_addr = g_local_addr;
     g_stats.upstream_port = g_upstream_port;
+    g_stats.local_uid[0] = g_local_uid[0];
+    g_stats.local_uid[1] = g_local_uid[1];
+    g_stats.local_uid[2] = g_local_uid[2];
+    g_stats.local_boot_id = g_local_boot_id;
     g_stats.lease_epoch = g_lease_epoch;
     g_stats.lease_ms = g_lease_ms;
     g_stats.last_register_tick = g_last_register_tick;

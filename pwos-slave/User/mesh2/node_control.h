@@ -33,6 +33,8 @@ typedef struct {
     pwos_node_state_t state;
     uint8_t local_addr;
     uint8_t upstream_port;
+    uint32_t local_uid[3];
+    uint32_t local_boot_id;
     uint32_t lease_epoch;
     uint32_t lease_ms;
     uint32_t last_register_tick;

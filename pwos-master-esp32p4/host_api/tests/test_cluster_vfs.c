@@ -16,6 +16,7 @@ static int g_failures;
 } while (0)
 
 typedef struct {
+    pwos_session_manager_t *manager;
     uint8_t last_dst;
     uint8_t deadline_addr;
     uint8_t tx_buf[M9P_CLIENT_BUFFER_CAP];
@@ -29,6 +30,14 @@ typedef struct {
     uint32_t clunk_count;
     char last_walk_path[M9P_MAX_PATH_LEN + 1u];
 } fake_link_t;
+
+static int fake_build_response(
+    fake_link_t *link,
+    const uint8_t *request,
+    size_t request_len,
+    uint8_t *response,
+    size_t response_cap,
+    size_t *response_len);
 
 typedef struct {
     pwos_host_coordinator_t coordinator;
@@ -56,13 +65,18 @@ static pwos_mesh2_node_register_t make_register(
 
 static int fake_send(
     void *ctx,
+    uint8_t data_type,
     uint8_t dst_addr,
     const uint8_t *payload,
     uint16_t payload_len)
 {
     fake_link_t *link = (fake_link_t *)ctx;
+    uint8_t response[M9P_CLIENT_BUFFER_CAP];
+    size_t response_len = 0u;
+    int rc;
 
-    if (link == NULL || payload == NULL || payload_len > sizeof(link->tx_buf)) {
+    if (link == NULL || data_type != 0x80u || payload == NULL ||
+        payload_len > sizeof(link->tx_buf)) {
         return -(int)M9P_ERR_EINVAL;
     }
 
@@ -70,7 +84,25 @@ static int fake_send(
     memcpy(link->tx_buf, payload, payload_len);
     link->tx_len = payload_len;
     ++link->send_count;
-    return 0;
+    if (dst_addr == link->deadline_addr) {
+        return 0;
+    }
+
+    rc = fake_build_response(
+        link,
+        payload,
+        payload_len,
+        response,
+        sizeof(response),
+        &response_len);
+    if (rc != 0) {
+        return rc;
+    }
+    return pwos_session_manager_deliver_mini9p(
+        link->manager,
+        dst_addr,
+        response,
+        response_len) == 1 ? 0 : -(int)M9P_ERR_EIO;
 }
 
 static int build_rattach(uint16_t tag, uint8_t *rx, size_t rx_cap, size_t *rx_len)
@@ -108,26 +140,20 @@ static struct m9p_qid qid_for_path(const char *path)
     return qid;
 }
 
-static int fake_wait(
-    void *ctx,
-    uint8_t src_addr,
-    uint32_t deadline_ms,
-    uint8_t *payload,
-    size_t payload_cap,
-    size_t *out_payload_len)
+static int fake_build_response(
+    fake_link_t *link,
+    const uint8_t *request,
+    size_t request_len,
+    uint8_t *response,
+    size_t response_cap,
+    size_t *response_len)
 {
-    fake_link_t *link = (fake_link_t *)ctx;
     struct m9p_frame_view frame;
 
-    (void)deadline_ms;
-    if (link == NULL || payload == NULL || out_payload_len == NULL) {
+    if (link == NULL || request == NULL || response == NULL || response_len == NULL) {
         return -(int)M9P_ERR_EINVAL;
     }
-    if (src_addr == link->deadline_addr) {
-        return PWOS_SESSION_ERR_DEADLINE;
-    }
-    if (src_addr != link->last_dst ||
-        !m9p_decode_frame(link->tx_buf, link->tx_len, &frame)) {
+    if (!m9p_decode_frame(request, request_len, &frame)) {
         return -(int)M9P_ERR_EIO;
     }
 
@@ -135,20 +161,20 @@ static int fake_wait(
     switch (frame.type) {
     case M9P_TATTACH:
         ++link->attach_count;
-        return build_rattach(frame.tag, payload, payload_cap, out_payload_len);
+        return build_rattach(frame.tag, response, response_cap, response_len);
 
     case M9P_TWALK: {
         struct m9p_walk_request request;
         struct m9p_qid qid;
 
         if (!m9p_parse_twalk(&frame, &request)) {
-            return m9p_build_rerror(frame.tag, M9P_ERR_EINVAL, "bad walk", payload, payload_cap, out_payload_len) ?
+            return m9p_build_rerror(frame.tag, M9P_ERR_EINVAL, "bad walk", response, response_cap, response_len) ?
                 0 : -(int)M9P_ERR_EMSIZE;
         }
         ++link->walk_count;
         snprintf(link->last_walk_path, sizeof(link->last_walk_path), "%s", request.path);
         qid = qid_for_path(request.path);
-        return m9p_build_rwalk(frame.tag, &qid, payload, payload_cap, out_payload_len) ?
+        return m9p_build_rwalk(frame.tag, &qid, response, response_cap, response_len) ?
             0 : -(int)M9P_ERR_EMSIZE;
     }
 
@@ -157,12 +183,12 @@ static int fake_wait(
         struct m9p_qid qid;
 
         if (!m9p_parse_topen(&frame, &request)) {
-            return m9p_build_rerror(frame.tag, M9P_ERR_EINVAL, "bad open", payload, payload_cap, out_payload_len) ?
+            return m9p_build_rerror(frame.tag, M9P_ERR_EINVAL, "bad open", response, response_cap, response_len) ?
                 0 : -(int)M9P_ERR_EMSIZE;
         }
         ++link->open_count;
         qid = qid_for_path(link->last_walk_path);
-        return m9p_build_ropen(frame.tag, &qid, 128u, payload, payload_cap, out_payload_len) ?
+        return m9p_build_ropen(frame.tag, &qid, 128u, response, response_cap, response_len) ?
             0 : -(int)M9P_ERR_EMSIZE;
     }
 
@@ -171,7 +197,7 @@ static int fake_wait(
         struct m9p_read_request request;
 
         if (!m9p_parse_tread(&frame, &request)) {
-            return m9p_build_rerror(frame.tag, M9P_ERR_EINVAL, "bad read", payload, payload_cap, out_payload_len) ?
+            return m9p_build_rerror(frame.tag, M9P_ERR_EINVAL, "bad read", response, response_cap, response_len) ?
                 0 : -(int)M9P_ERR_EMSIZE;
         }
         ++link->read_count;
@@ -180,21 +206,21 @@ static int fake_wait(
                 frame.tag,
                 health,
                 (uint16_t)sizeof(health),
-                payload,
-                payload_cap,
-                out_payload_len) ? 0 : -(int)M9P_ERR_EMSIZE;
+                response,
+                response_cap,
+                response_len) ? 0 : -(int)M9P_ERR_EMSIZE;
         }
-        return m9p_build_rread(frame.tag, NULL, 0u, payload, payload_cap, out_payload_len) ?
+        return m9p_build_rread(frame.tag, NULL, 0u, response, response_cap, response_len) ?
             0 : -(int)M9P_ERR_EMSIZE;
     }
 
     case M9P_TCLUNK:
         ++link->clunk_count;
-        return m9p_build_rclunk(frame.tag, payload, payload_cap, out_payload_len) ?
+        return m9p_build_rclunk(frame.tag, response, response_cap, response_len) ?
             0 : -(int)M9P_ERR_EMSIZE;
 
     default:
-        return m9p_build_rerror(frame.tag, M9P_ERR_ENOTSUP, "unsupported", payload, payload_cap, out_payload_len) ?
+        return m9p_build_rerror(frame.tag, M9P_ERR_ENOTSUP, "unsupported", response, response_cap, response_len) ?
             0 : -(int)M9P_ERR_EMSIZE;
     }
 }
@@ -219,9 +245,9 @@ static void init_env(test_env_t *env)
     memset(&session_config, 0, sizeof(session_config));
     session_config.io_ctx = &env->link;
     session_config.send = fake_send;
-    session_config.wait = fake_wait;
     session_config.default_deadline_ms = 1000u;
     CHECK(pwos_session_manager_init(&env->sessions, &session_config) == 0);
+    env->link.manager = &env->sessions;
     CHECK(pwos_cluster_vfs_init(&env->vfs, &env->sessions) == 0);
     CHECK(pwos_cluster_vfs_sync_from_coordinator(&env->vfs, &env->coordinator) == 0);
 }
@@ -231,18 +257,16 @@ static void test_sync_names_and_root_list(void)
     test_env_t env;
     struct m9p_dirent entries[4];
     size_t count = 0u;
-    const pwos_cluster_vfs_route_t *route;
+    pwos_cluster_vfs_route_t route;
 
     init_env(&env);
 
-    route = pwos_cluster_vfs_route_by_index(&env.vfs, 0u);
-    CHECK(route != NULL);
-    CHECK(strcmp(route->target, "mcu1") == 0);
-    CHECK(route->addr == 1u);
-    route = pwos_cluster_vfs_route_by_index(&env.vfs, 1u);
-    CHECK(route != NULL);
-    CHECK(strcmp(route->target, "mcu2") == 0);
-    CHECK(route->addr == 2u);
+    CHECK(pwos_cluster_vfs_get_route(&env.vfs, 0u, &route) == 0);
+    CHECK(strcmp(route.target, "mcu1") == 0);
+    CHECK(route.addr == 1u);
+    CHECK(pwos_cluster_vfs_get_route(&env.vfs, 1u, &route) == 0);
+    CHECK(strcmp(route.target, "mcu2") == 0);
+    CHECK(route.addr == 2u);
 
     memset(entries, 0, sizeof(entries));
     CHECK(pwos_cluster_vfs_list(&env.vfs, "/", entries, 4u, &count, 1000u) == 0);

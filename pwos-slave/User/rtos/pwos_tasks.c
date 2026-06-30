@@ -17,7 +17,7 @@
  *   pwos_mesh_rx_send() ──► mesh_ctrl_task
  *        │
  *        ▼
- *   node_control 控制面/中继，或 service_task 处理本机 DATA_MINI9P
+ *   node_control 控制面/中继，或 service_task 处理本机 DATA_MINI9P/DATA_RPC
  *
  *   上层发送路径：
  *   pwos_link_tx_send() ──► link_tx_task ──► pwos_uart_dma_send()
@@ -42,6 +42,7 @@
 #include "task.h"
 
 #include "frame_pool.h"
+#include "fault_control.h"
 #include "node_control.h"
 #include "port_manager.h"
 #include "pwos_queues.h"
@@ -59,7 +60,7 @@
 #define PWOS_STACK_LINK_TX_WORDS 384u
 #define PWOS_STACK_PORT_MGR_WORDS 384u
 #define PWOS_STACK_MESH_CTRL_WORDS 512u
-#define PWOS_STACK_SERVICE_WORDS 512u
+#define PWOS_STACK_SERVICE_WORDS 768u
 #define PWOS_STACK_APP_WORDS 384u
 #define PWOS_STACK_DIAG_WORDS 384u
 
@@ -76,6 +77,7 @@
 #define PWOS_PRIO_SERVICE (tskIDLE_PRIORITY + 3u)
 #define PWOS_PRIO_APP (tskIDLE_PRIORITY + 2u)
 #define PWOS_PRIO_DIAG (tskIDLE_PRIORITY + 1u)
+#define PWOS_LINK_TX_GUARD_MS 2u
 
 /*
  * 任务运行时记录。
@@ -193,7 +195,9 @@ static void link_rx_task(void *argument)
              * 链路维护帧先由 port_manager 拥有；其它帧才进入 mesh 控制入口。
              * port_manager_handle_rx 返回非 0 表示它已处理并接管/释放 block。
              */
-            if (pwos_port_manager_handle_rx(block) != 0) {
+            if (pwos_fault_control_drop_rx(block->port_id) != 0) {
+                pwos_frame_pool_free(block);
+            } else if (pwos_port_manager_handle_rx(block) != 0) {
                 pwos_frame_pool_free(block);
             } else if (pwos_mesh_rx_send(block, 0u) != pdPASS) {
                 /* mesh 队列满或初始化失败，必须释放 block。 */
@@ -212,7 +216,7 @@ static void link_rx_task(void *argument)
  *   - 优先从 ctrl_tx 队列发送控制面帧。
  *   - ctrl_tx 为空时再从 link_tx 队列等待普通数据面帧。
  *   - 调用 UART DMA 发送。
- *   - 发送完成后释放帧块（目前不等待发送完成，调用后立刻释放）。
+ *   - 等待 DMA 发送完成后释放帧块，并保留接收端重新 arm DMA 的帧间隔。
  */
 static void link_tx_task(void *argument)
 {
@@ -226,12 +230,18 @@ static void link_tx_task(void *argument)
         }
 
         if (block != NULL) {
-            /*
-             * TX 队列拥有完整 link frame，发送完成或失败后归还块。
-             * 这里忽略返回值，实际可靠性由 UART DMA 层保证或后续增强。
-             */
-            (void)pwos_uart_dma_send(block->port_id, block->data, block->len, 50u);
+            /* TX 队列拥有完整 link frame，发送完成或失败后归还块。 */
+            if (pwos_fault_control_before_tx(
+                    block->port_id, block->data, block->len) == 0) {
+                (void)pwos_uart_dma_send(
+                    block->port_id, block->data, block->len, 50u);
+            }
             pwos_frame_pool_free(block);
+            /*
+             * 对端 RX 是 DMA_NORMAL + ReceiveToIdle。两帧紧邻会让下一帧撞上
+             * IDLE 回调后的 DMA rearm 空窗，因此发送完成后主动留出保护时间。
+             */
+            vTaskDelay(pdMS_TO_TICKS(PWOS_LINK_TX_GUARD_MS));
         }
 
         note_heartbeat(PWOS_TASK_LINK_TX);
@@ -256,6 +266,7 @@ static void port_mgr_task(void *argument)
          */
         pwos_port_manager_tick();
         pwos_node_control_tick();
+        pwos_fault_control_poll();
         note_heartbeat(PWOS_TASK_PORT_MGR);
         vTaskDelay(pdMS_TO_TICKS(100u));
     }
@@ -267,7 +278,7 @@ static void port_mgr_task(void *argument)
  * 职责：
  *   - 从 mesh_rx 队列接收链路层已解码的帧。
  *   - 控制面和需要中继的数据面交给 node_control。
- *   - 本机 DATA_MINI9P 请求转入 service_rx，由 service_task 串行处理。
+ *   - 本机 DATA_MINI9P/DATA_RPC 请求转入 service_rx，由 service_task 串行处理。
  */
 static void mesh_ctrl_task(void *argument)
 {
@@ -299,8 +310,8 @@ static void mesh_ctrl_task(void *argument)
 /*
  * 系统服务任务。
  *
- * 当前 M5 第一阶段处理本机 DATA_MINI9P 请求，把 mini9P 请求落到 local_vfs，
- * 并通过 node_control 按路由把响应发回请求源。
+ * 处理本机 mini9P/RPC 请求，并推进延期 RPC。10ms 的接收超时限定了
+ * deadline 响应的调度粒度，同时不会阻塞链路与控制面任务。
  */
 static void service_task(void *argument)
 {
@@ -309,10 +320,11 @@ static void service_task(void *argument)
     for (;;) {
         pwos_frame_block_t *block = NULL;
 
-        if (pwos_service_rx_receive(&block, pdMS_TO_TICKS(100u)) == pdPASS) {
+        if (pwos_service_rx_receive(&block, pdMS_TO_TICKS(10u)) == pdPASS) {
             pwos_service_runtime_process(block);
             pwos_frame_pool_free(block);
         }
+        pwos_service_runtime_poll();
 
         note_heartbeat(PWOS_TASK_SERVICE);
     }
@@ -411,6 +423,7 @@ int pwos_tasks_start(void)
 {
     int rc = 0;
 
+    pwos_fault_control_init();
     memset(&g_uart_rx_tcb, 0, sizeof(g_uart_rx_tcb));
     memset(&g_link_rx_tcb, 0, sizeof(g_link_rx_tcb));
     memset(&g_link_tx_tcb, 0, sizeof(g_link_tx_tcb));
@@ -469,6 +482,8 @@ size_t pwos_tasks_get_status(pwos_task_status_t *out_status, size_t out_capacity
         out_status[i].loop_count = g_task_runtime[i].loop_count;
         out_status[i].last_tick = g_task_runtime[i].last_tick;
         out_status[i].stack_high_water_words = g_task_runtime[i].stack_high_water_words;
+        out_status[i].priority = g_task_runtime[i].handle == NULL ?
+            0u : (uint32_t)uxTaskPriorityGet(g_task_runtime[i].handle);
     }
 
     return count;

@@ -21,11 +21,28 @@ extern "C" {
 /** 当 config.iounit 为零时，Ropen 中通告的默认 I/O 单元大小。 */
 #define LOCAL_VFS_DEFAULT_IOUNIT 128u
 
-/**
- * @brief local_vfs 初始化参数。
- */
+typedef int (*local_vfs_read_fn)(
+    void *ctx,
+    const char *path,
+    uint32_t offset,
+    uint8_t *out_data,
+    uint16_t out_cap,
+    uint16_t *out_count);
+
+typedef int (*local_vfs_write_fn)(
+    void *ctx,
+    const char *path,
+    uint32_t offset,
+    const uint8_t *data,
+    uint16_t count,
+    uint16_t *out_count);
+
+/** @brief local_vfs 初始化参数。 */
 struct local_vfs_config {
     uint16_t iounit; /**< 每次读取的期望载荷大小；为零则使用 LOCAL_VFS_DEFAULT_IOUNIT。 */
+    void *io_ctx;
+    local_vfs_read_fn read;
+    local_vfs_write_fn write;
 };
 
 /**
@@ -33,6 +50,9 @@ struct local_vfs_config {
  */
 struct local_vfs {
     uint16_t iounit; /**< 通告的 I/O 单元大小。 */
+    void *io_ctx;
+    local_vfs_read_fn read;
+    local_vfs_write_fn write;
 };
 
 /**

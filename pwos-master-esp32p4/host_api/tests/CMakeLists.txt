@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.16)
 
 project(pwos_host_api_tests C)
 
+enable_testing()
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
@@ -32,3 +34,11 @@ target_include_directories(pwos_host_api_test PRIVATE
     ${SHARED_MESH2_DIR}
     ${SHARED_LINK_DIR}
 )
+
+target_compile_options(pwos_host_api_test PRIVATE
+    -Wall
+    -Wextra
+    -Werror
+)
+
+add_test(NAME pwos_host_api_test COMMAND pwos_host_api_test)

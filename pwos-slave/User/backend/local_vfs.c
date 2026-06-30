@@ -7,7 +7,7 @@
  *
  * - /
  * - /sys
- * - /sys/health
+ * - /sys 下的运行时诊断文件
  *
  * 服务器仍然负责 fid/会话语义。local_vfs 仅通过 m9p_server_ops 回答
  * 基于路径的资源回调。
@@ -61,6 +61,19 @@ static const struct local_vfs_node k_nodes[] = {
          0u,
          "health"},
     },
+    {"/sys/tasks", NULL, {{M9P_QID_VIRTUAL | M9P_QID_READONLY, 0u, 1u, 4u}, M9P_SERVER_PERM_READ, M9P_STAT_VIRTUAL, 0u, 0u, "tasks"}},
+    {"/sys/ports", NULL, {{M9P_QID_VIRTUAL | M9P_QID_READONLY, 0u, 1u, 5u}, M9P_SERVER_PERM_READ, M9P_STAT_VIRTUAL, 0u, 0u, "ports"}},
+    {"/sys/links", NULL, {{M9P_QID_VIRTUAL | M9P_QID_READONLY, 0u, 1u, 6u}, M9P_SERVER_PERM_READ, M9P_STAT_VIRTUAL, 0u, 0u, "links"}},
+    {"/sys/neighbors", NULL, {{M9P_QID_VIRTUAL | M9P_QID_READONLY, 0u, 1u, 7u}, M9P_SERVER_PERM_READ, M9P_STAT_VIRTUAL, 0u, 0u, "neighbors"}},
+    {"/sys/routes", NULL, {{M9P_QID_VIRTUAL | M9P_QID_READONLY, 0u, 1u, 8u}, M9P_SERVER_PERM_READ, M9P_STAT_VIRTUAL, 0u, 0u, "routes"}},
+    {"/sys/sessions", NULL, {{M9P_QID_VIRTUAL | M9P_QID_READONLY, 0u, 1u, 9u}, M9P_SERVER_PERM_READ, M9P_STAT_VIRTUAL, 0u, 0u, "sessions"}},
+    {"/sys/queues", NULL, {{M9P_QID_VIRTUAL | M9P_QID_READONLY, 0u, 1u, 10u}, M9P_SERVER_PERM_READ, M9P_STAT_VIRTUAL, 0u, 0u, "queues"}},
+    {"/sys/log", NULL, {{M9P_QID_VIRTUAL | M9P_QID_READONLY, 0u, 1u, 11u}, M9P_SERVER_PERM_READ, M9P_STAT_VIRTUAL, 0u, 0u, "log"}},
+    {"/sys/build", NULL, {{M9P_QID_VIRTUAL | M9P_QID_READONLY, 0u, 1u, 12u}, M9P_SERVER_PERM_READ, M9P_STAT_VIRTUAL, 0u, 0u, "build"}},
+    {"/sys/fault", NULL, {{M9P_QID_VIRTUAL, 0u, 1u, 13u}, M9P_SERVER_PERM_READ | M9P_SERVER_PERM_WRITE, M9P_STAT_VIRTUAL, 0u, 0u, "fault"}},
+    /* 兼容此前现场调试使用的路径。 */
+    {"/sys/info", NULL, {{M9P_QID_VIRTUAL | M9P_QID_READONLY, 0u, 1u, 14u}, M9P_SERVER_PERM_READ, M9P_STAT_VIRTUAL, 0u, 0u, "info"}},
+    {"/sys/uart", NULL, {{M9P_QID_VIRTUAL | M9P_QID_READONLY, 0u, 1u, 15u}, M9P_SERVER_PERM_READ, M9P_STAT_VIRTUAL, 0u, 0u, "uart"}},
 };
 
 /**
@@ -112,9 +125,27 @@ static int stat_node(const char *path, struct m9p_stat *out_stat)
  * @param[in] mode Mini9P 打开模式。
  * @return M9P_OREAD 返回 0，否则返回 -M9P_ERR_ENOTSUP。
  */
-static int validate_read_open_mode(uint8_t mode)
+static int validate_open_mode(const struct local_vfs_node *node, uint8_t mode)
 {
-    return mode == M9P_OREAD ? 0 : -(int)M9P_ERR_ENOTSUP;
+    uint8_t access;
+
+    if (node == NULL) {
+        return -(int)M9P_ERR_EINVAL;
+    }
+    access = (uint8_t)(mode & 0x03u);
+    if ((node->stat.flags & M9P_STAT_DIR) != 0u) {
+        return access == M9P_OREAD && (mode & M9P_OTRUNC) == 0u ?
+            0 : -(int)M9P_ERR_EISDIR;
+    }
+    if (access == M9P_OREAD &&
+        (node->stat.perm & M9P_SERVER_PERM_READ) != 0u) {
+        return 0;
+    }
+    if (access == M9P_OWRITE &&
+        (node->stat.perm & M9P_SERVER_PERM_WRITE) != 0u) {
+        return 0;
+    }
+    return -(int)M9P_ERR_EPERM;
 }
 
 /**
@@ -168,8 +199,7 @@ static int append_dirent(const struct local_vfs_node *node,
     const char *name;
     size_t name_len;
     size_t record_len;
-    size_t start;
-    size_t available;
+    size_t remaining;
 
     if (node == NULL || stream_offset == NULL || out_count == NULL) {
         return -(int)M9P_ERR_EINVAL;
@@ -195,20 +225,19 @@ static int append_dirent(const struct local_vfs_node *node,
         *stream_offset += (uint32_t)record_len;
         return 0;
     }
-
-    start = read_offset > *stream_offset ? (size_t)(read_offset - *stream_offset) : 0u;
-    available = record_len - start;
-    if (available > (size_t)(out_cap - *out_count)) {
-        available = (size_t)(out_cap - *out_count);
+    if (read_offset + *out_count != *stream_offset) {
+        /* 目录 offset 必须位于 dirent 边界，禁止从半条记录继续。 */
+        return -(int)M9P_ERR_EOFFS;
+    }
+    remaining = (size_t)(out_cap - *out_count);
+    if (record_len > remaining) {
+        return *out_count == 0u ? -(int)M9P_ERR_EMSIZE : 1;
     }
 
-    if (available > 0u && out_data != NULL) {
-        memcpy(out_data + *out_count, record + start, available);
-        *out_count = (uint16_t)(*out_count + available);
-    }
-
+    memcpy(out_data + *out_count, record, record_len);
+    *out_count = (uint16_t)(*out_count + record_len);
     *stream_offset += (uint32_t)record_len;
-    return *out_count == out_cap ? 1 : 0;
+    return 0;
 }
 
 /**
@@ -305,6 +334,7 @@ static int local_open(void *ctx,
                       uint16_t *out_iounit)
 {
     struct local_vfs *vfs = (struct local_vfs *)ctx;
+    const struct local_vfs_node *node;
     struct m9p_stat stat;
     int rc;
 
@@ -312,7 +342,11 @@ static int local_open(void *ctx,
         return -(int)M9P_ERR_EINVAL;
     }
 
-    rc = validate_read_open_mode(mode);
+    node = find_node(path);
+    if (node == NULL) {
+        return -(int)M9P_ERR_ENOENT;
+    }
+    rc = validate_open_mode(node, mode);
     if (rc != 0) {
         return rc;
     }
@@ -338,11 +372,12 @@ static int local_read(void *ctx,
                       uint16_t out_cap,
                       uint16_t *out_count)
 {
+    struct local_vfs *vfs = (struct local_vfs *)ctx;
     const struct local_vfs_node *node;
 
-    (void)ctx;
     (void)mode;
-    if (path == NULL || out_count == NULL || (out_cap > 0u && out_data == NULL)) {
+    if (vfs == NULL || path == NULL || out_count == NULL ||
+        (out_cap > 0u && out_data == NULL)) {
         return -(int)M9P_ERR_EINVAL;
     }
 
@@ -355,8 +390,12 @@ static int local_read(void *ctx,
     if ((node->stat.flags & M9P_STAT_DIR) != 0u) {
         return read_dir(path, offset, out_data, out_cap, out_count);
     }
+    if (vfs->read != NULL) {
+        return vfs->read(
+            vfs->io_ctx, path, offset, out_data, out_cap, out_count);
+    }
     if (node->content == NULL) {
-        return -(int)M9P_ERR_EIO;
+        return 0;
     }
 
     {
@@ -392,14 +431,25 @@ static int local_write(void *ctx,
                        uint16_t count,
                        uint16_t *out_count)
 {
-    (void)ctx;
-    (void)path;
-    (void)offset;
+    struct local_vfs *vfs = (struct local_vfs *)ctx;
+    const struct local_vfs_node *node;
+
     (void)mode;
-    (void)data;
-    (void)count;
-    (void)out_count;
-    return -(int)M9P_ERR_ENOTSUP;
+    if (vfs == NULL || path == NULL || out_count == NULL ||
+        (count > 0u && data == NULL)) {
+        return -(int)M9P_ERR_EINVAL;
+    }
+    node = find_node(path);
+    if (node == NULL) {
+        return -(int)M9P_ERR_ENOENT;
+    }
+    if ((node->stat.perm & M9P_SERVER_PERM_WRITE) == 0u) {
+        return -(int)M9P_ERR_EPERM;
+    }
+    if (vfs->write == NULL) {
+        return -(int)M9P_ERR_ENOTSUP;
+    }
+    return vfs->write(vfs->io_ctx, path, offset, data, count, out_count);
 }
 
 /**
@@ -440,6 +490,7 @@ void local_vfs_get_default_config(struct local_vfs_config *out_config)
         return;
     }
 
+    memset(out_config, 0, sizeof(*out_config));
     out_config->iounit = LOCAL_VFS_DEFAULT_IOUNIT;
 }
 
@@ -465,6 +516,9 @@ int local_vfs_init(struct local_vfs *vfs, const struct local_vfs_config *config)
     }
 
     vfs->iounit = active_config->iounit == 0u ? LOCAL_VFS_DEFAULT_IOUNIT : active_config->iounit;
+    vfs->io_ctx = active_config->io_ctx;
+    vfs->read = active_config->read;
+    vfs->write = active_config->write;
     return 0;
 }
 

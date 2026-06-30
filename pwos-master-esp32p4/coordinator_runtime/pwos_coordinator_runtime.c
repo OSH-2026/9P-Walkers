@@ -11,7 +11,9 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #endif
 
@@ -19,11 +21,17 @@
 #include "pwos_link_frame.h"
 #include "pwos_link_parser.h"
 #include "pwos_mesh2_control.h"
+#include "pwos_rpc_protocol.h"
+#include "rpc_client.h"
 #include "session_manager.h"
 
 #define PWOS_COORDINATOR_TASK_NAME "pwos_coord"
 #define PWOS_COORDINATOR_TASK_STACK 4096
 #define PWOS_COORDINATOR_TASK_PRIO 8
+#define PWOS_COORDINATOR_PROBE_TASK_NAME "pwos_m9p_probe"
+#define PWOS_COORDINATOR_PROBE_TASK_STACK 4096
+#define PWOS_COORDINATOR_PROBE_TASK_PRIO 6
+#define PWOS_COORDINATOR_TX_GUARD_US 2000u
 #define PWOS_COORDINATOR_UART_RX_BUF_SIZE 2048
 #define PWOS_COORDINATOR_UART_TX_BUF_SIZE 2048
 #define PWOS_COORDINATOR_READ_SLICE_SIZE 128
@@ -49,33 +57,36 @@ typedef struct {
     pwos_link_parser_t parser;
     pwos_host_coordinator_t coordinator;
     pwos_session_manager_t sessions;
+    pwos_rpc_client_t rpc_client;
     pwos_cluster_vfs_t cluster_vfs;
     uint32_t mini9p_last_probe_tick[PWOS_HOST_COORDINATOR_MAX_NODES];
     pwos_coordinator_runtime_stats_t stats;
 #ifdef ESP_PLATFORM
     TaskHandle_t task;
+    TaskHandle_t probe_task;
+    SemaphoreHandle_t tx_mutex;
+    SemaphoreHandle_t coordinator_mutex;
+    SemaphoreHandle_t session_mutex;
+    SemaphoreHandle_t session_client_mutex[PWOS_SESSION_MANAGER_MAX_SESSIONS];
+    SemaphoreHandle_t pending_event[PWOS_SESSION_MANAGER_MAX_PENDING];
+    SemaphoreHandle_t vfs_mutex;
 #endif
 } pwos_coordinator_runtime_t;
-
-typedef struct {
-    pwos_coordinator_runtime_t *runtime;
-    uint8_t src_addr;
-    uint8_t captured;
-    uint8_t *rx_data;
-    size_t rx_cap;
-    size_t *rx_len;
-} pwos_mini9p_capture_t;
 
 static pwos_coordinator_runtime_t g_runtime;
 
 #ifdef ESP_PLATFORM
 static const char *TAG = "pwos_coord";
 
-static void consume_rx_bytes_with_capture(
-    pwos_coordinator_runtime_t *runtime,
-    const uint8_t *data,
-    size_t len,
-    pwos_mini9p_capture_t *capture);
+static void coordinator_lock(pwos_coordinator_runtime_t *runtime)
+{
+    (void)xSemaphoreTake(runtime->coordinator_mutex, portMAX_DELAY);
+}
+
+static void coordinator_unlock(pwos_coordinator_runtime_t *runtime)
+{
+    (void)xSemaphoreGive(runtime->coordinator_mutex);
+}
 
 static void put_le32(uint8_t *dst, uint32_t value)
 {
@@ -126,15 +137,17 @@ static uint8_t count_nodes(const pwos_host_coordinator_t *coordinator)
 
 static void sync_cluster_vfs(pwos_coordinator_runtime_t *runtime)
 {
+    pwos_host_coordinator_t snapshot;
     int rc;
 
     if (runtime == NULL) {
         return;
     }
 
-    rc = pwos_cluster_vfs_sync_from_coordinator(
-        &runtime->cluster_vfs,
-        &runtime->coordinator);
+    coordinator_lock(runtime);
+    snapshot = runtime->coordinator;
+    coordinator_unlock(runtime);
+    rc = pwos_cluster_vfs_sync_from_coordinator(&runtime->cluster_vfs, &snapshot);
     if (rc != 0) {
         runtime->stats.mini9p_last_error = (int32_t)rc;
         ESP_LOGW(TAG, "cluster_vfs sync failed rc=%d (%s)", rc, pwos_session_error_name(rc));
@@ -154,6 +167,11 @@ static int send_payload(
     pwos_status_t status;
     int written;
 
+    if (runtime == NULL || runtime->tx_mutex == NULL ||
+        xSemaphoreTake(runtime->tx_mutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+        return PWOS_SESSION_ERR_QUEUE_FULL;
+    }
+
     status = pwos_link_encode(
         type,
         0u,
@@ -170,6 +188,7 @@ static int send_payload(
     if (status != PWOS_OK) {
         ++runtime->stats.tx_errors;
         ESP_LOGW(TAG, "encode type=0x%02x failed: %s", type, pwos_status_string(status));
+        (void)xSemaphoreGive(runtime->tx_mutex);
         return -1;
     }
 
@@ -180,13 +199,20 @@ static int send_payload(
             type,
             written,
             (unsigned)frame_len);
+        (void)xSemaphoreGive(runtime->tx_mutex);
         return -1;
     }
 
     (void)uart_wait_tx_done((uart_port_t)runtime->uart_port, pdMS_TO_TICKS(100));
+    /*
+     * STM32 使用 DMA_NORMAL + ReceiveToIdle，IDLE 回调后需要任务重新 arm DMA。
+     * 保留明确的帧间隔，避免下一帧落入接收端的 rearm 空窗。
+     */
+    esp_rom_delay_us(PWOS_COORDINATOR_TX_GUARD_US);
     runtime->stats.tx_bytes += (uint32_t)frame_len;
     ++runtime->stats.tx_frames;
     runtime->stats.last_tx_tick = (uint32_t)xTaskGetTickCount();
+    (void)xSemaphoreGive(runtime->tx_mutex);
     return 0;
 }
 
@@ -242,10 +268,14 @@ static int handle_node_register(
         ++runtime->stats.rx_parse_errors;
         return -1;
     }
+    coordinator_lock(runtime);
     if (pwos_host_coordinator_handle_register(&runtime->coordinator, &reg, &assign) != 0) {
+        coordinator_unlock(runtime);
         ++runtime->stats.tx_errors;
         return -1;
     }
+    runtime->stats.node_count = count_nodes(&runtime->coordinator);
+    coordinator_unlock(runtime);
     if (pwos_mesh2_encode_addr_assign(
             &assign, payload, sizeof(payload), &payload_len) != PWOS_OK) {
         ++runtime->stats.tx_errors;
@@ -262,7 +292,6 @@ static int handle_node_register(
 
     ++runtime->stats.register_rx;
     ++runtime->stats.assign_tx;
-    runtime->stats.node_count = count_nodes(&runtime->coordinator);
     sync_cluster_vfs(runtime);
     ESP_LOGI(TAG,
         "assign addr=%u uid=%08" PRIx32 "-%08" PRIx32 "-%08" PRIx32
@@ -289,7 +318,9 @@ static int handle_lease_renew(
         ++runtime->stats.rx_parse_errors;
         return -1;
     }
+    coordinator_lock(runtime);
     if (pwos_host_coordinator_handle_lease_renew(&runtime->coordinator, &renew, &ack) != 0) {
+        coordinator_unlock(runtime);
         ESP_LOGW(TAG,
             "lease renew rejected addr=%u uid=%08" PRIx32 "-%08" PRIx32 "-%08" PRIx32,
             renew.addr,
@@ -298,6 +329,7 @@ static int handle_lease_renew(
             renew.uid[2]);
         return -1;
     }
+    coordinator_unlock(runtime);
     if (pwos_mesh2_encode_lease_ack(&ack, payload, sizeof(payload), &payload_len) != PWOS_OK) {
         ++runtime->stats.tx_errors;
         return -1;
@@ -332,11 +364,13 @@ static int handle_link_state(
         return -1;
     }
 
+    coordinator_lock(runtime);
     rc = pwos_host_coordinator_handle_link_state(
         &runtime->coordinator,
         &link,
         &route,
         &owner_addr);
+    coordinator_unlock(runtime);
     if (rc <= 0) {
         ++runtime->stats.link_state_rx;
         return rc;
@@ -368,44 +402,14 @@ static int handle_link_state(
     return 0;
 }
 
-static uint8_t capture_mini9p_response(
+static void handle_frame(
     pwos_coordinator_runtime_t *runtime,
-    const pwos_link_frame_view_t *view,
-    pwos_mini9p_capture_t *capture)
+    const pwos_link_frame_view_t *view)
 {
-    if (runtime == NULL || view == NULL || capture == NULL ||
-        capture->captured != 0u || capture->rx_len == NULL) {
-        return 0u;
-    }
-    if (view->type != (uint8_t)PWOS_LINK_TYPE_DATA_MINI9P ||
-        view->src != capture->src_addr ||
-        view->dst != PWOS_LINK_ADDR_HOST ||
-        view->payload_len > capture->rx_cap ||
-        (view->payload_len > 0u && capture->rx_data == NULL)) {
-        return 0u;
-    }
+    int rc;
 
-    if (view->payload_len > 0u) {
-        memcpy(capture->rx_data, view->payload, view->payload_len);
-    }
-    *capture->rx_len = view->payload_len;
-    capture->captured = 1u;
-    ++runtime->stats.data_rx;
-    ++runtime->stats.mini9p_rx;
-    return 1u;
-}
-
-static void handle_frame_with_capture(
-    pwos_coordinator_runtime_t *runtime,
-    const pwos_link_frame_view_t *view,
-    pwos_mini9p_capture_t *capture)
-{
     ++runtime->stats.rx_frames;
     runtime->stats.last_rx_tick = (uint32_t)xTaskGetTickCount();
-
-    if (capture_mini9p_response(runtime, view, capture) != 0u) {
-        return;
-    }
 
     switch (view->type) {
     case PWOS_LINK_TYPE_LINK_HELLO:
@@ -424,6 +428,59 @@ static void handle_frame_with_capture(
     case PWOS_LINK_TYPE_CTRL_LINK_STATE:
         (void)handle_link_state(runtime, view);
         break;
+    case PWOS_LINK_TYPE_DATA_MINI9P:
+        ++runtime->stats.data_rx;
+        if (view->dst != PWOS_LINK_ADDR_HOST) {
+            break;
+        }
+        rc = pwos_session_manager_deliver_mini9p(
+            &runtime->sessions,
+            view->src,
+            view->payload,
+            view->payload_len);
+        if (rc == 1) {
+            ++runtime->stats.mini9p_rx;
+        }
+        break;
+    case PWOS_LINK_TYPE_DATA_RPC:
+    {
+        pwos_rpc_frame_view_t rpc_view;
+
+        ++runtime->stats.data_rx;
+        if (view->dst != PWOS_LINK_ADDR_HOST) {
+            break;
+        }
+        if (pwos_rpc_decode(view->payload, view->payload_len, &rpc_view) != 0 ||
+            (rpc_view.kind != PWOS_RPC_KIND_RESPONSE &&
+             rpc_view.kind != PWOS_RPC_KIND_STREAM_CHUNK &&
+             rpc_view.kind != PWOS_RPC_KIND_STREAM_END)) {
+            ++runtime->stats.rpc_malformed;
+            break;
+        }
+        if (rpc_view.kind == PWOS_RPC_KIND_RESPONSE) {
+            rc = pwos_session_manager_deliver_data(
+                &runtime->sessions,
+                (uint8_t)PWOS_LINK_TYPE_DATA_RPC,
+                view->src,
+                rpc_view.call_id,
+                view->payload,
+                view->payload_len);
+        } else {
+            rc = pwos_session_manager_deliver_data_part(
+                &runtime->sessions,
+                (uint8_t)PWOS_LINK_TYPE_DATA_RPC,
+                view->src,
+                rpc_view.call_id,
+                rpc_view.payload,
+                rpc_view.payload_len,
+                rpc_view.kind == PWOS_RPC_KIND_STREAM_END ? 1u : 0u,
+                rpc_view.status);
+        }
+        if (rc == 1) {
+            ++runtime->stats.rpc_rx;
+        }
+        break;
+    }
     default:
         if (pwos_link_type_is_data(view->type)) {
             ++runtime->stats.data_rx;
@@ -436,15 +493,6 @@ static void consume_rx_bytes(
     pwos_coordinator_runtime_t *runtime,
     const uint8_t *data,
     size_t len)
-{
-    consume_rx_bytes_with_capture(runtime, data, len, NULL);
-}
-
-static void consume_rx_bytes_with_capture(
-    pwos_coordinator_runtime_t *runtime,
-    const uint8_t *data,
-    size_t len,
-    pwos_mini9p_capture_t *capture)
 {
     size_t offset = 0u;
 
@@ -466,82 +514,47 @@ static void consume_rx_bytes_with_capture(
         offset += consumed;
 
         if (kind == PWOS_LINK_PARSE_FRAME) {
-            handle_frame_with_capture(runtime, &event.frame, capture);
+            handle_frame(runtime, &event.frame);
         } else if (kind == PWOS_LINK_PARSE_ERROR) {
             ++runtime->stats.rx_parse_errors;
         }
     }
 }
 
-static int session_send_mini9p(
+static int session_send_data(
     void *ctx,
+    uint8_t data_type,
     uint8_t dst_addr,
     const uint8_t *payload,
     uint16_t payload_len)
 {
     pwos_coordinator_runtime_t *runtime = (pwos_coordinator_runtime_t *)ctx;
+    int rc;
 
     if (runtime == NULL || payload == NULL || payload_len == 0u ||
-        payload_len > PWOS_LINK_MAX_PAYLOAD_LEN) {
+        payload_len > PWOS_LINK_MAX_PAYLOAD_LEN ||
+        !pwos_link_type_is_data(data_type)) {
         return -(int)M9P_ERR_EINVAL;
     }
 
-    if (send_mesh2_payload(
+    rc = send_mesh2_payload(
             runtime,
-            (uint8_t)PWOS_LINK_TYPE_DATA_MINI9P,
+            data_type,
             dst_addr,
             payload,
-            payload_len) != 0) {
+            payload_len);
+    if (rc != 0) {
+        if (rc == PWOS_SESSION_ERR_QUEUE_FULL) {
+            return rc;
+        }
         return -(int)M9P_ERR_EIO;
     }
-    ++runtime->stats.mini9p_tx;
+    if (data_type == (uint8_t)PWOS_LINK_TYPE_DATA_MINI9P) {
+        ++runtime->stats.mini9p_tx;
+    } else if (data_type == (uint8_t)PWOS_LINK_TYPE_DATA_RPC) {
+        ++runtime->stats.rpc_tx;
+    }
     return 0;
-}
-
-static int session_wait_mini9p(
-    void *ctx,
-    uint8_t src_addr,
-    uint32_t deadline_ms,
-    uint8_t *payload,
-    size_t payload_cap,
-    size_t *out_payload_len)
-{
-    pwos_coordinator_runtime_t *runtime = (pwos_coordinator_runtime_t *)ctx;
-    pwos_mini9p_capture_t capture;
-    TickType_t start;
-    TickType_t deadline_ticks;
-    uint8_t rx_buf[PWOS_COORDINATOR_READ_SLICE_SIZE];
-
-    if (runtime == NULL || out_payload_len == NULL ||
-        (payload_cap > 0u && payload == NULL)) {
-        return -(int)M9P_ERR_EINVAL;
-    }
-
-    memset(&capture, 0, sizeof(capture));
-    capture.runtime = runtime;
-    capture.src_addr = src_addr;
-    capture.rx_data = payload;
-    capture.rx_cap = payload_cap;
-    capture.rx_len = out_payload_len;
-    *out_payload_len = 0u;
-
-    start = xTaskGetTickCount();
-    deadline_ticks = pdMS_TO_TICKS(deadline_ms);
-    while ((uint32_t)(xTaskGetTickCount() - start) < (uint32_t)deadline_ticks) {
-        int rx_count = uart_read_bytes(
-            (uart_port_t)runtime->uart_port,
-            rx_buf,
-            sizeof(rx_buf),
-            pdMS_TO_TICKS(20));
-        if (rx_count > 0) {
-            consume_rx_bytes_with_capture(runtime, rx_buf, (size_t)rx_count, &capture);
-            if (capture.captured != 0u) {
-                return 0;
-            }
-        }
-    }
-
-    return PWOS_SESSION_ERR_DEADLINE;
 }
 
 static int run_cluster_health_probe(
@@ -570,8 +583,17 @@ static int run_cluster_health_probe(
         &count,
         PWOS_COORDINATOR_MINI9P_DEADLINE_MS);
     if (rc == 0) {
+        uint16_t i;
+
         if (count > PWOS_COORDINATOR_MINI9P_HEALTH_READ_LEN) {
             count = PWOS_COORDINATOR_MINI9P_HEALTH_READ_LEN;
+        }
+        /* /sys/health 可包含多行诊断，周期日志只保留状态首行。 */
+        for (i = 0u; i < count; ++i) {
+            if (text[i] == (uint8_t)'\r' || text[i] == (uint8_t)'\n') {
+                count = i;
+                break;
+            }
         }
         text[count] = '\0';
         ESP_LOGI(TAG,
@@ -592,16 +614,14 @@ static void probe_one_due_node(pwos_coordinator_runtime_t *runtime)
         return;
     }
 
-    sync_cluster_vfs(runtime);
     now = xTaskGetTickCount();
     for (i = 0u; i < PWOS_HOST_COORDINATOR_MAX_NODES; ++i) {
-        const pwos_cluster_vfs_route_t *route =
-            pwos_cluster_vfs_route_by_index(&runtime->cluster_vfs, i);
+        pwos_cluster_vfs_route_t route;
         int rc;
 
-        if (route == NULL ||
-            route->state == PWOS_CLUSTER_VFS_ROUTE_EMPTY ||
-            route->state == PWOS_CLUSTER_VFS_ROUTE_OFFLINE) {
+        if (pwos_cluster_vfs_get_route(&runtime->cluster_vfs, i, &route) != 0 ||
+            route.state == PWOS_CLUSTER_VFS_ROUTE_EMPTY ||
+            route.state == PWOS_CLUSTER_VFS_ROUTE_OFFLINE) {
             continue;
         }
         if (runtime->mini9p_last_probe_tick[i] != 0u &&
@@ -611,8 +631,8 @@ static void probe_one_due_node(pwos_coordinator_runtime_t *runtime)
         }
 
         runtime->mini9p_last_probe_tick[i] = (uint32_t)now;
-        runtime->stats.mini9p_last_addr = route->addr;
-        rc = run_cluster_health_probe(runtime, route);
+        runtime->stats.mini9p_last_addr = route.addr;
+        rc = run_cluster_health_probe(runtime, &route);
         runtime->stats.mini9p_last_error = (int32_t)rc;
         if (rc == 0) {
             ++runtime->stats.mini9p_probe_ok;
@@ -620,8 +640,8 @@ static void probe_one_due_node(pwos_coordinator_runtime_t *runtime)
             ++runtime->stats.mini9p_probe_fail;
             ESP_LOGW(TAG,
                 "mini9p probe %s addr=%u failed rc=%d (%s)",
-                route->target,
-                route->addr,
+                route.target,
+                route.addr,
                 rc,
                 pwos_session_error_name(rc));
         }
@@ -631,6 +651,9 @@ static void probe_one_due_node(pwos_coordinator_runtime_t *runtime)
 
 static void log_status(const pwos_coordinator_runtime_t *runtime)
 {
+    pwos_session_manager_stats_t session_stats;
+
+    pwos_session_manager_get_stats(&runtime->sessions, &session_stats);
     ESP_LOGI(TAG,
         "stats nodes=%u rx=%" PRIu32 "/%" PRIu32
         " tx=%" PRIu32 "/%" PRIu32
@@ -638,6 +661,8 @@ static void log_status(const pwos_coordinator_runtime_t *runtime)
         " reg=%" PRIu32 " assign=%" PRIu32
         " renew=%" PRIu32 " route=%" PRIu32
         " m9p=%" PRIu32 "/%" PRIu32 "/%" PRIu32 "/%" PRIu32
+        " rpc=%" PRIu32 "/%" PRIu32 "/%" PRIu32
+        " pending=%" PRIu32 "/%" PRIu32 " peak=%" PRIu32
         " parse_err=%" PRIu32 " tx_err=%" PRIu32,
         runtime->stats.node_count,
         runtime->stats.rx_frames,
@@ -654,8 +679,174 @@ static void log_status(const pwos_coordinator_runtime_t *runtime)
         runtime->stats.mini9p_probe_fail,
         runtime->stats.mini9p_tx,
         runtime->stats.mini9p_rx,
+        runtime->stats.rpc_tx,
+        runtime->stats.rpc_rx,
+        runtime->stats.rpc_malformed,
+        session_stats.pending_delivered,
+        session_stats.pending_unmatched,
+        session_stats.pending_peak,
         runtime->stats.rx_parse_errors,
         runtime->stats.tx_errors);
+}
+
+static void session_manager_lock(void *ctx)
+{
+    pwos_coordinator_runtime_t *runtime = (pwos_coordinator_runtime_t *)ctx;
+
+    (void)xSemaphoreTake(runtime->session_mutex, portMAX_DELAY);
+}
+
+static void session_manager_unlock(void *ctx)
+{
+    pwos_coordinator_runtime_t *runtime = (pwos_coordinator_runtime_t *)ctx;
+
+    (void)xSemaphoreGive(runtime->session_mutex);
+}
+
+static void session_client_lock(void *ctx, uint8_t session_index)
+{
+    pwos_coordinator_runtime_t *runtime = (pwos_coordinator_runtime_t *)ctx;
+
+    if (session_index < PWOS_SESSION_MANAGER_MAX_SESSIONS) {
+        (void)xSemaphoreTake(runtime->session_client_mutex[session_index], portMAX_DELAY);
+    }
+}
+
+static void session_client_unlock(void *ctx, uint8_t session_index)
+{
+    pwos_coordinator_runtime_t *runtime = (pwos_coordinator_runtime_t *)ctx;
+
+    if (session_index < PWOS_SESSION_MANAGER_MAX_SESSIONS) {
+        (void)xSemaphoreGive(runtime->session_client_mutex[session_index]);
+    }
+}
+
+static void session_pending_reset(void *ctx, uint8_t pending_index)
+{
+    pwos_coordinator_runtime_t *runtime = (pwos_coordinator_runtime_t *)ctx;
+
+    if (pending_index < PWOS_SESSION_MANAGER_MAX_PENDING) {
+        while (xSemaphoreTake(runtime->pending_event[pending_index], 0u) == pdTRUE) {
+            /* 清掉上一次事务可能遗留的 signal。 */
+        }
+    }
+}
+
+static int session_pending_wait(
+    void *ctx,
+    uint8_t pending_index,
+    uint32_t timeout_ms)
+{
+    pwos_coordinator_runtime_t *runtime = (pwos_coordinator_runtime_t *)ctx;
+    TickType_t timeout_ticks;
+
+    if (pending_index >= PWOS_SESSION_MANAGER_MAX_PENDING) {
+        return -(int)M9P_ERR_EINVAL;
+    }
+    timeout_ticks = pdMS_TO_TICKS(timeout_ms);
+    if (timeout_ms != 0u && timeout_ticks == 0u) {
+        timeout_ticks = 1u;
+    }
+    return xSemaphoreTake(runtime->pending_event[pending_index], timeout_ticks) == pdTRUE ?
+        0 : PWOS_SESSION_ERR_DEADLINE;
+}
+
+static void session_pending_signal(void *ctx, uint8_t pending_index)
+{
+    pwos_coordinator_runtime_t *runtime = (pwos_coordinator_runtime_t *)ctx;
+
+    if (pending_index < PWOS_SESSION_MANAGER_MAX_PENDING) {
+        (void)xSemaphoreGive(runtime->pending_event[pending_index]);
+    }
+}
+
+static uint32_t session_now_ms(void *ctx)
+{
+    (void)ctx;
+    return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+}
+
+static void cluster_vfs_lock(void *ctx)
+{
+    pwos_coordinator_runtime_t *runtime = (pwos_coordinator_runtime_t *)ctx;
+
+    (void)xSemaphoreTake(runtime->vfs_mutex, portMAX_DELAY);
+}
+
+static void cluster_vfs_unlock(void *ctx)
+{
+    pwos_coordinator_runtime_t *runtime = (pwos_coordinator_runtime_t *)ctx;
+
+    (void)xSemaphoreGive(runtime->vfs_mutex);
+}
+
+static void delete_runtime_sync(pwos_coordinator_runtime_t *runtime)
+{
+    size_t i;
+
+    if (runtime == NULL) {
+        return;
+    }
+    for (i = 0u; i < PWOS_SESSION_MANAGER_MAX_PENDING; ++i) {
+        if (runtime->pending_event[i] != NULL) {
+            vSemaphoreDelete(runtime->pending_event[i]);
+            runtime->pending_event[i] = NULL;
+        }
+    }
+    for (i = 0u; i < PWOS_SESSION_MANAGER_MAX_SESSIONS; ++i) {
+        if (runtime->session_client_mutex[i] != NULL) {
+            vSemaphoreDelete(runtime->session_client_mutex[i]);
+            runtime->session_client_mutex[i] = NULL;
+        }
+    }
+    if (runtime->vfs_mutex != NULL) {
+        vSemaphoreDelete(runtime->vfs_mutex);
+        runtime->vfs_mutex = NULL;
+    }
+    if (runtime->session_mutex != NULL) {
+        vSemaphoreDelete(runtime->session_mutex);
+        runtime->session_mutex = NULL;
+    }
+    if (runtime->coordinator_mutex != NULL) {
+        vSemaphoreDelete(runtime->coordinator_mutex);
+        runtime->coordinator_mutex = NULL;
+    }
+    if (runtime->tx_mutex != NULL) {
+        vSemaphoreDelete(runtime->tx_mutex);
+        runtime->tx_mutex = NULL;
+    }
+}
+
+static int init_runtime_sync(pwos_coordinator_runtime_t *runtime)
+{
+    size_t i;
+
+    runtime->tx_mutex = xSemaphoreCreateMutex();
+    runtime->coordinator_mutex = xSemaphoreCreateMutex();
+    runtime->session_mutex = xSemaphoreCreateMutex();
+    runtime->vfs_mutex = xSemaphoreCreateMutex();
+    if (runtime->tx_mutex == NULL || runtime->coordinator_mutex == NULL ||
+        runtime->session_mutex == NULL ||
+        runtime->vfs_mutex == NULL) {
+        delete_runtime_sync(runtime);
+        return -1;
+    }
+
+    for (i = 0u; i < PWOS_SESSION_MANAGER_MAX_SESSIONS; ++i) {
+        runtime->session_client_mutex[i] = xSemaphoreCreateMutex();
+        if (runtime->session_client_mutex[i] == NULL) {
+            delete_runtime_sync(runtime);
+            return -1;
+        }
+    }
+    for (i = 0u; i < PWOS_SESSION_MANAGER_MAX_PENDING; ++i) {
+        runtime->pending_event[i] = xSemaphoreCreateBinary();
+        if (runtime->pending_event[i] == NULL) {
+            delete_runtime_sync(runtime);
+            return -1;
+        }
+    }
+    return 0;
 }
 
 static void coordinator_task(void *arg)
@@ -684,14 +875,24 @@ static void coordinator_task(void *arg)
             consume_rx_bytes(runtime, rx_buf, (size_t)rx_len);
         }
 
-        probe_one_due_node(runtime);
-
         if (last_report == 0u ||
             (uint32_t)(now - last_report) >= pdMS_TO_TICKS(PWOS_COORDINATOR_REPORT_INTERVAL_MS)) {
+            coordinator_lock(runtime);
             runtime->stats.node_count = count_nodes(&runtime->coordinator);
+            coordinator_unlock(runtime);
             log_status(runtime);
             last_report = now;
         }
+    }
+}
+
+static void mini9p_probe_task(void *arg)
+{
+    pwos_coordinator_runtime_t *runtime = (pwos_coordinator_runtime_t *)arg;
+
+    for (;;) {
+        probe_one_due_node(runtime);
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
@@ -764,22 +965,47 @@ int pwos_coordinator_runtime_start_default(void)
     g_runtime.uid[2] = 0x434F4F52u; /* "COOR" */
     pwos_link_parser_init(&g_runtime.parser);
     pwos_host_coordinator_init(&g_runtime.coordinator);
+    if (init_runtime_sync(&g_runtime) != 0) {
+        memset(&g_runtime, 0, sizeof(g_runtime));
+        return -1;
+    }
     {
         pwos_session_manager_config_t session_config;
+        pwos_cluster_vfs_config_t vfs_config;
 
         memset(&session_config, 0, sizeof(session_config));
         session_config.io_ctx = &g_runtime;
-        session_config.send = session_send_mini9p;
-        session_config.wait = session_wait_mini9p;
+        session_config.send = session_send_data;
         session_config.default_deadline_ms = PWOS_COORDINATOR_MINI9P_DEADLINE_MS;
+        session_config.sync_ctx = &g_runtime;
+        session_config.lock = session_manager_lock;
+        session_config.unlock = session_manager_unlock;
+        session_config.client_lock = session_client_lock;
+        session_config.client_unlock = session_client_unlock;
+        session_config.pending_reset = session_pending_reset;
+        session_config.pending_wait = session_pending_wait;
+        session_config.pending_signal = session_pending_signal;
+        session_config.now_ms = session_now_ms;
+
+        memset(&vfs_config, 0, sizeof(vfs_config));
+        vfs_config.lock_ctx = &g_runtime;
+        vfs_config.lock = cluster_vfs_lock;
+        vfs_config.unlock = cluster_vfs_unlock;
         if (pwos_session_manager_init(&g_runtime.sessions, &session_config) != 0 ||
-            pwos_cluster_vfs_init(&g_runtime.cluster_vfs, &g_runtime.sessions) != 0) {
+            pwos_rpc_client_init(
+                &g_runtime.rpc_client, &g_runtime.sessions) != 0 ||
+            pwos_cluster_vfs_init_with_config(
+                &g_runtime.cluster_vfs,
+                &g_runtime.sessions,
+                &vfs_config) != 0) {
+            delete_runtime_sync(&g_runtime);
             memset(&g_runtime, 0, sizeof(g_runtime));
             return -1;
         }
     }
 
     if (init_uart() != 0) {
+        delete_runtime_sync(&g_runtime);
         memset(&g_runtime, 0, sizeof(g_runtime));
         return -1;
     }
@@ -797,6 +1023,23 @@ int pwos_coordinator_runtime_start_default(void)
         &g_runtime.task);
     if (created != pdPASS) {
         (void)uart_driver_delete((uart_port_t)PWOS_COORDINATOR_UART_PORT);
+        delete_runtime_sync(&g_runtime);
+        memset(&g_runtime, 0, sizeof(g_runtime));
+        return -1;
+    }
+
+    created = xTaskCreate(
+        mini9p_probe_task,
+        PWOS_COORDINATOR_PROBE_TASK_NAME,
+        PWOS_COORDINATOR_PROBE_TASK_STACK,
+        &g_runtime,
+        PWOS_COORDINATOR_PROBE_TASK_PRIO,
+        &g_runtime.probe_task);
+    if (created != pdPASS) {
+        vTaskDelete(g_runtime.task);
+        g_runtime.task = NULL;
+        (void)uart_driver_delete((uart_port_t)PWOS_COORDINATOR_UART_PORT);
+        delete_runtime_sync(&g_runtime);
         memset(&g_runtime, 0, sizeof(g_runtime));
         return -1;
     }
@@ -829,10 +1072,274 @@ void pwos_coordinator_runtime_get_stats(pwos_coordinator_runtime_stats_t *out_st
     *out_stats = g_runtime.stats;
 }
 
-const pwos_host_coordinator_t *pwos_coordinator_runtime_get_coordinator(void)
+int pwos_coordinator_runtime_get_node(
+    size_t index,
+    pwos_host_node_entry_t *out_node)
+{
+    if (out_node == NULL || index >= PWOS_HOST_COORDINATOR_MAX_NODES ||
+        g_runtime.initialized == 0u) {
+        return -(int)M9P_ERR_EINVAL;
+    }
+#ifdef ESP_PLATFORM
+    coordinator_lock(&g_runtime);
+#endif
+    *out_node = g_runtime.coordinator.nodes[index];
+#ifdef ESP_PLATFORM
+    coordinator_unlock(&g_runtime);
+#endif
+    return out_node->valid != 0u ? 0 : -(int)M9P_ERR_ENOENT;
+}
+
+int pwos_coordinator_runtime_get_route(
+    size_t index,
+    pwos_cluster_vfs_route_t *out_route)
 {
     if (g_runtime.initialized == 0u) {
-        return NULL;
+        return PWOS_SESSION_ERR_NO_ROUTE;
     }
-    return &g_runtime.coordinator;
+    return pwos_cluster_vfs_get_route(&g_runtime.cluster_vfs, index, out_route);
+}
+
+int pwos_coordinator_runtime_get_session(
+    size_t index,
+    pwos_session_snapshot_t *out_session)
+{
+    if (g_runtime.initialized == 0u) {
+        return PWOS_SESSION_ERR_NO_ROUTE;
+    }
+    return pwos_session_manager_get_snapshot(&g_runtime.sessions, index, out_session);
+}
+
+void pwos_coordinator_runtime_get_session_stats(
+    pwos_session_manager_stats_t *out_stats)
+{
+    if (out_stats == NULL) {
+        return;
+    }
+    if (g_runtime.initialized == 0u) {
+        memset(out_stats, 0, sizeof(*out_stats));
+        return;
+    }
+    pwos_session_manager_get_stats(&g_runtime.sessions, out_stats);
+}
+
+void pwos_coordinator_runtime_get_vfs_stats(
+    pwos_cluster_vfs_stats_t *out_stats)
+{
+    if (out_stats == NULL) {
+        return;
+    }
+    if (g_runtime.initialized == 0u) {
+        memset(out_stats, 0, sizeof(*out_stats));
+        return;
+    }
+    pwos_cluster_vfs_get_stats(&g_runtime.cluster_vfs, out_stats);
+}
+
+void pwos_coordinator_runtime_get_rpc_stats(
+    pwos_rpc_client_stats_t *out_stats)
+{
+    if (out_stats == NULL) {
+        return;
+    }
+    if (g_runtime.initialized == 0u) {
+        memset(out_stats, 0, sizeof(*out_stats));
+        return;
+    }
+    pwos_rpc_client_get_stats(&g_runtime.rpc_client, out_stats);
+}
+
+static int find_rpc_route(
+    const char *target,
+    pwos_cluster_vfs_route_t *out_route)
+{
+    size_t i;
+
+    if (target == NULL || out_route == NULL || target[0] == '\0') {
+        return -(int)M9P_ERR_EINVAL;
+    }
+    for (i = 0u; i < PWOS_CLUSTER_VFS_MAX_ROUTES; ++i) {
+        pwos_cluster_vfs_route_t route;
+
+        if (pwos_cluster_vfs_get_route(&g_runtime.cluster_vfs, i, &route) != 0 ||
+            route.state == PWOS_CLUSTER_VFS_ROUTE_EMPTY ||
+            route.state == PWOS_CLUSTER_VFS_ROUTE_OFFLINE ||
+            strcmp(route.target, target) != 0) {
+            continue;
+        }
+        *out_route = route;
+        return 0;
+    }
+    return PWOS_SESSION_ERR_NO_ROUTE;
+}
+
+int pwos_coordinator_runtime_rpc_call(
+    const char *target,
+    const char *service,
+    const char *method,
+    const uint8_t *payload,
+    uint16_t payload_len,
+    uint32_t deadline_ms,
+    uint8_t *response,
+    uint16_t *in_out_response_len,
+    uint16_t *out_status)
+{
+    pwos_cluster_vfs_route_t route;
+    int rc;
+
+    if (g_runtime.initialized == 0u) {
+        return PWOS_SESSION_ERR_NO_ROUTE;
+    }
+    rc = find_rpc_route(target, &route);
+    if (rc != 0) {
+        return rc;
+    }
+    return pwos_rpc_client_call(
+        &g_runtime.rpc_client,
+        route.addr,
+        route.boot_id,
+        service,
+        method,
+        payload,
+        payload_len,
+        deadline_ms,
+        response,
+        in_out_response_len,
+        out_status);
+}
+
+int pwos_coordinator_runtime_rpc_notify(
+    const char *target,
+    const char *service,
+    const char *method,
+    const uint8_t *payload,
+    uint16_t payload_len,
+    uint32_t deadline_ms)
+{
+    pwos_cluster_vfs_route_t route;
+    int rc;
+
+    if (g_runtime.initialized == 0u) {
+        return PWOS_SESSION_ERR_NO_ROUTE;
+    }
+    rc = find_rpc_route(target, &route);
+    if (rc != 0) {
+        return rc;
+    }
+    return pwos_rpc_client_notify(
+        &g_runtime.rpc_client,
+        route.addr,
+        route.boot_id,
+        service,
+        method,
+        payload,
+        payload_len,
+        deadline_ms);
+}
+
+int pwos_coordinator_runtime_rpc_stream(
+    const char *target,
+    const char *service,
+    const char *method,
+    const uint8_t *payload,
+    uint16_t payload_len,
+    uint32_t deadline_ms,
+    uint8_t *response,
+    uint16_t *in_out_response_len,
+    uint16_t *out_status,
+    uint16_t *out_chunk_count)
+{
+    pwos_cluster_vfs_route_t route;
+    int rc;
+
+    if (g_runtime.initialized == 0u) {
+        return PWOS_SESSION_ERR_NO_ROUTE;
+    }
+    rc = find_rpc_route(target, &route);
+    if (rc != 0) {
+        return rc;
+    }
+    return pwos_rpc_client_stream(
+        &g_runtime.rpc_client,
+        route.addr,
+        route.boot_id,
+        service,
+        method,
+        payload,
+        payload_len,
+        deadline_ms,
+        response,
+        in_out_response_len,
+        out_status,
+        out_chunk_count);
+}
+
+int pwos_coordinator_runtime_read_path(
+    const char *path,
+    uint8_t *buf,
+    uint16_t *in_out_len,
+    uint32_t deadline_ms)
+{
+    if (g_runtime.initialized == 0u) {
+        return PWOS_SESSION_ERR_NO_ROUTE;
+    }
+    return pwos_cluster_vfs_read_path(
+        &g_runtime.cluster_vfs,
+        path,
+        buf,
+        in_out_len,
+        deadline_ms);
+}
+
+int pwos_coordinator_runtime_write_path(
+    const char *path,
+    const uint8_t *data,
+    uint16_t len,
+    uint16_t *out_written,
+    uint32_t deadline_ms)
+{
+    if (g_runtime.initialized == 0u) {
+        return PWOS_SESSION_ERR_NO_ROUTE;
+    }
+    return pwos_cluster_vfs_write_path(
+        &g_runtime.cluster_vfs,
+        path,
+        data,
+        len,
+        out_written,
+        deadline_ms);
+}
+
+int pwos_coordinator_runtime_list(
+    const char *path,
+    struct m9p_dirent *entries,
+    size_t max_entries,
+    size_t *out_count,
+    uint32_t deadline_ms)
+{
+    if (g_runtime.initialized == 0u) {
+        return PWOS_SESSION_ERR_NO_ROUTE;
+    }
+    return pwos_cluster_vfs_list(
+        &g_runtime.cluster_vfs,
+        path,
+        entries,
+        max_entries,
+        out_count,
+        deadline_ms);
+}
+
+int pwos_coordinator_runtime_stat(
+    const char *path,
+    struct m9p_stat *out_stat,
+    uint32_t deadline_ms)
+{
+    if (g_runtime.initialized == 0u) {
+        return PWOS_SESSION_ERR_NO_ROUTE;
+    }
+    return pwos_cluster_vfs_stat(
+        &g_runtime.cluster_vfs,
+        path,
+        out_stat,
+        deadline_ms);
 }

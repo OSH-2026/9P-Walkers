@@ -8,7 +8,7 @@ UART DMA/IDLE ISR
   -> pwos_queues
   -> link_rx_task / port_manager
   -> mesh_ctrl_task / node_control
-  -> service_task / mini9P server / local_vfs
+  -> service_task / mini9P server / RPC service / local_vfs
 ```
 
 ## 当前目录
@@ -20,8 +20,9 @@ pwos-slave/
 │   ├── drivers/          # uart_dma_port
 │   ├── link/             # port_manager
 │   ├── mesh2/            # node_control
-│   ├── service/          # DATA_MINI9P -> mini9P server
-│   ├── backend/          # local_vfs / 后续 node_vfs
+│   ├── service/          # mini9P server + DATA_RPC service registry
+│   ├── backend/          # local_vfs 诊断命名空间
+│   ├── diag/             # Debug 故障注入
 │   ├── os/               # frame_pool
 │   └── rtos/             # 任务和队列
 ├── CMakeLists.txt
@@ -49,7 +50,13 @@ pwos-slave/build.sh flash
 - USART1/USART2 等 CubeMX 已启用端口通过 `uart_dma_port` 接入链路层。
 - `port_manager` 处理 link hello / hello_ack，识别 host、node、peer。
 - `node_control` 完成 REGISTER、ASSIGN、RENEW、LINK_STATE、ROUTE_UPDATE 和数据面转发。
-- `service_runtime` 接收本机 `DATA_MINI9P`，当前挂载 `local_vfs`，暴露 `/`、`/sys`、`/sys/health`。
+- `service_runtime` 接收本机 `DATA_MINI9P`，通过 `local_vfs` 暴露完整 `/sys` 诊断树。
+- `service_runtime` 同时接收 `DATA_RPC`；内置
+  `system.ping/stream/info/notify/delay/fail`。流式响应按 32 字节分块并以 10 ms
+  间隔发送，延期调用由 service task 轮询推进，不阻塞 mesh 控制面。
+- `/sys/tasks`、`ports`、`links`、`neighbors`、`routes`、`sessions`、`queues`、
+  `log`、`build` 均读取真实运行时快照。
+- Debug 构建可写 `/sys/fault`，按端口注入 drop/delay/corrupt/down/recover。
 
 ## 上板检查
 
@@ -65,3 +72,6 @@ print ((pwos_uart_dma_port_t *)'uart_dma_port.c'::g_ports)[0].stats
 
 P4 侧看到 `mini9p mcuN addr=N /sys/health=ok` 时，说明该节点控制面和
 `DATA_MINI9P` 数据面都已经闭环。
+
+执行 `rpc mcuN system.ping hello` 返回 `hello`，并且 `/sys/sessions` 中 RPC
+request/response 计数增长时，说明 `DATA_RPC` 闭环。

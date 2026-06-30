@@ -26,7 +26,10 @@ typedef enum {
 
 typedef struct {
     uint8_t used;
+    uint8_t busy;
     uint8_t route_index;
+    uint32_t generation;
+    uint32_t route_generation;
     uint16_t remote_fid;
     struct m9p_qid qid;
     uint8_t mode;
@@ -39,7 +42,17 @@ typedef struct {
     uint8_t addr;
     uint32_t uid[3];
     uint32_t boot_id;
+    uint32_t generation;
 } pwos_cluster_vfs_route_t;
+
+typedef void (*pwos_cluster_vfs_lock_fn)(void *ctx);
+
+typedef struct {
+    void *lock_ctx;
+    /* 只保护 routes/files/stats 元数据，不允许跨链路 I/O 持锁。 */
+    pwos_cluster_vfs_lock_fn lock;
+    pwos_cluster_vfs_lock_fn unlock;
+} pwos_cluster_vfs_config_t;
 
 typedef struct {
     uint32_t sync_count;
@@ -64,23 +77,28 @@ typedef struct {
     pwos_cluster_vfs_route_t routes[PWOS_CLUSTER_VFS_MAX_ROUTES];
     pwos_cluster_vfs_file_t files[PWOS_CLUSTER_VFS_MAX_OPEN];
     pwos_cluster_vfs_stats_t stats;
+    pwos_cluster_vfs_config_t config;
+    uint32_t next_route_generation;
+    uint32_t next_file_generation;
 } pwos_cluster_vfs_t;
 
 int pwos_cluster_vfs_init(
     pwos_cluster_vfs_t *vfs,
     pwos_session_manager_t *sessions);
 
+int pwos_cluster_vfs_init_with_config(
+    pwos_cluster_vfs_t *vfs,
+    pwos_session_manager_t *sessions,
+    const pwos_cluster_vfs_config_t *config);
+
 int pwos_cluster_vfs_sync_from_coordinator(
     pwos_cluster_vfs_t *vfs,
     const pwos_host_coordinator_t *coordinator);
 
-const pwos_cluster_vfs_route_t *pwos_cluster_vfs_route_by_index(
-    const pwos_cluster_vfs_t *vfs,
-    size_t index);
-
-const pwos_cluster_vfs_route_t *pwos_cluster_vfs_find_route(
-    const pwos_cluster_vfs_t *vfs,
-    const char *target);
+int pwos_cluster_vfs_get_route(
+    pwos_cluster_vfs_t *vfs,
+    size_t index,
+    pwos_cluster_vfs_route_t *out_route);
 
 int pwos_cluster_vfs_attach(
     pwos_cluster_vfs_t *vfs,

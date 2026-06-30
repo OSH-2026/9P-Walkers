@@ -331,6 +331,24 @@ bool m9p_decode_frame(const uint8_t *frame, size_t frame_len, struct m9p_frame_v
     return true;
 }
 
+bool m9p_retag_frame(uint8_t *frame, size_t frame_len, uint16_t tag)
+{
+    struct m9p_frame_view view;
+    uint16_t frame_len_field;
+    uint16_t crc;
+
+    if (frame == NULL || !m9p_decode_frame(frame, frame_len, &view)) {
+        return false;
+    }
+
+    /* tag 位于 CRC 覆盖范围内，修改后必须同步重算帧尾 CRC。 */
+    frame_len_field = get_le16(frame + 2u);
+    put_le16(frame + 6u, tag);
+    crc = m9p_crc16_ccitt_false(frame + 4u, frame_len_field);
+    put_le16(frame + frame_len - 2u, crc);
+    return true;
+}
+
 /**
  * @brief 构造 TATTACH 请求帧
  * 

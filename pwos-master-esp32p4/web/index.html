@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>PWOS Console</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --page: #101315;
+      --bar: #181d20;
+      --panel: #0b0e10;
+      --line: #30383c;
+      --text: #e7ecee;
+      --muted: #8f9b9f;
+      --green: #49d17d;
+      --cyan: #5ec9d5;
+      --amber: #e9b44c;
+      --red: #ef6f6c;
+    }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; }
+    body {
+      background: var(--page);
+      color: var(--text);
+      font-family: Inter, system-ui, sans-serif;
+      font-size: 14px;
+      letter-spacing: 0;
+      overflow: hidden;
+    }
+    .app { height: 100%; display: grid; grid-template-rows: 52px minmax(0, 1fr); }
+    header {
+      align-items: center;
+      background: var(--bar);
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      gap: 14px;
+      min-width: 0;
+      padding: 0 16px;
+    }
+    .brand { color: #fff; font-size: 15px; font-weight: 700; white-space: nowrap; }
+    .divider { background: var(--line); height: 20px; width: 1px; }
+    .status { align-items: center; color: var(--muted); display: flex; gap: 7px; min-width: 0; }
+    .dot { background: var(--amber); border-radius: 50%; height: 8px; width: 8px; }
+    .status.online .dot { background: var(--green); }
+    .status.offline .dot { background: var(--red); }
+    .status-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .actions { display: flex; gap: 4px; margin-left: auto; }
+    button {
+      align-items: center;
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--muted);
+      cursor: pointer;
+      display: inline-flex;
+      font: inherit;
+      height: 34px;
+      justify-content: center;
+      padding: 0;
+      width: 34px;
+    }
+    button:hover { background: #22292c; border-color: var(--line); color: var(--text); }
+    button:focus-visible, input:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
+    main { min-height: 0; padding: 12px; }
+    .terminal {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      display: grid;
+      grid-template-rows: minmax(0, 1fr) 46px;
+      height: 100%;
+      min-width: 0;
+    }
+    #output {
+      color: #d7dfe1;
+      font: 13px/1.55 "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      letter-spacing: 0;
+      margin: 0;
+      overflow: auto;
+      padding: 14px 16px;
+      tab-size: 4;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .command {
+      align-items: center;
+      border-top: 1px solid var(--line);
+      display: grid;
+      grid-template-columns: 22px minmax(0, 1fr);
+      padding: 0 14px;
+    }
+    .prompt { color: var(--green); font: 700 14px monospace; }
+    input {
+      background: transparent;
+      border: 0;
+      color: #fff;
+      font: 13px monospace;
+      height: 42px;
+      letter-spacing: 0;
+      min-width: 0;
+      outline: 0;
+      width: 100%;
+    }
+    @media (max-width: 520px) {
+      header { gap: 10px; padding: 0 10px; }
+      main { padding: 0; }
+      .terminal { border-width: 0; }
+      .divider { display: none; }
+      #output { padding: 12px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div class="brand">PWOS</div>
+      <div class="divider"></div>
+      <div id="status" class="status">
+        <span class="dot"></span>
+        <span id="statusText" class="status-text">connecting</span>
+      </div>
+      <div class="actions">
+        <button id="reconnect" type="button" title="Reconnect" aria-label="Reconnect">&#8635;</button>
+        <button id="clear" type="button" title="Clear terminal" aria-label="Clear terminal">&#9003;</button>
+      </div>
+    </header>
+    <main>
+      <section class="terminal" aria-label="PWOS terminal">
+        <pre id="output"></pre>
+        <form id="form" class="command">
+          <span class="prompt">&gt;</span>
+          <input id="input" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Command">
+        </form>
+      </section>
+    </main>
+  </div>
+  <script>
+    const output = document.querySelector('#output');
+    const input = document.querySelector('#input');
+    const form = document.querySelector('#form');
+    const status = document.querySelector('#status');
+    const statusText = document.querySelector('#statusText');
+    const history = [];
+    let historyIndex = 0;
+    let socket = null;
+    let retryTimer = 0;
+    let retryDelay = 750;
+
+    function append(text) {
+      output.textContent += text;
+      output.scrollTop = output.scrollHeight;
+    }
+
+    function setStatus(state, text) {
+      status.className = `status ${state}`;
+      statusText.textContent = text;
+    }
+
+    function connect() {
+      clearTimeout(retryTimer);
+      if (socket) socket.close();
+      setStatus('', 'connecting');
+      const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+      const ws = new WebSocket(`${scheme}://${location.host}/ws`);
+      socket = ws;
+      ws.addEventListener('open', () => {
+        if (socket !== ws) return;
+        retryDelay = 750;
+        setStatus('online', location.host);
+        input.focus();
+      });
+      ws.addEventListener('message', event => {
+        if (socket === ws) append(String(event.data));
+      });
+      ws.addEventListener('close', () => {
+        if (socket !== ws) return;
+        setStatus('offline', 'disconnected');
+        retryTimer = setTimeout(connect, retryDelay);
+        retryDelay = Math.min(retryDelay * 2, 8000);
+      });
+      ws.addEventListener('error', () => ws.close());
+    }
+
+    form.addEventListener('submit', event => {
+      event.preventDefault();
+      const line = input.value.trim();
+      if (!line || !socket || socket.readyState !== WebSocket.OPEN) return;
+      append(`> ${line}\n`);
+      socket.send(line);
+      history.push(line);
+      historyIndex = history.length;
+      input.value = '';
+    });
+
+    input.addEventListener('keydown', event => {
+      if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+      event.preventDefault();
+      if (event.key === 'ArrowUp' && historyIndex > 0) historyIndex--;
+      if (event.key === 'ArrowDown' && historyIndex < history.length) historyIndex++;
+      input.value = history[historyIndex] || '';
+      input.setSelectionRange(input.value.length, input.value.length);
+    });
+
+    document.querySelector('#clear').addEventListener('click', () => {
+      output.textContent = '';
+      input.focus();
+    });
+    document.querySelector('#reconnect').addEventListener('click', connect);
+    append('PWOS coordinator console\n');
+    connect();
+  </script>
+</body>
+</html>

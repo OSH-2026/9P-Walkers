@@ -1,9 +1,13 @@
 #ifndef PWOS_COORDINATOR_RUNTIME_H
 #define PWOS_COORDINATOR_RUNTIME_H
 
+#include <stddef.h>
 #include <stdint.h>
 
+#include "cluster_vfs.h"
 #include "host_coordinator.h"
+#include "rpc_client.h"
+#include "session_manager.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -40,6 +44,9 @@ typedef struct {
     uint32_t mini9p_rx;
     uint32_t mini9p_probe_ok;
     uint32_t mini9p_probe_fail;
+    uint32_t rpc_tx;
+    uint32_t rpc_rx;
+    uint32_t rpc_malformed;
     uint8_t mini9p_last_addr;
     int32_t mini9p_last_error;
     uint32_t last_rx_tick;
@@ -50,7 +57,82 @@ int pwos_coordinator_runtime_start_default(void);
 
 void pwos_coordinator_runtime_get_stats(pwos_coordinator_runtime_stats_t *out_stats);
 
-const pwos_host_coordinator_t *pwos_coordinator_runtime_get_coordinator(void);
+int pwos_coordinator_runtime_get_node(
+    size_t index,
+    pwos_host_node_entry_t *out_node);
+
+int pwos_coordinator_runtime_get_route(
+    size_t index,
+    pwos_cluster_vfs_route_t *out_route);
+
+int pwos_coordinator_runtime_get_session(
+    size_t index,
+    pwos_session_snapshot_t *out_session);
+
+void pwos_coordinator_runtime_get_session_stats(
+    pwos_session_manager_stats_t *out_stats);
+
+void pwos_coordinator_runtime_get_vfs_stats(
+    pwos_cluster_vfs_stats_t *out_stats);
+
+void pwos_coordinator_runtime_get_rpc_stats(
+    pwos_rpc_client_stats_t *out_stats);
+
+int pwos_coordinator_runtime_rpc_call(
+    const char *target,
+    const char *service,
+    const char *method,
+    const uint8_t *payload,
+    uint16_t payload_len,
+    uint32_t deadline_ms,
+    uint8_t *response,
+    uint16_t *in_out_response_len,
+    uint16_t *out_status);
+
+int pwos_coordinator_runtime_rpc_notify(
+    const char *target,
+    const char *service,
+    const char *method,
+    const uint8_t *payload,
+    uint16_t payload_len,
+    uint32_t deadline_ms);
+
+int pwos_coordinator_runtime_rpc_stream(
+    const char *target,
+    const char *service,
+    const char *method,
+    const uint8_t *payload,
+    uint16_t payload_len,
+    uint32_t deadline_ms,
+    uint8_t *response,
+    uint16_t *in_out_response_len,
+    uint16_t *out_status,
+    uint16_t *out_chunk_count);
+
+int pwos_coordinator_runtime_read_path(
+    const char *path,
+    uint8_t *buf,
+    uint16_t *in_out_len,
+    uint32_t deadline_ms);
+
+int pwos_coordinator_runtime_write_path(
+    const char *path,
+    const uint8_t *data,
+    uint16_t len,
+    uint16_t *out_written,
+    uint32_t deadline_ms);
+
+int pwos_coordinator_runtime_list(
+    const char *path,
+    struct m9p_dirent *entries,
+    size_t max_entries,
+    size_t *out_count,
+    uint32_t deadline_ms);
+
+int pwos_coordinator_runtime_stat(
+    const char *path,
+    struct m9p_stat *out_stat,
+    uint32_t deadline_ms);
 
 #ifdef __cplusplus
 }

@@ -1,8 +1,13 @@
 set(PWOS_SHARED_LINK_DIR "${CMAKE_CURRENT_LIST_DIR}/../../pwos-shared/link")
 set(PWOS_SHARED_MESH2_DIR "${CMAKE_CURRENT_LIST_DIR}/../../pwos-shared/mesh2")
 set(PWOS_SHARED_MINI9P_DIR "${CMAKE_CURRENT_LIST_DIR}/../../pwos-shared/mini9p")
+set(PWOS_SHARED_RPC_DIR "${CMAKE_CURRENT_LIST_DIR}/../../pwos-shared/rpc")
 set(PWOS_HOST_SESSIONS_DIR "${CMAKE_CURRENT_LIST_DIR}/../host_sessions")
 set(PWOS_HOST_API_DIR "${CMAKE_CURRENT_LIST_DIR}/../host_api")
+set(PWOS_HOST_SHELL_DIR "${CMAKE_CURRENT_LIST_DIR}/../host_shell")
+set(PWOS_HOST_NET_DIR "${CMAKE_CURRENT_LIST_DIR}/../host_net")
+set(PWOS_HOST_RPC_DIR "${CMAKE_CURRENT_LIST_DIR}/../host_rpc")
+set(PWOS_WEB_DIR "${CMAKE_CURRENT_LIST_DIR}/../web")
 
 idf_component_register(
     SRCS
@@ -10,18 +15,36 @@ idf_component_register(
         "../coordinator_runtime/pwos_coordinator_runtime.c"
         "../host_coordinator/host_coordinator.c"
         "../host_sessions/session_manager.c"
+        "../host_rpc/rpc_client.c"
         "../host_api/cluster_vfs.c"
+        "../host_api/host_observability.c"
+        "../host_shell/command_service.c"
+        "../host_shell/host_shell_runtime.c"
+        "../host_net/lan_runtime.c"
+        "../web/http_server.c"
+        "../web/websocket_console.c"
         "${PWOS_SHARED_LINK_DIR}/pwos_link_crc.c"
         "${PWOS_SHARED_LINK_DIR}/pwos_link_frame.c"
         "${PWOS_SHARED_LINK_DIR}/pwos_link_parser.c"
         "${PWOS_SHARED_MESH2_DIR}/pwos_mesh2_control.c"
         "${PWOS_SHARED_MINI9P_DIR}/mini9p_protocol.c"
         "${PWOS_SHARED_MINI9P_DIR}/mini9p_client.c"
+        "${PWOS_SHARED_RPC_DIR}/pwos_rpc_protocol.c"
+    EMBED_FILES
+        "../web/index.html"
     PRIV_REQUIRES
         freertos
         esp_driver_uart
         esp_hw_support
         esp_system
+        esp_timer
+        esp_http_server
+        esp_eth
+        esp_event
+        esp_netif
+        lwip
+        mdns
+        ip101
         spi_flash
         heap
         log
@@ -31,6 +54,11 @@ idf_component_register(
         "../host_coordinator"
         "../host_sessions"
         "../host_api"
+        "../host_shell"
+        "../host_net"
+        "../host_rpc"
+        "../web"
         "${PWOS_SHARED_LINK_DIR}"
         "${PWOS_SHARED_MESH2_DIR}"
-        "${PWOS_SHARED_MINI9P_DIR}")
+        "${PWOS_SHARED_MINI9P_DIR}"
+        "${PWOS_SHARED_RPC_DIR}")

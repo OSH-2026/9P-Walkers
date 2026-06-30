@@ -1,61 +1,23 @@
 # Backend
 
-`User/backend` 放置 Mini9P 从机侧的本地后端实现。架构分为两层：
+`local_vfs` 是当前 Mini9P server 的唯一后端入口。它拥有固定命名空间和目录
+分页规则，文件内容由 `service_runtime` 的回调按 offset 流式生成，不分配大缓冲。
 
-- **叶后端**：`lfs_vfs`、`dev_vfs`、`sys_vfs` 各自实现一棵虚拟文件树。
-- **路由层**：`node_vfs` 是统一入口，按路径前缀将请求分发到对应叶后端。
-
-```
-/ (node_vfs 根目录，列出 sys、dev、fs)
-├── /sys/*  -> sys_vfs  (sys、health、info)
-├── /dev/*  -> dev_vfs  (dev、led)
-└── /fs/*  -> lfs_vfs   (littlefs 根，/fs 前缀被剥离)
-```
-
-`local_vfs` 是旧的只读虚拟树实现，当前不参与运行时构建，仅保留作参考。
-
-## 各模块说明
-
-| 文件 | 职责 | 虚拟节点 |
-|------|------|----------|
-| `lfs_vfs.h/.c` | littlefs 文件系统后端 | `/` 下的littlefs文件树 |
-| `dev_vfs.h/.c` | 设备虚拟文件系统 | `/dev`、`/dev/led` |
-| `sys_vfs.h/.c` | 系统信息虚拟文件系统 | `/sys`、`/sys/health`、`/sys/info` |
-| `node_vfs.h/.c` | 多后端路由分发器 | 根目录列出 sys/dev/fs |
-| `local_vfs.h/.c` | 旧只读虚拟树，不参与构建 | - |
-
-## 典型接入方式
-
-```c
-struct node_vfs node;
-struct node_vfs_config node_cfg = {
-    .iounit = NODE_VFS_DEFAULT_IOUNIT,
-};
-node_vfs_init(&node, &node_cfg);
-
-// 将 node_vfs_ops() 接入 mini9p_server
+```text
+/
+└── /sys
+    ├── health      tasks       ports       links
+    ├── neighbors   routes      sessions    queues
+    ├── log         build       fault
+    └── info/uart   compatibility aliases
 ```
 
-`node_vfs_init()` 内部初始化并挂载 `sys_vfs`、`dev_vfs`、`lfs_vfs`；Mini9P server 只直接挂载 `node_vfs`。
+## 所有权
 
-## dev_vfs 设备操作接口
+- `local_vfs`：路径、qid、权限和完整 dirent 分页。
+- `service_runtime`：任务、队列、端口、路由、session 等运行时文本。
+- `fault_control`：Debug 构建的故障注入状态；`/sys/fault` 是唯一可写节点。
+- `mini9p_server`：fid、open mode、offset 和请求响应协议。
 
-`dev_vfs` 通过 `struct dev_vfs_device_ops` 回调接入真实硬件：
-
-```c
-struct dev_vfs_device_ops {
-    int (*read_led)(void *ctx, char *out, uint16_t out_cap, uint16_t *out_len);
-    int (*write_led)(void *ctx, const uint8_t *data, uint16_t len, uint16_t *out_written);
-};
-```
-
-## sys_vfs info_text
-
-`sys_vfs` 的 `info_text` 字段可传入自定义文本，作为 `/sys/info` 的内容。
-
-## 当前边界
-
-- Mini9P 保持 path-based `m9p_server_ops`，无 create/remove 等语义。
-- 当前默认依赖 SDIO + littlefs，串口 Mini9P 模式需先初始化 SDIO。
-- `/sys/health` 只读，`/sys/info` 由 `info_text` 配置。
-- `/dev/led` 支持读写，回调由 `device_ops` 提供。
+旧的 `node_vfs/sys_vfs/dev_vfs/lfs_vfs` 未进入重构后运行时，已经删除。存储
+驱动仍独立保留，后续重新接入 `/fs` 时应基于当前 session/并发约束设计新后端。

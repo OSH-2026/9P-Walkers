@@ -21,11 +21,13 @@ int main(void)
     const struct m9p_server_ops *ops;
     struct m9p_stat stat;
     struct m9p_qid qid;
-    struct m9p_dirent entries[4];
+    struct m9p_dirent entries[20];
     uint16_t written = 0u;
-    uint8_t data[128];
+    uint8_t data[1024];
     uint16_t iounit = 0u;
     uint16_t count = 0u;
+    uint16_t page_count = 0u;
+    uint32_t dir_offset = 0u;
     size_t entry_count;
 
     local_vfs_get_default_config(&config);
@@ -64,13 +66,36 @@ int main(void)
     expect_true(ops->open(&vfs, "/sys", M9P_OREAD, &qid, &iounit) == 0, "open sys dir");
     expect_true(ops->read(&vfs, "/sys", 0u, M9P_OREAD, data, sizeof(data), &count) == 0, "read sys dir");
     entry_count = m9p_parse_dirents(data, count, entries, sizeof(entries) / sizeof(entries[0]));
-    expect_true(entry_count == 1u, "sys dir entry count");
+    expect_true(entry_count >= 11u, "sys diagnostic entries");
     expect_true(strcmp(entries[0].name, "health") == 0, "sys contains health");
+
+    /* 小页读取也必须只返回完整 dirent，下一页 offset 可直接继续解析。 */
+    entry_count = 0u;
+    do {
+        size_t parsed;
+
+        page_count = 0u;
+        expect_true(ops->read(
+            &vfs, "/sys", dir_offset, M9P_OREAD,
+            data, 64u, &page_count) == 0, "paged sys read");
+        parsed = m9p_parse_dirents(
+            data, page_count, entries,
+            sizeof(entries) / sizeof(entries[0]));
+        expect_true(page_count == 0u || parsed > 0u, "paged dirent complete");
+        entry_count += parsed;
+        dir_offset += page_count;
+    } while (page_count > 0u);
+    expect_true(entry_count >= 11u, "paged sys entry count");
 
     expect_true(ops->stat(&vfs, "/missing", &stat) == -(int)M9P_ERR_ENOENT, "missing path");
     expect_true(ops->write(&vfs, "/sys/health", 0u, M9P_OWRITE, data, 1u, &written) ==
+                    -(int)M9P_ERR_EPERM,
+                "write health denied");
+    expect_true(ops->open(&vfs, "/sys/fault", M9P_OWRITE, &qid, &iounit) == 0,
+                "open fault write");
+    expect_true(ops->write(&vfs, "/sys/fault", 0u, M9P_OWRITE, data, 1u, &written) ==
                     -(int)M9P_ERR_ENOTSUP,
-                "write unsupported");
+                "fault callback unavailable");
 
     if (g_failures != 0) {
         printf("local_vfs_test: %d failure(s)\n", g_failures);

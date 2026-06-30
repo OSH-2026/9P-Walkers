@@ -67,6 +67,7 @@ typedef struct {
     uint32_t loop_count;           /* 与 heartbeat 同步递增，预留扩展 */
     uint32_t last_tick;            /* 最近一次心跳时的 FreeRTOS tick */
     uint32_t stack_high_water_words; /* 栈使用历史最低剩余字数（越大越安全） */
+    uint32_t priority;             /* 当前 FreeRTOS 任务优先级 */
 } pwos_task_status_t;
 
 /*

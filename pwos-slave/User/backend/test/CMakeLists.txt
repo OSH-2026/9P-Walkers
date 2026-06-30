@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.16)
 
 project(local_vfs_test C)
 
+enable_testing()
+
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -25,3 +27,5 @@ if (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
         -Werror
     )
 endif()
+
+add_test(NAME local_vfs_test COMMAND local_vfs_test)

@@ -173,6 +173,7 @@ bool m9p_encode_frame(
     size_t out_cap,
     size_t *out_len);
 bool m9p_decode_frame(const uint8_t *frame, size_t frame_len, struct m9p_frame_view *out_view);
+bool m9p_retag_frame(uint8_t *frame, size_t frame_len, uint16_t tag);
 
 // T* 请求构造：Master 调用，用于生成发往 Slave 的请求帧
 bool m9p_build_tattach(

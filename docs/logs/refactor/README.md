@@ -19,3 +19,10 @@ M3-port-manager.md
 - 硬件连接方式和串口参数。
 - 执行的命令及输出。
 - 失败现象、错误计数和下一步判断。
+
+当前记录：
+
+- `M5-session-manager-cluster-vfs.md`
+- `M6-host-concurrency.md`
+- `M7-webshell-observability.md`
+- `M8-slave-rpc.md`

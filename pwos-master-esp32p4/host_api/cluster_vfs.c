@@ -3,6 +3,29 @@
 #include <stdio.h>
 #include <string.h>
 
+typedef struct {
+    size_t index;
+    uint8_t addr;
+    uint32_t boot_id;
+    uint32_t generation;
+} pwos_cluster_vfs_route_ref_t;
+
+static uint8_t route_is_online(const pwos_cluster_vfs_route_t *route);
+
+static void vfs_lock(pwos_cluster_vfs_t *vfs)
+{
+    if (vfs != NULL && vfs->config.lock != NULL) {
+        vfs->config.lock(vfs->config.lock_ctx);
+    }
+}
+
+static void vfs_unlock(pwos_cluster_vfs_t *vfs)
+{
+    if (vfs != NULL && vfs->config.unlock != NULL) {
+        vfs->config.unlock(vfs->config.lock_ctx);
+    }
+}
+
 static uint8_t uid_equal(const uint32_t a[3], const uint32_t b[3])
 {
     return a[0] == b[0] && a[1] == b[1] && a[2] == b[2];
@@ -11,7 +34,9 @@ static uint8_t uid_equal(const uint32_t a[3], const uint32_t b[3])
 static void set_error(pwos_cluster_vfs_t *vfs, int rc)
 {
     if (vfs != NULL && rc != 0) {
+        vfs_lock(vfs);
         vfs->stats.last_error = (int32_t)rc;
+        vfs_unlock(vfs);
     }
 }
 
@@ -31,6 +56,42 @@ static void reset_route(pwos_cluster_vfs_route_t *route)
     memset(route, 0, sizeof(*route));
     route->state = PWOS_CLUSTER_VFS_ROUTE_EMPTY;
     route->addr = PWOS_CLUSTER_VFS_UNASSIGNED_ADDR;
+}
+
+static uint32_t next_generation(uint32_t *value)
+{
+    ++(*value);
+    if (*value == 0u) {
+        ++(*value);
+    }
+    return *value;
+}
+
+static void route_to_ref(
+    const pwos_cluster_vfs_t *vfs,
+    const pwos_cluster_vfs_route_t *route,
+    pwos_cluster_vfs_route_ref_t *out_ref)
+{
+    out_ref->index = (size_t)(route - vfs->routes);
+    out_ref->addr = route->addr;
+    out_ref->boot_id = route->boot_id;
+    out_ref->generation = route->generation;
+}
+
+static uint8_t route_ref_matches_locked(
+    const pwos_cluster_vfs_t *vfs,
+    const pwos_cluster_vfs_route_ref_t *ref)
+{
+    const pwos_cluster_vfs_route_t *route;
+
+    if (ref->index >= PWOS_CLUSTER_VFS_MAX_ROUTES) {
+        return 0u;
+    }
+    route = &vfs->routes[ref->index];
+    return route_is_online(route) != 0u &&
+        route->addr == ref->addr &&
+        route->boot_id == ref->boot_id &&
+        route->generation == ref->generation;
 }
 
 static uint8_t route_is_online(const pwos_cluster_vfs_route_t *route)
@@ -252,6 +313,7 @@ static int sync_one_node(
         pwos_session_manager_reset_node(vfs->sessions, conflict->addr);
         conflict->addr = PWOS_CLUSTER_VFS_UNASSIGNED_ADDR;
         conflict->state = PWOS_CLUSTER_VFS_ROUTE_OFFLINE;
+        conflict->generation = next_generation(&vfs->next_route_generation);
         ++vfs->stats.detached;
     }
 
@@ -272,6 +334,7 @@ static int sync_one_node(
         route->uid[1] = node->uid[1];
         route->uid[2] = node->uid[2];
         route->boot_id = node->boot_id;
+        route->generation = next_generation(&vfs->next_route_generation);
         mapping_changed = 1u;
         ++vfs->stats.discovered;
     } else {
@@ -287,6 +350,7 @@ static int sync_one_node(
                 pwos_session_manager_reset_node(vfs->sessions, route->addr);
             }
             ++vfs->stats.rediscovered;
+            route->generation = next_generation(&vfs->next_route_generation);
         }
         route->addr = node->addr;
         route->boot_id = node->boot_id;
@@ -303,33 +367,47 @@ static int sync_one_node(
 
 static int ensure_attached(
     pwos_cluster_vfs_t *vfs,
-    pwos_cluster_vfs_route_t *route,
+    const pwos_cluster_vfs_route_ref_t *ref,
     uint32_t deadline_ms)
 {
     int rc;
 
-    if (vfs == NULL || route == NULL || vfs->sessions == NULL) {
+    if (vfs == NULL || ref == NULL || vfs->sessions == NULL) {
         return -(int)M9P_ERR_EINVAL;
     }
-    if (route_is_online(route) == 0u) {
+
+    vfs_lock(vfs);
+    if (route_ref_matches_locked(vfs, ref) == 0u) {
+        vfs_unlock(vfs);
         return PWOS_SESSION_ERR_NO_ROUTE;
     }
-    if (route->state == PWOS_CLUSTER_VFS_ROUTE_ATTACHED) {
+    if (vfs->routes[ref->index].state == PWOS_CLUSTER_VFS_ROUTE_ATTACHED) {
+        vfs_unlock(vfs);
         return 0;
     }
+    vfs_unlock(vfs);
 
     rc = pwos_session_manager_attach(
         vfs->sessions,
-        route->addr,
-        route->boot_id,
+        ref->addr,
+        ref->boot_id,
         deadline_ms);
+
+    vfs_lock(vfs);
     if (rc == 0) {
-        route->state = PWOS_CLUSTER_VFS_ROUTE_ATTACHED;
-        ++vfs->stats.attach_ok;
+        if (route_ref_matches_locked(vfs, ref) != 0u) {
+            vfs->routes[ref->index].state = PWOS_CLUSTER_VFS_ROUTE_ATTACHED;
+            ++vfs->stats.attach_ok;
+        } else {
+            rc = PWOS_SESSION_ERR_STALE_BOOT;
+            ++vfs->stats.attach_fail;
+            vfs->stats.last_error = (int32_t)rc;
+        }
     } else {
         ++vfs->stats.attach_fail;
-        set_error(vfs, rc);
+        vfs->stats.last_error = (int32_t)rc;
     }
+    vfs_unlock(vfs);
     return rc;
 }
 
@@ -337,14 +415,14 @@ static int resolve_path(
     pwos_cluster_vfs_t *vfs,
     const char *path,
     uint32_t deadline_ms,
-    pwos_cluster_vfs_route_t **out_route,
+    pwos_cluster_vfs_route_ref_t *out_ref,
     char *remote_path,
     size_t remote_cap)
 {
     size_t i;
     uint8_t matched_offline = 0u;
 
-    if (vfs == NULL || path == NULL || out_route == NULL ||
+    if (vfs == NULL || path == NULL || out_ref == NULL ||
         remote_path == NULL || remote_cap == 0u) {
         return -(int)M9P_ERR_EINVAL;
     }
@@ -352,6 +430,7 @@ static int resolve_path(
         return -(int)M9P_ERR_EINVAL;
     }
 
+    vfs_lock(vfs);
     for (i = 0u; i < PWOS_CLUSTER_VFS_MAX_ROUTES; ++i) {
         const char *path_target;
         const char *mapped_path;
@@ -380,19 +459,18 @@ static int resolve_path(
             mapped_path = "/";
         }
         if (strlen(mapped_path) >= remote_cap) {
+            vfs_unlock(vfs);
             return -(int)M9P_ERR_EMSIZE;
         }
 
-        rc = ensure_attached(vfs, &vfs->routes[i], deadline_ms);
-        if (rc != 0) {
-            return rc;
-        }
-
         memcpy(remote_path, mapped_path, strlen(mapped_path) + 1u);
-        *out_route = &vfs->routes[i];
-        return 0;
+        route_to_ref(vfs, &vfs->routes[i], out_ref);
+        vfs_unlock(vfs);
+        rc = ensure_attached(vfs, out_ref, deadline_ms);
+        return rc;
     }
 
+    vfs_unlock(vfs);
     return matched_offline != 0u ? PWOS_SESSION_ERR_NO_ROUTE : -(int)M9P_ERR_ENOENT;
 }
 
@@ -400,14 +478,26 @@ int pwos_cluster_vfs_init(
     pwos_cluster_vfs_t *vfs,
     pwos_session_manager_t *sessions)
 {
+    return pwos_cluster_vfs_init_with_config(vfs, sessions, NULL);
+}
+
+int pwos_cluster_vfs_init_with_config(
+    pwos_cluster_vfs_t *vfs,
+    pwos_session_manager_t *sessions,
+    const pwos_cluster_vfs_config_t *config)
+{
     size_t i;
 
-    if (vfs == NULL || sessions == NULL) {
+    if (vfs == NULL || sessions == NULL ||
+        (config != NULL && ((config->lock == NULL) != (config->unlock == NULL)))) {
         return -(int)M9P_ERR_EINVAL;
     }
 
     memset(vfs, 0, sizeof(*vfs));
     vfs->sessions = sessions;
+    if (config != NULL) {
+        vfs->config = *config;
+    }
     for (i = 0u; i < PWOS_CLUSTER_VFS_MAX_ROUTES; ++i) {
         reset_route(&vfs->routes[i]);
     }
@@ -424,6 +514,7 @@ int pwos_cluster_vfs_sync_from_coordinator(
         return -(int)M9P_ERR_EINVAL;
     }
 
+    vfs_lock(vfs);
     ++vfs->stats.sync_count;
     for (i = 0u; i < PWOS_HOST_COORDINATOR_MAX_NODES; ++i) {
         int rc;
@@ -433,7 +524,8 @@ int pwos_cluster_vfs_sync_from_coordinator(
         }
         rc = sync_one_node(vfs, &coordinator->nodes[i]);
         if (rc != 0) {
-            set_error(vfs, rc);
+            vfs->stats.last_error = (int32_t)rc;
+            vfs_unlock(vfs);
             return rc;
         }
     }
@@ -450,41 +542,28 @@ int pwos_cluster_vfs_sync_from_coordinator(
             }
             vfs->routes[i].addr = PWOS_CLUSTER_VFS_UNASSIGNED_ADDR;
             vfs->routes[i].state = PWOS_CLUSTER_VFS_ROUTE_OFFLINE;
+            vfs->routes[i].generation = next_generation(&vfs->next_route_generation);
             ++vfs->stats.detached;
         }
     }
 
+    vfs_unlock(vfs);
     return 0;
 }
 
-const pwos_cluster_vfs_route_t *pwos_cluster_vfs_route_by_index(
-    const pwos_cluster_vfs_t *vfs,
-    size_t index)
+int pwos_cluster_vfs_get_route(
+    pwos_cluster_vfs_t *vfs,
+    size_t index,
+    pwos_cluster_vfs_route_t *out_route)
 {
-    if (vfs == NULL || index >= PWOS_CLUSTER_VFS_MAX_ROUTES ||
-        vfs->routes[index].state == PWOS_CLUSTER_VFS_ROUTE_EMPTY) {
-        return NULL;
+    if (vfs == NULL || out_route == NULL || index >= PWOS_CLUSTER_VFS_MAX_ROUTES) {
+        return -(int)M9P_ERR_EINVAL;
     }
-    return &vfs->routes[index];
-}
-
-const pwos_cluster_vfs_route_t *pwos_cluster_vfs_find_route(
-    const pwos_cluster_vfs_t *vfs,
-    const char *target)
-{
-    size_t i;
-
-    if (vfs == NULL || target == NULL) {
-        return NULL;
-    }
-
-    for (i = 0u; i < PWOS_CLUSTER_VFS_MAX_ROUTES; ++i) {
-        if (vfs->routes[i].state != PWOS_CLUSTER_VFS_ROUTE_EMPTY &&
-            strcmp(vfs->routes[i].target, target) == 0) {
-            return &vfs->routes[i];
-        }
-    }
-    return NULL;
+    vfs_lock(vfs);
+    *out_route = vfs->routes[index];
+    vfs_unlock(vfs);
+    return out_route->state == PWOS_CLUSTER_VFS_ROUTE_EMPTY ?
+        -(int)M9P_ERR_ENOENT : 0;
 }
 
 int pwos_cluster_vfs_attach(
@@ -493,14 +572,22 @@ int pwos_cluster_vfs_attach(
     uint32_t deadline_ms)
 {
     pwos_cluster_vfs_route_t *route;
+    pwos_cluster_vfs_route_ref_t ref;
     int rc;
 
+    if (vfs == NULL || target == NULL) {
+        return -(int)M9P_ERR_EINVAL;
+    }
+    vfs_lock(vfs);
     route = find_route_mut(vfs, target);
     if (route == NULL) {
+        vfs_unlock(vfs);
         return -(int)M9P_ERR_ENOENT;
     }
+    route_to_ref(vfs, route, &ref);
+    vfs_unlock(vfs);
 
-    rc = ensure_attached(vfs, route, deadline_ms);
+    rc = ensure_attached(vfs, &ref, deadline_ms);
     set_error(vfs, rc);
     return rc;
 }
@@ -512,12 +599,15 @@ int pwos_cluster_vfs_open(
     uint32_t deadline_ms,
     uint16_t *out_fd)
 {
-    pwos_cluster_vfs_route_t *route = NULL;
+    pwos_cluster_vfs_route_ref_t route_ref;
     pwos_cluster_vfs_file_t *file;
     struct m9p_client *client;
     struct m9p_open_result result;
     char remote_path[M9P_MAX_PATH_LEN + 1u];
-    size_t route_index;
+    uint16_t remote_fid = 0u;
+    uint16_t fd;
+    uint32_t file_generation;
+    uint8_t session_index = 0xFFu;
     int rc;
 
     if (vfs == NULL || path == NULL || out_fd == NULL) {
@@ -525,49 +615,77 @@ int pwos_cluster_vfs_open(
     }
 
     *out_fd = 0xFFFFu;
-    rc = resolve_path(vfs, path, deadline_ms, &route, remote_path, sizeof(remote_path));
+    rc = resolve_path(vfs, path, deadline_ms, &route_ref, remote_path, sizeof(remote_path));
     if (rc != 0) {
+        vfs_lock(vfs);
         ++vfs->stats.open_fail;
-        set_error(vfs, rc);
+        vfs->stats.last_error = (int32_t)rc;
+        vfs_unlock(vfs);
         return rc;
     }
 
+    vfs_lock(vfs);
+    if (route_ref_matches_locked(vfs, &route_ref) == 0u) {
+        rc = PWOS_SESSION_ERR_STALE_BOOT;
+        ++vfs->stats.open_fail;
+        vfs->stats.last_error = (int32_t)rc;
+        vfs_unlock(vfs);
+        return rc;
+    }
     file = alloc_file(vfs);
     if (file == NULL) {
         rc = -(int)M9P_ERR_EBUSY;
         ++vfs->stats.open_fail;
-        set_error(vfs, rc);
+        vfs->stats.last_error = (int32_t)rc;
+        vfs_unlock(vfs);
         return rc;
     }
+    reset_file(file);
+    file->used = 2u; /* 2 表示正在打开，防止并发调用复用该槽位。 */
+    file->busy = 1u;
+    file->route_index = (uint8_t)route_ref.index;
+    file->route_generation = route_ref.generation;
+    file->generation = next_generation(&vfs->next_file_generation);
+    file_generation = file->generation;
+    fd = (uint16_t)(file - vfs->files);
+    vfs_unlock(vfs);
 
-    client = pwos_session_manager_get_client(
+    rc = pwos_session_manager_acquire_client(
         vfs->sessions,
-        route->addr,
-        route->boot_id,
-        deadline_ms);
-    if (client == NULL) {
-        rc = PWOS_SESSION_ERR_NO_ROUTE;
-        ++vfs->stats.open_fail;
-        set_error(vfs, rc);
-        return rc;
+        route_ref.addr,
+        route_ref.boot_id,
+        deadline_ms,
+        &client,
+        &session_index);
+    if (rc == 0) {
+        rc = m9p_client_open_path(client, remote_path, mode, &remote_fid, &result);
+        pwos_session_manager_release_client(vfs->sessions, session_index);
     }
 
-    rc = m9p_client_open_path(client, remote_path, mode, &file->remote_fid, &result);
+    vfs_lock(vfs);
+    file = &vfs->files[fd];
+    if (file->used != 2u || file->generation != file_generation ||
+        route_ref_matches_locked(vfs, &route_ref) == 0u) {
+        reset_file(file);
+        rc = PWOS_SESSION_ERR_STALE_BOOT;
+    }
     if (rc != 0) {
         reset_file(file);
         ++vfs->stats.open_fail;
-        set_error(vfs, rc);
+        vfs->stats.last_error = (int32_t)rc;
+        vfs_unlock(vfs);
         return rc;
     }
 
-    route_index = route_index_of(vfs, route);
     file->used = 1u;
-    file->route_index = (uint8_t)route_index;
+    file->busy = 0u;
+    file->remote_fid = remote_fid;
     file->qid = result.qid;
     file->mode = mode;
     file->offset = 0u;
-    *out_fd = (uint16_t)(file - vfs->files);
+    *out_fd = fd;
     ++vfs->stats.open_ok;
+    vfs_unlock(vfs);
     return 0;
 }
 
@@ -578,9 +696,10 @@ int pwos_cluster_vfs_read(
     uint16_t *in_out_len,
     uint32_t deadline_ms)
 {
-    pwos_cluster_vfs_file_t *file;
-    pwos_cluster_vfs_route_t *route;
+    pwos_cluster_vfs_file_t snapshot;
+    pwos_cluster_vfs_route_ref_t route_ref;
     struct m9p_client *client;
+    uint8_t session_index = 0xFFu;
     int rc;
 
     if (vfs == NULL || fd >= PWOS_CLUSTER_VFS_MAX_OPEN ||
@@ -588,37 +707,64 @@ int pwos_cluster_vfs_read(
         return -(int)M9P_ERR_EINVAL;
     }
 
-    file = &vfs->files[fd];
-    if (file->used == 0u || mode_allows_read(file->mode) == 0u ||
-        file->route_index >= PWOS_CLUSTER_VFS_MAX_ROUTES) {
+    vfs_lock(vfs);
+    snapshot = vfs->files[fd];
+    if (snapshot.used != 1u || snapshot.busy != 0u ||
+        mode_allows_read(snapshot.mode) == 0u ||
+        snapshot.route_index >= PWOS_CLUSTER_VFS_MAX_ROUTES) {
         rc = -(int)M9P_ERR_EFID;
         ++vfs->stats.read_fail;
-        set_error(vfs, rc);
+        vfs->stats.last_error = (int32_t)rc;
+        vfs_unlock(vfs);
         return rc;
     }
-
-    route = &vfs->routes[file->route_index];
-    client = pwos_session_manager_get_client(
-        vfs->sessions,
-        route->addr,
-        route->boot_id,
-        deadline_ms);
-    if (client == NULL) {
-        rc = PWOS_SESSION_ERR_NO_ROUTE;
+    route_to_ref(vfs, &vfs->routes[snapshot.route_index], &route_ref);
+    if (route_ref.generation != snapshot.route_generation ||
+        route_ref_matches_locked(vfs, &route_ref) == 0u) {
+        rc = PWOS_SESSION_ERR_STALE_BOOT;
         ++vfs->stats.read_fail;
-        set_error(vfs, rc);
+        vfs->stats.last_error = (int32_t)rc;
+        vfs_unlock(vfs);
         return rc;
     }
+    vfs->files[fd].busy = 1u;
+    vfs_unlock(vfs);
 
-    rc = m9p_client_read(client, file->remote_fid, file->offset, buf, in_out_len);
+    rc = pwos_session_manager_acquire_client(
+        vfs->sessions,
+        route_ref.addr,
+        route_ref.boot_id,
+        deadline_ms,
+        &client,
+        &session_index);
+    if (rc == 0) {
+        rc = m9p_client_read(
+            client,
+            snapshot.remote_fid,
+            snapshot.offset,
+            buf,
+            in_out_len);
+        pwos_session_manager_release_client(vfs->sessions, session_index);
+    }
+
+    vfs_lock(vfs);
+    if (vfs->files[fd].used != 1u ||
+        vfs->files[fd].generation != snapshot.generation ||
+        route_ref_matches_locked(vfs, &route_ref) == 0u) {
+        rc = PWOS_SESSION_ERR_STALE_BOOT;
+    } else {
+        vfs->files[fd].busy = 0u;
+    }
     if (rc != 0) {
         ++vfs->stats.read_fail;
-        set_error(vfs, rc);
+        vfs->stats.last_error = (int32_t)rc;
+        vfs_unlock(vfs);
         return rc;
     }
 
-    file->offset += *in_out_len;
+    vfs->files[fd].offset += *in_out_len;
     ++vfs->stats.read_ok;
+    vfs_unlock(vfs);
     return 0;
 }
 
@@ -630,9 +776,10 @@ int pwos_cluster_vfs_write(
     uint16_t *out_written,
     uint32_t deadline_ms)
 {
-    pwos_cluster_vfs_file_t *file;
-    pwos_cluster_vfs_route_t *route;
+    pwos_cluster_vfs_file_t snapshot;
+    pwos_cluster_vfs_route_ref_t route_ref;
     struct m9p_client *client;
+    uint8_t session_index = 0xFFu;
     int rc;
 
     if (vfs == NULL || fd >= PWOS_CLUSTER_VFS_MAX_OPEN ||
@@ -640,37 +787,65 @@ int pwos_cluster_vfs_write(
         return -(int)M9P_ERR_EINVAL;
     }
 
-    file = &vfs->files[fd];
-    if (file->used == 0u || mode_allows_write(file->mode) == 0u ||
-        file->route_index >= PWOS_CLUSTER_VFS_MAX_ROUTES) {
+    vfs_lock(vfs);
+    snapshot = vfs->files[fd];
+    if (snapshot.used != 1u || snapshot.busy != 0u ||
+        mode_allows_write(snapshot.mode) == 0u ||
+        snapshot.route_index >= PWOS_CLUSTER_VFS_MAX_ROUTES) {
         rc = -(int)M9P_ERR_EFID;
         ++vfs->stats.write_fail;
-        set_error(vfs, rc);
+        vfs->stats.last_error = (int32_t)rc;
+        vfs_unlock(vfs);
         return rc;
     }
-
-    route = &vfs->routes[file->route_index];
-    client = pwos_session_manager_get_client(
-        vfs->sessions,
-        route->addr,
-        route->boot_id,
-        deadline_ms);
-    if (client == NULL) {
-        rc = PWOS_SESSION_ERR_NO_ROUTE;
+    route_to_ref(vfs, &vfs->routes[snapshot.route_index], &route_ref);
+    if (route_ref.generation != snapshot.route_generation ||
+        route_ref_matches_locked(vfs, &route_ref) == 0u) {
+        rc = PWOS_SESSION_ERR_STALE_BOOT;
         ++vfs->stats.write_fail;
-        set_error(vfs, rc);
+        vfs->stats.last_error = (int32_t)rc;
+        vfs_unlock(vfs);
         return rc;
     }
+    vfs->files[fd].busy = 1u;
+    vfs_unlock(vfs);
 
-    rc = m9p_client_write(client, file->remote_fid, file->offset, data, len, out_written);
+    rc = pwos_session_manager_acquire_client(
+        vfs->sessions,
+        route_ref.addr,
+        route_ref.boot_id,
+        deadline_ms,
+        &client,
+        &session_index);
+    if (rc == 0) {
+        rc = m9p_client_write(
+            client,
+            snapshot.remote_fid,
+            snapshot.offset,
+            data,
+            len,
+            out_written);
+        pwos_session_manager_release_client(vfs->sessions, session_index);
+    }
+
+    vfs_lock(vfs);
+    if (vfs->files[fd].used != 1u ||
+        vfs->files[fd].generation != snapshot.generation ||
+        route_ref_matches_locked(vfs, &route_ref) == 0u) {
+        rc = PWOS_SESSION_ERR_STALE_BOOT;
+    } else {
+        vfs->files[fd].busy = 0u;
+    }
     if (rc != 0) {
         ++vfs->stats.write_fail;
-        set_error(vfs, rc);
+        vfs->stats.last_error = (int32_t)rc;
+        vfs_unlock(vfs);
         return rc;
     }
 
-    file->offset += *out_written;
+    vfs->files[fd].offset += *out_written;
     ++vfs->stats.write_ok;
+    vfs_unlock(vfs);
     return 0;
 }
 
@@ -679,45 +854,74 @@ int pwos_cluster_vfs_close(
     uint16_t fd,
     uint32_t deadline_ms)
 {
-    pwos_cluster_vfs_file_t *file;
-    pwos_cluster_vfs_route_t *route;
+    pwos_cluster_vfs_file_t snapshot;
+    pwos_cluster_vfs_route_ref_t route_ref;
     struct m9p_client *client;
+    uint8_t session_index = 0xFFu;
     int rc;
 
     if (vfs == NULL || fd >= PWOS_CLUSTER_VFS_MAX_OPEN) {
         return -(int)M9P_ERR_EINVAL;
     }
 
-    file = &vfs->files[fd];
-    if (file->used == 0u || file->route_index >= PWOS_CLUSTER_VFS_MAX_ROUTES) {
+    vfs_lock(vfs);
+    snapshot = vfs->files[fd];
+    if (snapshot.used != 1u || snapshot.busy != 0u ||
+        snapshot.route_index >= PWOS_CLUSTER_VFS_MAX_ROUTES) {
         rc = -(int)M9P_ERR_EFID;
         ++vfs->stats.close_fail;
-        set_error(vfs, rc);
+        vfs->stats.last_error = (int32_t)rc;
+        vfs_unlock(vfs);
         return rc;
     }
+    route_to_ref(vfs, &vfs->routes[snapshot.route_index], &route_ref);
+    vfs->files[fd].busy = 1u;
+    vfs_unlock(vfs);
 
-    route = &vfs->routes[file->route_index];
-    client = pwos_session_manager_get_client(
+    rc = pwos_session_manager_acquire_client(
         vfs->sessions,
-        route->addr,
-        route->boot_id,
-        deadline_ms);
-    if (client == NULL) {
-        rc = PWOS_SESSION_ERR_NO_ROUTE;
-        reset_file(file);
-        ++vfs->stats.close_fail;
-        set_error(vfs, rc);
-        return rc;
+        route_ref.addr,
+        route_ref.boot_id,
+        deadline_ms,
+        &client,
+        &session_index);
+    if (rc == 0) {
+        rc = m9p_client_clunk(client, snapshot.remote_fid);
+        pwos_session_manager_release_client(vfs->sessions, session_index);
     }
 
-    rc = m9p_client_clunk(client, file->remote_fid);
-    reset_file(file);
+    vfs_lock(vfs);
+    if (vfs->files[fd].generation == snapshot.generation) {
+        reset_file(&vfs->files[fd]);
+    } else {
+        rc = PWOS_SESSION_ERR_STALE_BOOT;
+    }
     if (rc != 0) {
         ++vfs->stats.close_fail;
-        set_error(vfs, rc);
+        vfs->stats.last_error = (int32_t)rc;
+        vfs_unlock(vfs);
         return rc;
     }
     ++vfs->stats.close_ok;
+    vfs_unlock(vfs);
+    return 0;
+}
+
+static int get_open_file_qid(
+    pwos_cluster_vfs_t *vfs,
+    uint16_t fd,
+    struct m9p_qid *out_qid)
+{
+    if (vfs == NULL || out_qid == NULL || fd >= PWOS_CLUSTER_VFS_MAX_OPEN) {
+        return -(int)M9P_ERR_EINVAL;
+    }
+    vfs_lock(vfs);
+    if (vfs->files[fd].used != 1u) {
+        vfs_unlock(vfs);
+        return -(int)M9P_ERR_EFID;
+    }
+    *out_qid = vfs->files[fd].qid;
+    vfs_unlock(vfs);
     return 0;
 }
 
@@ -729,6 +933,7 @@ int pwos_cluster_vfs_read_path(
     uint32_t deadline_ms)
 {
     uint16_t fd = 0xFFFFu;
+    struct m9p_qid qid;
     int rc;
     int close_rc;
 
@@ -737,9 +942,12 @@ int pwos_cluster_vfs_read_path(
         return rc;
     }
 
-    if ((vfs->files[fd].qid.type & M9P_QID_DIR) != 0u) {
+    rc = get_open_file_qid(vfs, fd, &qid);
+    if (rc != 0 || (qid.type & M9P_QID_DIR) != 0u) {
         (void)pwos_cluster_vfs_close(vfs, fd, deadline_ms);
-        rc = -(int)M9P_ERR_EISDIR;
+        if (rc == 0) {
+            rc = -(int)M9P_ERR_EISDIR;
+        }
         set_error(vfs, rc);
         return rc;
     }
@@ -761,6 +969,7 @@ int pwos_cluster_vfs_write_path(
     uint32_t deadline_ms)
 {
     uint16_t fd = 0xFFFFu;
+    struct m9p_qid qid;
     int rc;
     int close_rc;
 
@@ -769,9 +978,12 @@ int pwos_cluster_vfs_write_path(
         return rc;
     }
 
-    if ((vfs->files[fd].qid.type & M9P_QID_DIR) != 0u) {
+    rc = get_open_file_qid(vfs, fd, &qid);
+    if (rc != 0 || (qid.type & M9P_QID_DIR) != 0u) {
         (void)pwos_cluster_vfs_close(vfs, fd, deadline_ms);
-        rc = -(int)M9P_ERR_EISDIR;
+        if (rc == 0) {
+            rc = -(int)M9P_ERR_EISDIR;
+        }
         set_error(vfs, rc);
         return rc;
     }
@@ -797,6 +1009,7 @@ static int list_root(
         return -(int)M9P_ERR_EINVAL;
     }
 
+    vfs_lock(vfs);
     for (i = 0u; i < PWOS_CLUSTER_VFS_MAX_ROUTES && produced < max_entries; ++i) {
         if (vfs->routes[i].state == PWOS_CLUSTER_VFS_ROUTE_EMPTY ||
             vfs->routes[i].state == PWOS_CLUSTER_VFS_ROUTE_OFFLINE) {
@@ -811,6 +1024,7 @@ static int list_root(
     }
 
     *out_count = produced;
+    vfs_unlock(vfs);
     return 0;
 }
 
@@ -823,7 +1037,7 @@ int pwos_cluster_vfs_list(
     uint32_t deadline_ms)
 {
     uint16_t fd = 0xFFFFu;
-    uint32_t dir_offset = 0u;
+    struct m9p_qid qid;
     size_t produced = 0u;
     int rc = 0;
     int close_rc;
@@ -845,9 +1059,12 @@ int pwos_cluster_vfs_list(
     if (rc != 0) {
         return rc;
     }
-    if ((vfs->files[fd].qid.type & M9P_QID_DIR) == 0u) {
+    rc = get_open_file_qid(vfs, fd, &qid);
+    if (rc != 0 || (qid.type & M9P_QID_DIR) == 0u) {
         (void)pwos_cluster_vfs_close(vfs, fd, deadline_ms);
-        rc = -(int)M9P_ERR_ENOTDIR;
+        if (rc == 0) {
+            rc = -(int)M9P_ERR_ENOTDIR;
+        }
         set_error(vfs, rc);
         return rc;
     }
@@ -857,7 +1074,6 @@ int pwos_cluster_vfs_list(
         uint16_t read_len = (uint16_t)sizeof(read_buf);
         size_t parsed;
 
-        vfs->files[fd].offset = dir_offset;
         rc = pwos_cluster_vfs_read(vfs, fd, read_buf, &read_len, deadline_ms);
         if (rc != 0) {
             break;
@@ -877,7 +1093,6 @@ int pwos_cluster_vfs_list(
             break;
         }
         produced += parsed;
-        dir_offset += read_len;
     }
 
     *out_count = produced;
@@ -894,11 +1109,12 @@ int pwos_cluster_vfs_stat(
     struct m9p_stat *out_stat,
     uint32_t deadline_ms)
 {
-    pwos_cluster_vfs_route_t *route = NULL;
+    pwos_cluster_vfs_route_ref_t route_ref;
     struct m9p_client *client;
     char remote_path[M9P_MAX_PATH_LEN + 1u];
     uint16_t fid = 0u;
     struct m9p_qid qid;
+    uint8_t session_index = 0xFFu;
     int rc;
 
     if (vfs == NULL || path == NULL || out_stat == NULL) {
@@ -913,35 +1129,39 @@ int pwos_cluster_vfs_stat(
         return 0;
     }
 
-    rc = resolve_path(vfs, path, deadline_ms, &route, remote_path, sizeof(remote_path));
+    rc = resolve_path(vfs, path, deadline_ms, &route_ref, remote_path, sizeof(remote_path));
     if (rc != 0) {
         set_error(vfs, rc);
         return rc;
     }
 
-    client = pwos_session_manager_get_client(
+    rc = pwos_session_manager_acquire_client(
         vfs->sessions,
-        route->addr,
-        route->boot_id,
-        deadline_ms);
-    if (client == NULL) {
-        rc = PWOS_SESSION_ERR_NO_ROUTE;
+        route_ref.addr,
+        route_ref.boot_id,
+        deadline_ms,
+        &client,
+        &session_index);
+    if (rc != 0) {
         set_error(vfs, rc);
         return rc;
     }
 
     rc = m9p_client_walk_path(client, remote_path, &fid, &qid);
     if (rc != 0) {
+        pwos_session_manager_release_client(vfs->sessions, session_index);
         set_error(vfs, rc);
         return rc;
     }
     rc = m9p_client_stat(client, fid, out_stat);
     if (rc != 0) {
         (void)m9p_client_clunk(client, fid);
+        pwos_session_manager_release_client(vfs->sessions, session_index);
         set_error(vfs, rc);
         return rc;
     }
     rc = m9p_client_clunk(client, fid);
+    pwos_session_manager_release_client(vfs->sessions, session_index);
     set_error(vfs, rc);
     return rc;
 }
@@ -950,8 +1170,12 @@ void pwos_cluster_vfs_get_stats(
     const pwos_cluster_vfs_t *vfs,
     pwos_cluster_vfs_stats_t *out_stats)
 {
+    pwos_cluster_vfs_t *mutable_vfs = (pwos_cluster_vfs_t *)vfs;
+
     if (vfs == NULL || out_stats == NULL) {
         return;
     }
+    vfs_lock(mutable_vfs);
     *out_stats = vfs->stats;
+    vfs_unlock(mutable_vfs);
 }
