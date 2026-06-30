@@ -26,9 +26,11 @@
 #include "nvs_flash.h"
 #endif
 
+#ifndef PWOS_HOST_RPC_LOCAL_PRIORITY
 #define PWOS_HOST_RPC_LOCAL_PRIORITY 200u
-#define PWOS_HOST_RPC_SERVER_STACK 8192u
-#define PWOS_HOST_RPC_DISCOVERY_STACK 12288u
+#endif
+#define PWOS_HOST_RPC_SERVER_STACK 16384u
+#define PWOS_HOST_RPC_DISCOVERY_STACK 24576u
 #define PWOS_HOST_RPC_TASK_PRIORITY 4u
 #define PWOS_HOST_RPC_DISCOVERY_INTERVAL_MS 5000u
 #define PWOS_HOST_RPC_DISCOVERY_QUERY_MS 1200u
@@ -1379,4 +1381,3 @@ int pwos_host_rpc_runtime_llm_status(
     return -1;
 #endif
 }
-

@@ -56,6 +56,7 @@ typedef struct {
     uint8_t initialized;
     uint8_t task_started;
     uint8_t uart_port;
+    uint8_t control_leader;
     uint16_t next_seq;
     uint32_t boot_id;
     uint32_t uid[3];
@@ -165,6 +166,51 @@ static void sync_cluster_vfs(pwos_coordinator_runtime_t *runtime)
     if (rc != 0) {
         runtime->stats.mini9p_last_error = (int32_t)rc;
         ESP_LOGW(TAG, "cluster_vfs sync failed rc=%d (%s)", rc, pwos_session_error_name(rc));
+    }
+}
+
+static uint8_t local_host_is_control_leader(void)
+{
+    pwos_host_rpc_runtime_status_t host;
+
+    memset(&host, 0, sizeof(host));
+    pwos_host_rpc_runtime_get_status(&host);
+    /* 无 IP/host_rpc 时保留单主离线模式。 */
+    return host.initialized == 0u ||
+        host.local_role == PWOS_HOST_ROLE_LEADER;
+}
+
+static void reconcile_control_role(pwos_coordinator_runtime_t *runtime)
+{
+    uint8_t leader;
+
+    if (runtime == NULL) {
+        return;
+    }
+
+    leader = local_host_is_control_leader();
+    if (runtime->control_leader == leader) {
+        runtime->stats.control_leader = leader;
+        return;
+    }
+
+    runtime->control_leader = leader;
+    runtime->stats.control_leader = leader;
+    if (leader == 0u) {
+        /*
+         * 两台主机启动时会短暂都认为自己是 leader。角色收敛为 follower 后，
+         * 清掉该窗口内分配的地址，避免同一 MCU 同时存在于两个地址域。
+         */
+        coordinator_lock(runtime);
+        pwos_host_coordinator_init(&runtime->coordinator);
+        runtime->stats.node_count = 0u;
+        coordinator_unlock(runtime);
+        memset(runtime->mini9p_last_probe_tick, 0,
+            sizeof(runtime->mini9p_last_probe_tick));
+        sync_cluster_vfs(runtime);
+        ESP_LOGI(TAG, "control role=follower, local mesh ownership cleared");
+    } else {
+        ESP_LOGI(TAG, "control role=leader");
     }
 }
 
@@ -423,7 +469,9 @@ static int handle_link_state(
 {
     pwos_mesh2_link_state_t link;
     pwos_mesh2_route_update_t route;
+    pwos_mesh2_route_update_t reverse_route;
     uint8_t owner_addr = 0u;
+    uint8_t reverse_owner = 0u;
     uint8_t payload[PWOS_MESH2_ROUTE_UPDATE_PAYLOAD_LEN];
     size_t payload_len = 0u;
     int rc;
@@ -438,13 +486,16 @@ static int handle_link_state(
         &runtime->coordinator,
         &link,
         &route,
-        &owner_addr);
+        &owner_addr,
+        &reverse_route,
+        &reverse_owner);
     coordinator_unlock(runtime);
     if (rc <= 0) {
         ++runtime->stats.link_state_rx;
         return rc;
     }
 
+    /* 正向路由：发给 local（上报链路的节点）。 */
     if (pwos_mesh2_encode_route_update(&route, payload, sizeof(payload), &payload_len) != PWOS_OK) {
         ++runtime->stats.tx_errors;
         return -1;
@@ -468,6 +519,31 @@ static int handle_link_state(
         route.metric,
         route.action,
         route.route_version);
+
+    /* 反向路由：发给 peer（链路对端节点），使其也知道怎么到 local。 */
+    if (reverse_owner != 0u && reverse_route.action != 0u) {
+        payload_len = 0u;
+        if (pwos_mesh2_encode_route_update(&reverse_route, payload, sizeof(payload), &payload_len) != PWOS_OK) {
+            ++runtime->stats.tx_errors;
+        } else if (send_mesh2_payload(
+                runtime,
+                (uint8_t)PWOS_LINK_TYPE_CTRL_ROUTE_UPDATE,
+                reverse_owner,
+                payload,
+                (uint16_t)payload_len) != 0) {
+            ++runtime->stats.tx_errors;
+        } else {
+            ++runtime->stats.route_update_tx;
+            ESP_LOGI(TAG,
+                "route owner=%u dst=%u next=%u metric=%u action=%u version=%" PRIu32,
+                reverse_owner,
+                reverse_route.dst,
+                reverse_route.next_hop,
+                reverse_route.metric,
+                reverse_route.action,
+                reverse_route.route_version);
+        }
+    }
     return 0;
 }
 
@@ -479,6 +555,13 @@ static void handle_frame(
 
     ++runtime->stats.rx_frames;
     runtime->stats.last_rx_tick = (uint32_t)xTaskGetTickCount();
+
+    if (runtime->control_leader == 0u &&
+        view->type != PWOS_LINK_TYPE_LINK_HELLO &&
+        view->type != PWOS_LINK_TYPE_LINK_HELLO_ACK) {
+        ++runtime->stats.nonleader_rx_drop;
+        return;
+    }
 
     switch (view->type) {
     case PWOS_LINK_TYPE_LINK_HELLO:
@@ -710,7 +793,7 @@ static void probe_one_due_node(pwos_coordinator_runtime_t *runtime)
     TickType_t now;
     size_t i;
 
-    if (runtime == NULL) {
+    if (runtime == NULL || runtime->control_leader == 0u) {
         return;
     }
 
@@ -762,7 +845,7 @@ static void log_status(pwos_coordinator_runtime_t *runtime)
         " hello=%" PRIu32 "/%" PRIu32
         " reg=%" PRIu32 " assign=%" PRIu32
         " renew=%" PRIu32 " route=%" PRIu32
-        " host_adv=%" PRIu32
+        " host_adv=%" PRIu32 " leader=%u follower_drop=%" PRIu32
         " m9p=%" PRIu32 "/%" PRIu32 "/%" PRIu32 "/%" PRIu32
         " rpc=%" PRIu32 "/%" PRIu32 "/%" PRIu32
         " job=%" PRIu32 "/%" PRIu32 "/%" PRIu32 " lost=%" PRIu32
@@ -780,6 +863,8 @@ static void log_status(pwos_coordinator_runtime_t *runtime)
         runtime->stats.lease_renew_rx,
         runtime->stats.route_update_tx,
         runtime->stats.host_advertise_tx,
+        runtime->stats.control_leader,
+        runtime->stats.nonleader_rx_drop,
         runtime->stats.mini9p_probe_ok,
         runtime->stats.mini9p_probe_fail,
         runtime->stats.mini9p_tx,
@@ -1010,6 +1095,8 @@ static void coordinator_task(void *arg)
     for (;;) {
         TickType_t now = xTaskGetTickCount();
         int rx_len;
+
+        reconcile_control_role(runtime);
 
         if (last_hello == 0u ||
             (uint32_t)(now - last_hello) >= pdMS_TO_TICKS(PWOS_COORDINATOR_HELLO_INTERVAL_MS)) {

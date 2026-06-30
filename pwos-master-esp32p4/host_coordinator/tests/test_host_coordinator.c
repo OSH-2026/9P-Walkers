@@ -120,13 +120,65 @@ static void test_link_state_derives_route(void)
     link.peer_uid[1] = mcu2.uid[1];
     link.peer_uid[2] = mcu2.uid[2];
 
-    CHECK(pwos_host_coordinator_handle_link_state(&coordinator, &link, &route, &owner) == 1);
+    pwos_mesh2_route_update_t reverse_route;
+    uint8_t reverse_owner = 0u;
+    CHECK(pwos_host_coordinator_handle_link_state(&coordinator, &link, &route, &owner, &reverse_route, &reverse_owner) == 1);
     CHECK(owner == assign1.addr);
     CHECK(route.dst == assign2.addr);
     CHECK(route.next_hop == assign2.addr);
     CHECK(route.action == PWOS_MESH2_ROUTE_SET);
     CHECK(route.route_version == 1u);
-    CHECK(coordinator.route_updates_tx == 1u);
+    CHECK(reverse_owner == assign2.addr);
+    CHECK(reverse_route.dst == assign1.addr);
+    CHECK(reverse_route.next_hop == assign1.addr);
+    CHECK(reverse_route.action == PWOS_MESH2_ROUTE_SET);
+    CHECK(reverse_route.route_version == 2u);
+    CHECK(coordinator.route_updates_tx == 2u);
+}
+
+static void test_triangle_derives_both_directions_for_every_edge(void)
+{
+    pwos_host_coordinator_t coordinator;
+    pwos_mesh2_node_register_t regs[3];
+    pwos_mesh2_addr_assign_t assigns[3];
+    const uint8_t edges[3][2] = {{0u, 1u}, {1u, 2u}, {2u, 0u}};
+    size_t i;
+
+    pwos_host_coordinator_init(&coordinator);
+    for (i = 0u; i < 3u; ++i) {
+        regs[i] = make_register(500u + (uint32_t)i * 100u,
+            50u + (uint32_t)i, (uint8_t)i);
+        CHECK(pwos_host_coordinator_handle_register(
+            &coordinator, &regs[i], &assigns[i]) == 0);
+    }
+
+    for (i = 0u; i < 3u; ++i) {
+        const uint8_t local_index = edges[i][0];
+        const uint8_t peer_index = edges[i][1];
+        pwos_mesh2_link_state_t link;
+        pwos_mesh2_route_update_t route;
+        pwos_mesh2_route_update_t reverse;
+        uint8_t owner = 0u;
+        uint8_t reverse_owner = 0u;
+
+        memset(&link, 0, sizeof(link));
+        link.local_addr = assigns[local_index].addr;
+        link.local_port = (uint8_t)i;
+        link.peer_addr = assigns[peer_index].addr;
+        link.flags = PWOS_MESH2_LINK_FLAG_UP;
+        link.metric = 1u;
+        link.peer_boot_id = regs[peer_index].boot_id;
+        memcpy(link.peer_uid, regs[peer_index].uid, sizeof(link.peer_uid));
+
+        CHECK(pwos_host_coordinator_handle_link_state(
+            &coordinator, &link, &route, &owner,
+            &reverse, &reverse_owner) == 1);
+        CHECK(owner == assigns[local_index].addr);
+        CHECK(route.dst == assigns[peer_index].addr);
+        CHECK(reverse_owner == assigns[peer_index].addr);
+        CHECK(reverse.dst == assigns[local_index].addr);
+    }
+    CHECK(coordinator.route_updates_tx == 6u);
 }
 
 int main(void)
@@ -135,6 +187,7 @@ int main(void)
     test_reboot_keeps_addr_bumps_epoch();
     test_lease_renew_resends_current_lease();
     test_link_state_derives_route();
+    test_triangle_derives_both_directions_for_every_edge();
 
     if (g_failures != 0) {
         printf("pwos host coordinator tests failed: %d\n", g_failures);

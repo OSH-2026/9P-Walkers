@@ -7,6 +7,8 @@
 
 #include "pwos_rpc_protocol.h"
 #include "session_manager.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #define PWOS_COMMAND_READ_CAP 1024u
 #define PWOS_COMMAND_LIST_CAP 24u
@@ -282,7 +284,7 @@ static int execute_llm(
         return -(int)M9P_ERR_EINVAL;
     }
 
-    /* 解析 @hostname 前缀 */
+    /* parse @hostname prefix */
     if (args[0] == '@') {
         char *space = strchr(args, ' ');
         if (space == NULL) {
@@ -301,10 +303,10 @@ static int execute_llm(
         return -(int)M9P_ERR_EINVAL;
     }
 
-    /* status / result 子命令 */
+    /* status subcommand */
     if (strcmp(prompt, "status") == 0) {
         rc = service->config.llm(
-            service->config.io_ctx, hostname, NULL,
+            service->config.io_ctx, hostname, PWOS_LLM_MODE_STATUS, NULL,
             buf, sizeof(buf), &out_len, service->config.default_deadline_ms);
         if (rc != 0) {
             output_append(output, "llm status: %s (%d)\r\n", error_name(rc), rc);
@@ -314,9 +316,10 @@ static int execute_llm(
         return 0;
     }
 
+    /* result subcommand */
     if (strcmp(prompt, "result") == 0) {
         rc = service->config.llm(
-            service->config.io_ctx, hostname, NULL,
+            service->config.io_ctx, hostname, PWOS_LLM_MODE_RESULT, NULL,
             buf, sizeof(buf), &out_len, service->config.default_deadline_ms);
         if (rc != 0) {
             output_append(output, "llm result: %s (%d)\r\n", error_name(rc), rc);
@@ -326,16 +329,47 @@ static int execute_llm(
         return 0;
     }
 
-    /* 提交 prompt 触发推理 */
+    /* submit prompt */
     rc = service->config.llm(
-        service->config.io_ctx, hostname, prompt,
+        service->config.io_ctx, hostname, PWOS_LLM_MODE_SUBMIT, prompt,
         buf, sizeof(buf), &out_len, service->config.default_deadline_ms);
     if (rc != 0) {
         output_append(output, "llm submit: %s (%d)\r\n", error_name(rc), rc);
         return rc;
     }
-    output_append(output, "llm: prompt submitted to %s\r\n",
+    output_append(output, "llm: prompt submitted to %s, generating...\r\n",
         hostname != NULL ? hostname : "local");
+
+    /* poll status until done (max 30s) */
+    {
+        int wait_ms;
+        for (wait_ms = 0; wait_ms < 30000; wait_ms += 1000) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            rc = service->config.llm(
+                service->config.io_ctx, hostname, PWOS_LLM_MODE_STATUS, NULL,
+                buf, sizeof(buf), &out_len, service->config.default_deadline_ms);
+            if (rc != 0) continue;
+            {
+                char *p = strstr((char *)buf, "\"state\":");
+                int state = p != NULL ? atoi(p + 7) : -1;
+                if (state == 5) break;       /* DONE */
+                if (state == 6) {            /* ERROR */
+                    output_append(output, "llm: inference error\r\n");
+                    return -(int)M9P_ERR_EIO;
+                }
+            }
+        }
+    }
+
+    /* read final result */
+    rc = service->config.llm(
+        service->config.io_ctx, hostname, PWOS_LLM_MODE_RESULT, NULL,
+        buf, sizeof(buf), &out_len, service->config.default_deadline_ms);
+    if (rc != 0) {
+        output_append(output, "llm result: %s (%d)\r\n", error_name(rc), rc);
+        return rc;
+    }
+    output_append(output, "%.*s\r\n", (int)out_len, (char *)buf);
     return 0;
 }
 

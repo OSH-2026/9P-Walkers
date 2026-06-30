@@ -88,3 +88,5 @@ idf_component_register(
 
 spiffs_create_partition_image(model "${CMAKE_CURRENT_LIST_DIR}/../model" FLASH_IN_PROJECT)
 
+target_compile_definitions(${COMPONENT_LIB} PRIVATE
+    PWOS_HOST_RPC_LOCAL_PRIORITY=300u)

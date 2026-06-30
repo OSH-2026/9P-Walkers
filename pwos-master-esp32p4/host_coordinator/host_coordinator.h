@@ -53,7 +53,9 @@ int pwos_host_coordinator_handle_link_state(
     pwos_host_coordinator_t *coordinator,
     const pwos_mesh2_link_state_t *link,
     pwos_mesh2_route_update_t *out_route,
-    uint8_t *out_route_owner_addr);
+    uint8_t *out_route_owner_addr,
+    pwos_mesh2_route_update_t *out_reverse_route,
+    uint8_t *out_reverse_owner_addr);
 
 const pwos_host_node_entry_t *pwos_host_coordinator_find_by_addr(
     const pwos_host_coordinator_t *coordinator,

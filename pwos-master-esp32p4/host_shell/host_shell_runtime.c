@@ -248,12 +248,14 @@ static int shell_job(
 
 /*
  * shell_llm — llm 命令的后端。
- * prompt != NULL → 提交 prompt 触发推理
- * prompt == NULL → 读取 status 或 result（由 args 决定，但这里简化为总返回 result）
+ * mode = SUBMIT → 提交 prompt 触发推理
+ * mode = RESULT → 读取推理结果文本
+ * mode = STATUS → 读取推理状态 JSON
  */
 static int shell_llm(
     void *ctx,
     const char *hostname,
+    uint8_t mode,
     const char *prompt,
     uint8_t *output,
     size_t output_cap,
@@ -261,15 +263,23 @@ static int shell_llm(
     uint32_t deadline_ms)
 {
     (void)ctx;
-    if (prompt != NULL) {
-        /* 提交 prompt */
+    if (mode == PWOS_LLM_MODE_SUBMIT) {
+        if (prompt == NULL || prompt[0] == '\0') return -(int)M9P_ERR_EINVAL;
         int rc = pwos_host_rpc_runtime_llm_submit(
             hostname, prompt, deadline_ms);
         if (rc != 0) return rc;
         *out_len = 0u;
         return 0;
     }
-    /* prompt == NULL → 读取结果 */
+    if (mode == PWOS_LLM_MODE_STATUS) {
+        uint16_t len = (uint16_t)(output_cap > 65535u ? 65535u : output_cap);
+        int rc = pwos_host_rpc_runtime_llm_status(
+            hostname, output, &len, deadline_ms);
+        if (rc != 0) return rc;
+        *out_len = len;
+        return 0;
+    }
+    /* PWOS_LLM_MODE_RESULT */
     {
         uint16_t len = (uint16_t)(output_cap > 65535u ? 65535u : output_cap);
         int rc = pwos_host_rpc_runtime_llm_result(

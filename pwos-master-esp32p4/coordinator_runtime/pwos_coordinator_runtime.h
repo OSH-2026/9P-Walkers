@@ -32,6 +32,7 @@ typedef struct {
     uint8_t task_started;
     uint8_t node_count;
     uint8_t uart_port;
+    uint8_t control_leader;
     uint32_t rx_bytes;
     uint32_t rx_frames;
     uint32_t rx_parse_errors;
@@ -49,6 +50,7 @@ typedef struct {
     uint32_t link_state_rx;
     uint32_t route_update_tx;
     uint32_t host_advertise_tx;
+    uint32_t nonleader_rx_drop;
     uint32_t data_rx;
     uint32_t mini9p_tx;
     uint32_t mini9p_rx;

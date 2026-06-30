@@ -11,7 +11,7 @@
 extern "C" {
 #endif
 
-#define PWOS_HOST_RPC_SERVICE_DATA_CAP 1000u
+#define PWOS_HOST_RPC_SERVICE_DATA_CAP 4096u
 
 typedef int (*pwos_host_rpc_service_read_fn)(
     void *ctx,

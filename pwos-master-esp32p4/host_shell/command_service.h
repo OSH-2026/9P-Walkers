@@ -67,10 +67,15 @@ typedef int (*pwos_command_job_fn)(
     size_t *out_len,
     uint32_t deadline_ms);
 
+#define PWOS_LLM_MODE_SUBMIT 0u
+#define PWOS_LLM_MODE_RESULT 1u
+#define PWOS_LLM_MODE_STATUS 2u
+
 typedef int (*pwos_command_llm_fn)(
     void *ctx,
     const char *hostname,   /* NULL = 本地 */
-    const char *prompt,     /* NULL 时读 status/result */
+    uint8_t mode,           /* PWOS_LLM_MODE_* */
+    const char *prompt,     /* 仅 SUBMIT 模式使用 */
     uint8_t *output,
     size_t output_cap,
     size_t *out_len,

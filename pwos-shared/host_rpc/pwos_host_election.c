@@ -16,11 +16,15 @@ int pwos_host_candidate_compare(
     if (lhs == NULL || rhs == NULL) {
         return 0;
     }
-    if (lhs->epoch != rhs->epoch) {
-        return lhs->epoch > rhs->epoch ? 1 : -1;
-    }
     if (lhs->priority != rhs->priority) {
         return lhs->priority > rhs->priority ? 1 : -1;
+    }
+    /*
+     * epoch 是各主机独立持久化的本地启动代数，不能跨设备直接决定权威。
+     * 固定板级 priority 先决定首选主机，epoch 仅处理同优先级接管。
+     */
+    if (lhs->epoch != rhs->epoch) {
+        return lhs->epoch > rhs->epoch ? 1 : -1;
     }
     /* 最后一项用稳定 UID 打破平局，保证所有主机独立算出相同结果。 */
     for (i = 0u; i < 3u; ++i) {

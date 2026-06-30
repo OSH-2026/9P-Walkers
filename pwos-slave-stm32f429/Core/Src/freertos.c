@@ -30,6 +30,14 @@
 #include "gfx.h"
 #include "cube_demo.h"
 /* USER CODE END Includes */
+/* pwos-slave includes */
+#include "frame_pool.h"
+#include "node_control.h"
+#include "port_manager.h"
+#include "pwos_queues.h"
+#include "pwos_tasks.h"
+#include "service_runtime.h"
+#include "uart_dma_port.h"
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
@@ -120,6 +128,16 @@ void vApplicationGetIdleTaskMemory( StaticTask_t **ppxIdleTaskTCBBuffer, StackTy
   *pulIdleTaskStackSize = configMINIMAL_STACK_SIZE;
   /* place for user code */
 }
+/* Timer task memory for static allocation */
+static StaticTask_t xTimerTaskTCBBuffer;
+static StackType_t xTimerStack[configTIMER_TASK_STACK_DEPTH];
+
+void vApplicationGetTimerTaskMemory( StaticTask_t **ppxTimerTaskTCBBuffer, StackType_t **ppxTimerTaskStackBuffer, uint32_t *pulTimerTaskStackSize )
+{
+  *ppxTimerTaskTCBBuffer = &xTimerTaskTCBBuffer;
+  *ppxTimerTaskStackBuffer = &xTimerStack[0];
+  *pulTimerTaskStackSize = configTIMER_TASK_STACK_DEPTH;
+}
 /* USER CODE END GET_IDLE_TASK_MEMORY */
 
 /**
@@ -131,7 +149,6 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN Init */
 
   /* USER CODE END Init */
-
   /* USER CODE BEGIN RTOS_MUTEX */
   /* add mutexes, ... */
   /* USER CODE END RTOS_MUTEX */
@@ -149,7 +166,6 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
-  /* definition and creation of defaultTask */
   osThreadDef(defaultTask, StartDefaultTask, osPriorityNormal, 0, 4096);
   defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
 
@@ -169,11 +185,27 @@ void MX_FREERTOS_Init(void) {
 void StartDefaultTask(void const * argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
-  /* Bring up the display stack: SDRAM -> ILI9341 -> graphics -> demo.
-   * All three init steps must complete before any framebuffer write. */
-  BSP_SDRAM_Init();   /* Initialize the IS42S16400J SDRAM chip (FMC already configured by CubeMX). */
-  BSP_LCD_Init();     /* Power up the ILI9341 via SPI5 and switch it to RGB-interface mode. */
-  gfx_init();         /* Clear both framebuffers and arm VSYNC-synchronized swapping. */
+  /* Mesh 是节点的基础能力，必须先于可能阻塞的 LCD/SPI 初始化启动。 */
+  pwos_frame_pool_init();
+  if (pwos_queues_init() != 0) {
+    /* 显示仍可独立运行。 */
+  } else {
+    pwos_port_manager_init();
+    pwos_node_control_init();
+    (void)pwos_service_runtime_init();
+    if (pwos_tasks_start() != 0) {
+      /* continue anyway */
+    }
+    (void)pwos_uart_dma_ports_init();
+  }
+
+  /* 显示失败不能影响已经启动的 mesh 任务。 */
+  if (BSP_SDRAM_Init() != 0 || BSP_LCD_Init() != 0) {
+    for (;;) {
+      osDelay(1000);
+    }
+  }
+  gfx_init();
 
   /* Demo loop: render to back buffer, present at next VSYNC, wait for swap.
    * The LTDC scans the front buffer continuously; we never touch it, so

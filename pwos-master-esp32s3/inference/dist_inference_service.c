@@ -111,9 +111,17 @@ int pwos_dist_inference_service_write(
         return -1;
     }
 
-    /* 写入 prompt 即触发推理，固定 128 步、temperature 0.8、topp 0.9 */
-    rc = pwos_inference_runtime_submit(
-        (const char *)data, 128u, 0.8f, 0.9f, &request_id);
+    /* CBOR 解码返回的 data 没有 null 终止符，必须先拷贝到带终止符的缓冲区，
+     * 否则 snprintf("%s", prompt) 会越过实际 prompt 长度读到垃圾字节。 */
+    {
+        char prompt_buf[PWOS_INFERENCE_PROMPT_CAP];
+        uint16_t copy_len = data_len < (uint16_t)(sizeof(prompt_buf) - 1u) ?
+            data_len : (uint16_t)(sizeof(prompt_buf) - 1u);
+        memcpy(prompt_buf, data, copy_len);
+        prompt_buf[copy_len] = '\0';
+        rc = pwos_inference_runtime_submit(
+            prompt_buf, 128u, 0.8f, 0.9f, &request_id);
+    }
     if (rc != 0) {
         ESP_LOGW(TAG, "推理提交失败 rc=%d（模型未就绪或正忙）", rc);
         *out_written = 0;

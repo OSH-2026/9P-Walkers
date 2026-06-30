@@ -207,7 +207,6 @@ static void inference_console(void *arg)
         size_t len;
         uint32_t request_id;
 
-        printf("\nllm> ");
         fflush(stdout);
         if (fgets(prompt, sizeof(prompt), stdin) == NULL) {
             vTaskDelay(pdMS_TO_TICKS(100));

@@ -180,15 +180,22 @@ int pwos_host_coordinator_handle_link_state(
     pwos_host_coordinator_t *coordinator,
     const pwos_mesh2_link_state_t *link,
     pwos_mesh2_route_update_t *out_route,
-    uint8_t *out_route_owner_addr)
+    uint8_t *out_route_owner_addr,
+    pwos_mesh2_route_update_t *out_reverse_route,
+    uint8_t *out_reverse_owner_addr)
 {
     const pwos_host_node_entry_t *local;
     const pwos_host_node_entry_t *peer;
 
     if (coordinator == NULL || link == NULL ||
-        out_route == NULL || out_route_owner_addr == NULL) {
+        out_route == NULL || out_route_owner_addr == NULL ||
+        out_reverse_route == NULL || out_reverse_owner_addr == NULL) {
         return -1;
     }
+
+    /* 初始化反向路由为空，调用方据此判断是否需要发送。 */
+    memset(out_reverse_route, 0, sizeof(*out_reverse_route));
+    *out_reverse_owner_addr = 0u;
 
     ++coordinator->link_state_rx;
     local = pwos_host_coordinator_find_by_addr(coordinator, link->local_addr);
@@ -197,6 +204,7 @@ int pwos_host_coordinator_handle_link_state(
         return 0;
     }
 
+    /* 正向路由：告诉 local 怎么到 peer。 */
     memset(out_route, 0, sizeof(*out_route));
     out_route->dst = peer->addr;
     out_route->next_hop = peer->addr;
@@ -205,7 +213,16 @@ int pwos_host_coordinator_handle_link_state(
     out_route->action = (link->flags & PWOS_MESH2_LINK_FLAG_UP) != 0u ?
         PWOS_MESH2_ROUTE_SET : PWOS_MESH2_ROUTE_DELETE;
     *out_route_owner_addr = local->addr;
-    ++coordinator->route_updates_tx;
+
+    /* 反向路由：告诉 peer 怎么到 local。 */
+    out_reverse_route->dst = local->addr;
+    out_reverse_route->next_hop = local->addr;
+    out_reverse_route->metric = (uint16_t)(link->metric + 1u);
+    out_reverse_route->route_version = coordinator->next_route_version++;
+    out_reverse_route->action = out_route->action;
+    *out_reverse_owner_addr = peer->addr;
+
+    coordinator->route_updates_tx += 2u;
     return 1;
 }
 

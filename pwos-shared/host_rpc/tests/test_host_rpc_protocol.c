@@ -89,12 +89,15 @@ static void test_leader_election_and_expiry(void)
     assert(election.local_role == PWOS_HOST_ROLE_FOLLOWER);
     assert(memcmp(election.leader.uid, peer_a, sizeof(peer_a)) == 0);
 
-    /* epoch 优先于 priority；同 epoch/priority 再由 UID 确定全序。 */
+    /* priority 固定首选主机；同 priority 再比较 epoch 和 UID。 */
     assert(pwos_host_election_update_peer(
         &election, peer_b, 11u, 1u, 200u) == 0);
+    assert(memcmp(election.leader.uid, peer_a, sizeof(peer_a)) == 0);
+    assert(pwos_host_election_update_peer(
+        &election, peer_b, 11u, 200u, 200u) == 0);
     assert(memcmp(election.leader.uid, peer_b, sizeof(peer_b)) == 0);
     assert(pwos_host_election_update_peer(
-        &election, peer_a, 11u, 1u, 300u) == 0);
+        &election, peer_a, 11u, 200u, 300u) == 0);
     assert(memcmp(election.leader.uid, peer_b, sizeof(peer_b)) == 0);
 
     assert(pwos_host_election_expire(&election, 1200u) == 1u);

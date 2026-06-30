@@ -159,7 +159,8 @@ static void render_links(text_buffer_t *output)
     pwos_coordinator_runtime_get_stats(&runtime);
     text_append(output,
         "port=uart%u baud=%u rx_bytes=%lu rx_frames=%lu parse_errors=%lu "
-        "tx_bytes=%lu tx_frames=%lu tx_errors=%lu last_rx_tick=%lu last_tx_tick=%lu\n",
+        "tx_bytes=%lu tx_frames=%lu tx_errors=%lu control_leader=%u "
+        "follower_drop=%lu last_rx_tick=%lu last_tx_tick=%lu\n",
         runtime.uart_port,
         PWOS_COORDINATOR_UART_BAUD_RATE,
         (unsigned long)runtime.rx_bytes,
@@ -168,6 +169,8 @@ static void render_links(text_buffer_t *output)
         (unsigned long)runtime.tx_bytes,
         (unsigned long)runtime.tx_frames,
         (unsigned long)runtime.tx_errors,
+        runtime.control_leader,
+        (unsigned long)runtime.nonleader_rx_drop,
         (unsigned long)runtime.last_rx_tick,
         (unsigned long)runtime.last_tx_tick);
 }
@@ -486,11 +489,14 @@ static void render_log(text_buffer_t *output)
     pwos_host_rpc_runtime_get_status(&hosts);
     text_append(output,
         "rx_frames=%lu tx_frames=%lu parse_errors=%lu tx_errors=%lu "
+        "control_leader=%u follower_drop=%lu "
         "register=%lu assign=%lu renew=%lu route=%lu data_rx=%lu\n",
         (unsigned long)runtime.rx_frames,
         (unsigned long)runtime.tx_frames,
         (unsigned long)runtime.rx_parse_errors,
         (unsigned long)runtime.tx_errors,
+        runtime.control_leader,
+        (unsigned long)runtime.nonleader_rx_drop,
         (unsigned long)runtime.register_rx,
         (unsigned long)runtime.assign_tx,
         (unsigned long)runtime.lease_renew_rx,
