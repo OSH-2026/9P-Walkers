@@ -146,6 +146,10 @@ struct m9p_server_ops {
 struct m9p_server_config {
     const struct m9p_server_ops *ops;  /**< 后端回调表，不可为 NULL */
     void *ops_ctx;                     /**< 传递给每个回调的 ctx 参数 */
+    /*
+     * 以下协商参数会在 RATTACH 中返回给主机侧 m9p_client，
+     * C 角色答辩时可说明主机 open/read 的单次大小受这些值约束。
+     */
     uint16_t max_msize;                /**< 可协商的最大消息尺寸，0 使用 M9P_SERVER_DEFAULT_MSIZE */
     uint8_t max_fids;                  /**< 最大活跃 fid 数，0 使用 M9P_SERVER_MAX_FIDS */
     uint8_t max_inflight;              /**< 最大并发请求，0 使用 M9P_SERVER_DEFAULT_MAX_INFLIGHT */
@@ -160,6 +164,10 @@ struct m9p_server_config {
 struct m9p_server_fid {
     bool in_use;                          /**< 是否已分配 */
     bool open;                            /**< 是否已打开（经过 Topen） */
+    /*
+     * fid 是主机指定的远端句柄号。cluster_vfs 保存 remote_fid，
+     * 后续 read/write/close 都用这个编号访问同一远端对象。
+     */
     uint16_t fid;                         /**< 客户端指定的 fid 值 */
     uint8_t mode;                         /**< 打开模式（M9P_OREAD 等） */
     uint16_t iounit;                      /**< 协商后的单次 I/O 大小 */

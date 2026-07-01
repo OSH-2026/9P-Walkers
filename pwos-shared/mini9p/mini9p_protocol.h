@@ -5,10 +5,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* mini9P 是本项目的精简 9P：帧头固定 magic/len/version/type/tag，尾部 CRC。 */
 #define M9P_VERSION 0x01u
+/* TWALK path 使用 1 字节长度，因此最大 255 字节。 */
 #define M9P_MAX_PATH_LEN 255u
 #define M9P_MAX_NAME_LEN 64u
 #define M9P_MAX_ERROR_TEXT 64u
+/* magic(2)+len(2)+version/type/tag(4)+crc(2)=10 字节，不含 payload。 */
 #define M9P_FRAME_OVERHEAD 10u
 
 // QID
@@ -30,6 +33,7 @@
 #define M9P_FEATURE_ATTACH_FLAGS 0x00000008u
 
 enum m9p_type {
+    /* T* 是 master -> slave 请求，R* 是 slave -> master 响应。 */
     M9P_TATTACH = 0x01,
     M9P_RWALK = 0x82,
     M9P_TWALK = 0x02,
@@ -72,14 +76,18 @@ enum m9p_error_code {
 
 // qid 数据结构，每个对象都有一个唯一的 qid 来标识它
 struct m9p_qid {
+    /* type 复用 M9P_QID_* 位：目录、虚拟文件、设备、计算、只读。 */
     uint8_t type;
     uint8_t reserved;
+    /* version 可用于文件对象变化检测，当前多为 1。 */
     uint16_t version;
+    /* object_id 是后端生成的对象编号，用来区分同名/不同对象。 */
     uint32_t object_id;
 };
 
 // 解码后帧的只读视图
 struct m9p_frame_view {
+    /* version/type/tag 来自帧头；payload 指向原始 frame 内部，不复制。 */
     uint8_t version;
     uint8_t type;
     uint16_t tag;
@@ -89,8 +97,11 @@ struct m9p_frame_view {
 
 // Tattach 请求解析结果：Master 发送，Slave 解析使用
 struct m9p_attach_request {
+    /* 根 fid，主机当前使用 0。 */
     uint16_t fid;
+    /* 请求协商的最大帧大小，通常 512。 */
     uint16_t requested_msize;
+    /* 请求的最大并发数；STM32 server 默认 stop-and-wait。 */
     uint8_t requested_inflight;
     uint8_t attach_flags;
 };
@@ -106,6 +117,7 @@ struct m9p_attach_result {
 
 // Twalk 请求解析结果：Master 发送，Slave 解析使用
 struct m9p_walk_request {
+    /* 从 fid 出发 walk 到 path，并把结果绑定到 newfid。 */
     uint16_t fid;
     uint16_t newfid;
     char path[M9P_MAX_PATH_LEN + 1u];
@@ -126,6 +138,7 @@ struct m9p_open_result {
 // Tread 请求解析结果：Master 发送，Slave 解析使用
 struct m9p_read_request {
     uint16_t fid;
+    /* 由 cluster_vfs 在主机侧维护顺序 offset。 */
     uint32_t offset;
     uint16_t count;
 };

@@ -19,7 +19,9 @@ typedef int (*pwos_job_command_resolve_fn)(
     uint32_t *out_boot_id);
 
 typedef struct {
+    /* manager 负责真正的 Job 协议请求；command 只做文本命令解析和输出格式化。 */
     pwos_job_manager_t *manager;
+    /* resolve 把用户输入的 mcuN 解析为 addr/boot_id，通常来自 cluster_vfs route 表。 */
     void *resolve_ctx;
     pwos_job_command_resolve_fn resolve;
 } pwos_job_command_config_t;

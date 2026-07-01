@@ -22,6 +22,7 @@ static const uint8_t k_long_diagnostics[] =
 } while (0)
 
 typedef struct {
+    /* fake_link 模拟 session_manager 的 send 回调，并同步构造 mini9P 响应。 */
     pwos_session_manager_t *manager;
     uint8_t last_dst;
     uint8_t deadline_addr;
@@ -91,6 +92,7 @@ static int fake_send(
     link->tx_len = payload_len;
     ++link->send_count;
     if (dst_addr == link->deadline_addr) {
+        /* 不投递响应，测试 cluster_vfs 不会把 deadline 当 EAGAIN 重试。 */
         return 0;
     }
 
@@ -166,6 +168,7 @@ static int fake_build_response(
     ++link->wait_count;
     switch (frame.type) {
     case M9P_TATTACH:
+        /* 第一次访问节点时由 ensure_attached() 触发。 */
         ++link->attach_count;
         return build_rattach(frame.tag, response, response_cap, response_len);
 
@@ -178,6 +181,7 @@ static int fake_build_response(
                 0 : -(int)M9P_ERR_EMSIZE;
         }
         ++link->walk_count;
+        /* 记录主机传给远端的路径，用于验证 /mcu1 前缀已被剥离。 */
         snprintf(link->last_walk_path, sizeof(link->last_walk_path), "%s", request.path);
         qid = qid_for_path(request.path);
         return m9p_build_rwalk(frame.tag, &qid, response, response_cap, response_len) ?
@@ -308,6 +312,7 @@ static void test_read_path_uses_session_manager(void)
     init_env(&env);
     memset(buf, 0, sizeof(buf));
 
+    /* 证明 /mcu1/sys/health 会路由到 addr=1，远端路径变成 /sys/health。 */
     CHECK(pwos_cluster_vfs_read_path(&env.vfs, "/mcu1/sys/health", buf, &len, 1000u) == 0);
     CHECK(len == 2u);
     CHECK(memcmp(buf, "ok", 2u) == 0);
@@ -348,6 +353,7 @@ static void test_boot_change_forces_reattach(void)
     CHECK(pwos_cluster_vfs_read_path(&env.vfs, "/mcu1/sys/health", buf, &len, 1000u) == 0);
     CHECK(env.link.attach_count == 1u);
 
+    /* 同 UID 新 boot_id 仍叫 mcu1，但必须重新 attach。 */
     reg = make_register(100u, 11u, 0u);
     CHECK(pwos_host_coordinator_handle_register(&env.coordinator, &reg, &assign) == 0);
     CHECK(assign.addr == 1u);
@@ -365,6 +371,7 @@ static void test_offline_returns_no_route(void)
     uint16_t len = sizeof(buf);
 
     init_env(&env);
+    /* route 名称存在但 coordinator 快照中节点离线，应返回 NO_ROUTE。 */
     env.coordinator.nodes[0].valid = 0u;
     CHECK(pwos_cluster_vfs_sync_from_coordinator(&env.vfs, &env.coordinator) == 0);
     CHECK(pwos_cluster_vfs_read_path(&env.vfs, "/mcu1/sys/health", buf, &len, 1000u) ==

@@ -33,10 +33,15 @@ typedef struct {
 } test_sync_t;
 
 typedef enum {
+    /* 普通同步响应，send() 内立即 deliver。 */
     FAKE_SEND_IMMEDIATE = 0,
+    /* 等两个请求都发出后再响应，用于证明跨节点并发。 */
     FAKE_SEND_BARRIER_TWO,
+    /* 暂存请求不响应，测试手工投递/错配/boot reset。 */
     FAKE_SEND_HOLD,
+    /* 直接丢响应，测试 deadline 后 pending 是否释放。 */
     FAKE_SEND_DROP,
+    /* 故意跳过 stream chunk 序号，测试流式顺序校验。 */
     FAKE_SEND_BAD_STREAM,
 } fake_send_mode_t;
 
@@ -200,6 +205,7 @@ static int fake_send(
     int rc;
 
     if (data_type == 0x82u) {
+        /* DATA_JOB 分支模拟 STM32 Job service，验证 job_manager 和 typed pending。 */
         pwos_job_frame_view_t request;
         const uint8_t *response_payload = NULL;
         uint8_t response_kind;
@@ -281,6 +287,7 @@ static int fake_send(
             response_len) == 1 ? 0 : -(int)M9P_ERR_EIO;
     }
     if (data_type == 0x81u) {
+        /* DATA_RPC 分支模拟 RPC service，覆盖 unary/oneway/stream/cancel。 */
         pwos_rpc_frame_view_t request;
         size_t rpc_response_len = 0u;
 
@@ -380,6 +387,7 @@ static int fake_send(
     if (data_type != 0x80u || !m9p_decode_frame(payload, payload_len, &frame)) {
         return -(int)M9P_ERR_EINVAL;
     }
+    /* DATA_MINI9P 分支只模拟 attach 响应，足够验证 session 层并发和 tag 机制。 */
 
     (void)pthread_mutex_lock(&link->mutex);
     send_number = ++link->send_count;
@@ -552,6 +560,7 @@ static void test_two_nodes_are_concurrent_and_tags_are_global(void)
     init_env(&env);
     CHECK(pwos_session_manager_update_node(&env.manager, 1u, 10u) == 0);
     CHECK(pwos_session_manager_update_node(&env.manager, 2u, 20u) == 0);
+    /* 两个不同 addr 同时 attach，pending_peak 应达到 2，wire_tag 不能重复。 */
     env.link.mode = FAKE_SEND_BARRIER_TWO;
 
     arg1 = (attach_thread_arg_t){&env.manager, 1u, 10u, 500u, -1};
@@ -586,6 +595,7 @@ static void test_response_requires_source_and_tag_match(void)
     CHECK(pthread_create(&thread, NULL, attach_thread, &arg) == 0);
     wait_for_send_count(&env.link, 1u);
 
+    /* 错 src、错 tag 都不能命中 pending；只有 src/tag 都正确才唤醒等待线程。 */
     CHECK(deliver_held_response(&env.link, 2u, 0) == 0);
     CHECK(deliver_held_response(&env.link, 3u, 1) == 0);
     CHECK(deliver_held_response(&env.link, 3u, 0) == 1);
@@ -627,6 +637,7 @@ static void test_boot_change_cancels_old_request(void)
     CHECK(pthread_create(&thread, NULL, attach_thread, &arg) == 0);
     wait_for_send_count(&env.link, 1u);
 
+    /* 同 addr 新 boot_id 模拟节点重启，旧 pending 应立即 STALE_BOOT。 */
     CHECK(pwos_session_manager_update_node(&env.manager, 5u, 51u) == 0);
     CHECK(pthread_join(thread, NULL) == 0);
     CHECK(arg.rc == PWOS_SESSION_ERR_STALE_BOOT);

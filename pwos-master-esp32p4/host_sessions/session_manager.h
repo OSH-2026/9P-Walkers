@@ -10,8 +10,11 @@
 extern "C" {
 #endif
 
+/* 每个在线 MCU 地址最多对应一个 session；当前与 coordinator 的 32 节点上限一致。 */
 #define PWOS_SESSION_MANAGER_MAX_SESSIONS 32u
+/* pending 是全局并发请求槽位，不按节点分配；答辩时要强调它用 typed key 防串扰。 */
 #define PWOS_SESSION_MANAGER_MAX_PENDING 8u
+/* 调方未指定 deadline 时，所有 mini9P/RPC/Job 请求默认最多等 1s。 */
 #define PWOS_SESSION_DEFAULT_DEADLINE_MS 1000u
 
 /* 这些错误只在主机本地传播，不会上 wire。 */
@@ -45,6 +48,7 @@ typedef void (*pwos_session_pending_signal_fn)(void *ctx, uint8_t pending_index)
 typedef uint32_t (*pwos_session_now_ms_fn)(void *ctx);
 
 typedef struct {
+    /* io_ctx/send 是真正把 DATA_* payload 发到 link/coordinator runtime 的平台钩子。 */
     void *io_ctx;
     pwos_session_send_fn send;
     uint32_t default_deadline_ms;
@@ -65,13 +69,21 @@ typedef struct {
 } pwos_session_manager_config_t;
 
 typedef struct {
+    /* used 表示该 session 槽已绑定一个 MCU 地址。 */
     uint8_t used;
+    /* resetting=1 时拒绝新请求，并把旧 pending 标记为 STALE_BOOT。 */
     uint8_t resetting;
+    /* mesh 短地址，0 和 0xFF 在 update_node() 中被拒绝。 */
     uint8_t addr;
+    /* session 数组下标，同时作为 client_mutex 的索引。 */
     uint8_t index;
+    /* boot_id 用于识别节点重启；变化时必须 reset mini9P client 和 pending。 */
     uint32_t boot_id;
+    /* 当前被 acquire_client() 设置的本次调用 deadline。 */
     uint32_t deadline_ms;
+    /* mini9P attach 成功后置 1，节点重启或 reset_node 后清零。 */
     uint8_t attached;
+    /* 最近一次 wire 层 tag/type，主要用于诊断和答辩说明。 */
     uint16_t last_tx_tag;
     uint16_t last_rx_tag;
     uint8_t last_tx_type;
@@ -84,22 +96,35 @@ typedef struct {
     uint32_t no_route_errors;
     uint32_t queue_full_errors;
     uint32_t io_errors;
+    /* 每个节点一个 mini9P client；同节点通过 client_lock 串行，跨节点可并发。 */
     struct m9p_client client;
     pwos_session_manager_t *manager;
 } pwos_session_entry_t;
 
 typedef struct {
+    /* pending 槽是否被一次未完成 request 占用。 */
     uint8_t used;
+    /* completed=1 表示 RX consumer 已投递结果，等待方可被唤醒。 */
     uint8_t completed;
+    /* streaming=1 时 deliver_data_part() 按 chunk 顺序聚合，普通响应走 deliver_data()。 */
     uint8_t streaming;
+    /* typed pending 的第一维：DATA_MINI9P/DATA_RPC/DATA_JOB。 */
     uint8_t data_type;
+    /* typed pending 的第二维：响应来源 MCU 地址。 */
     uint8_t src_addr;
+    /* 反查所属 session，用于 boot_id 校验和重启清理。 */
     uint8_t session_index;
+    /* typed pending 的第三维：wire_tag/call_id/request_id。 */
     uint16_t wire_tag;
+    /* reserve 时记录的 boot_id；响应回来时必须仍等于 session.boot_id。 */
     uint32_t boot_id;
+    /* 0 表示本地传输成功；负数为本地错误，如 deadline/stale_boot。 */
     int32_t status;
+    /* 流式请求最终远端状态；普通请求通常不用。 */
     uint16_t remote_status;
+    /* 已收到的 stream chunk 数，也是下一个非 final chunk 期望序号。 */
     uint16_t stream_parts;
+    /* 聚合后的响应字节数，最大不超过 M9P_CLIENT_BUFFER_CAP。 */
     uint16_t response_len;
     uint8_t response[M9P_CLIENT_BUFFER_CAP];
 } pwos_session_pending_t;

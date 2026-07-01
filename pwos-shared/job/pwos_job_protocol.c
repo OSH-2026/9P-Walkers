@@ -100,6 +100,7 @@ int pwos_job_encode(
         return -1;
     }
 
+    /* Job 帧头固定 20 字节，payload 直接跟在头部后面。 */
     memset(out, 0, PWOS_JOB_HEADER_LEN);
     out[JOB_OFF_VERSION] = PWOS_JOB_VERSION;
     out[JOB_OFF_KIND] = kind;
@@ -136,6 +137,7 @@ int pwos_job_decode(
         return -1;
     }
     payload_len = pwos_job_get_le16(frame + JOB_OFF_PAYLOAD_LEN);
+    /* payload_len 必须和实际 frame_len 完全一致，progress 限制在 0..1000。 */
     if ((size_t)PWOS_JOB_HEADER_LEN + payload_len != frame_len ||
         pwos_job_get_le16(frame + JOB_OFF_PROGRESS) > PWOS_JOB_PROGRESS_MAX) {
         return -1;
@@ -162,6 +164,7 @@ int pwos_job_retag(uint8_t *frame, size_t frame_len, uint16_t request_id)
     if (pwos_job_decode(frame, frame_len, &view) != 0) {
         return -1;
     }
+    /* request_id 对应 session_manager wire_tag，Job 内层没有独立 CRC。 */
     pwos_job_put_le16(frame + JOB_OFF_REQUEST_ID, request_id);
     return 0;
 }

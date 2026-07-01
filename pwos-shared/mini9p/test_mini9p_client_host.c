@@ -9,9 +9,12 @@
 static int g_failures;
 
 struct fake_transport {
+    /* 前 N 次返回 EAGAIN，用于验证 client 的有限重试。 */
     uint8_t timeouts_before_success;
+    /* 非 0 时直接返回该错误，验证非暂时错误不重试。 */
     int fail_code;
     uint8_t call_count;
+    /* 确认重试时请求 tag 不变化，否则响应无法匹配原事务。 */
     bool saw_tag;
     uint16_t expected_tag;
 };
@@ -59,9 +62,11 @@ static int fake_transport_request(
     }
 
     if (transport->fail_code != 0) {
+        /* 非 EAGAIN/EBUSY 错误应直接返回，不进入重试预算。 */
         return transport->fail_code;
     }
     if (transport->call_count <= transport->timeouts_before_success) {
+        /* 模拟暂时不可用，m9p_client_attach() 会最多重试 3 次。 */
         return -(int)M9P_ERR_EAGAIN;
     }
 

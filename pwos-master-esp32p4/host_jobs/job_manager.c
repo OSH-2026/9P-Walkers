@@ -35,6 +35,7 @@ static uint32_t effective_deadline(
 
 static int terminal_state(uint8_t state)
 {
+    /* 终态 job 可以被新 submit 复用槽位；非终态必须保留。 */
     return state == PWOS_JOB_STATE_DONE || state == PWOS_JOB_STATE_FAILED ||
         state == PWOS_JOB_STATE_CANCELLED || state == PWOS_JOB_STATE_LOST;
 }
@@ -59,6 +60,10 @@ static pwos_job_entry_t *alloc_job_locked(pwos_job_manager_t *manager)
     pwos_job_entry_t *oldest = NULL;
     size_t i;
 
+    /*
+     * 优先用空槽；如果 16 个槽都满了，只复用最老的终态槽，
+     * 避免覆盖仍在 RUNNING/QUEUED 的任务。
+     */
     for (i = 0u; i < PWOS_JOB_MANAGER_MAX_JOBS; ++i) {
         if (manager->jobs[i].used == 0u) {
             return &manager->jobs[i];
@@ -95,6 +100,10 @@ static int request(
     uint16_t wire_tag = 0u;
     int rc;
 
+    /*
+     * Job 协议里的 request_id 先写 0；session_manager 会 retag 成 wire_tag。
+     * remote_job_id 为 0 表示 submit/caps 这类还没有远端 job 的请求。
+     */
     if (pwos_job_encode(
             kind,
             PWOS_JOB_STATE_EMPTY,
@@ -130,6 +139,7 @@ static int request(
     if (pwos_job_decode(response_frame, *out_response_len, out_response) != 0 ||
         out_response->request_id != wire_tag ||
         out_response->kind != expected_kind) {
+        /* 防止迟到/错配响应被当作当前 Job 操作结果。 */
         return -(int)M9P_ERR_EIO;
     }
     return 0;
@@ -145,6 +155,7 @@ static void mark_transport_result_locked(
     if (rc != 0) {
         ++manager->stats.transport_errors;
         if (job->state != PWOS_JOB_STATE_LOST) {
+            /* 传输失败时不知道远端是否还在执行，所以本地主动转 LOST。 */
             job->state = PWOS_JOB_STATE_LOST;
             ++manager->stats.lost;
         }
@@ -163,6 +174,7 @@ static void update_from_response_locked(
     job->last_error = 0;
     manager->stats.last_error = 0;
     if (response->status == PWOS_JOB_STATUS_OK) {
+        /* 远端正常返回时，以远端 state/progress/result_len 为准。 */
         job->state = response->state;
     } else if (response->status == PWOS_JOB_STATUS_NOT_READY) {
         /* NOT_READY 是正常轮询结果，仍要采纳远端的 RUNNING 状态与进度。 */
@@ -174,6 +186,7 @@ static void update_from_response_locked(
         if (response->status == PWOS_JOB_STATUS_CANCELLED) {
             job->state = PWOS_JOB_STATE_CANCELLED;
         } else if (response->status == PWOS_JOB_STATUS_NOT_FOUND) {
+            /* 远端找不到 remote_job_id，通常意味着节点重启或远端槽位丢失。 */
             if (job->state != PWOS_JOB_STATE_LOST) {
                 job->state = PWOS_JOB_STATE_LOST;
                 ++manager->stats.lost;
@@ -276,6 +289,10 @@ int pwos_job_manager_submit(
         return PWOS_SESSION_ERR_QUEUE_FULL;
     }
     memset(job, 0, sizeof(*job));
+    /*
+     * host_job_id 是主机本地 ID，用户命令和 list/status/result 都用它；
+     * remote_job_id 要等 STM32 SUBMIT_ACK 返回后才知道。
+     */
     ++manager->next_host_job_id;
     if (manager->next_host_job_id == 0u) {
         ++manager->next_host_job_id;
@@ -285,6 +302,7 @@ int pwos_job_manager_submit(
     job->addr = addr;
     job->boot_id = boot_id;
     job->kernel = kernel;
+    /* ASSIGNED 表示主机已分配本地槽位，但远端还没确认排队。 */
     job->state = PWOS_JOB_STATE_ASSIGNED;
     job->host_job_id = host_job_id;
     job->sequence = ++manager->next_sequence;
@@ -303,6 +321,7 @@ int pwos_job_manager_submit(
     job = find_job_locked(manager, host_job_id);
     if (job != NULL) {
         if (rc != 0) {
+            /* submit 已经分配 host_job_id；即使发送超时，也保留一条 LOST 记录方便 retry。 */
             mark_transport_result_locked(manager, job, rc);
         } else {
             update_from_response_locked(manager, job, &response);
@@ -346,6 +365,7 @@ static int request_existing(
         manager_unlock(manager);
         return PWOS_SESSION_ERR_STALE_BOOT;
     }
+    /* 拷贝一份快照，链路 I/O 期间不持 job_manager 锁。 */
     copy = *job;
     manager_unlock(manager);
 
@@ -363,6 +383,7 @@ static int request_existing(
     if (rc != 0) {
         mark_transport_result_locked(manager, job, rc);
     } else {
+        /* status/result/cancel 都会刷新本地状态。 */
         update_from_response_locked(manager, job, &response);
     }
     *out_remote_status = job->remote_status;
@@ -476,6 +497,7 @@ int pwos_job_manager_retry(
         !terminal_state(old.state)) {
         return -(int)M9P_ERR_EBUSY;
     }
+    /* retry 不复活旧 host_job_id，而是用原 target/kernel/input 创建一个新 job。 */
     rc = pwos_job_manager_submit(
         manager, old.target, addr, boot_id, old.kernel,
         old.input, old.input_len, deadline_ms,
@@ -559,6 +581,7 @@ size_t pwos_job_manager_mark_node_lost(
             terminal_state(job->state)) {
             continue;
         }
+        /* 节点重启/离线时，所有绑定旧 boot 的非终态 job 都不能再查询，统一 LOST。 */
         job->state = PWOS_JOB_STATE_LOST;
         job->last_error = error;
         ++manager->stats.lost;

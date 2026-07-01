@@ -175,6 +175,10 @@ static bool payload_parts_to_frame(
         return false;
     }
 
+    /*
+     * frame_len_field 覆盖 version/type/tag/payload，不包含前导 magic/len 和尾部 CRC。
+     * 因此完整线格式是 "9P" + len + frame_len_field 字节 + crc16。
+     */
     frame_len_field = (uint16_t)(4u + payload_len);
     total_len = 2u + 2u + (size_t)frame_len_field + 2u;
     if (out_cap < total_len) {
@@ -196,6 +200,7 @@ static bool payload_parts_to_frame(
         memcpy(payload_dst + prefix_len, data, data_len);
     }
 
+    /* CRC 覆盖 version/type/tag/payload；magic 和 len 不参与 CRC。 */
     crc = m9p_crc16_ccitt_false(out_frame + 4, frame_len_field);
     put_le16(out_frame + 8u + payload_len, crc);
     *out_len = total_len;
@@ -266,6 +271,7 @@ bool m9p_encode_frame(
         return false;
     }
 
+    /* 与 payload_parts_to_frame() 使用完全相同的线格式。 */
     frame_len_field = (uint16_t)(4u + payload_len);
     total_len = 2u + 2u + (size_t)frame_len_field + 2u;
     if (out_cap < total_len) {
@@ -305,20 +311,24 @@ bool m9p_decode_frame(const uint8_t *frame, size_t frame_len, struct m9p_frame_v
     if (frame == NULL || out_view == NULL || frame_len < M9P_FRAME_OVERHEAD) {
         return false;
     }
+    /* magic 用于把 mini9P 帧从 DATA_MINI9P payload 内快速识别出来。 */
     if (frame[0] != (uint8_t)'9' || frame[1] != (uint8_t)'P') {
         return false;
     }
 
     frame_len_field = get_le16(frame + 2);
+    /* frame_len_field 至少要容纳 version/type/tag 这 4 字节。 */
     if (frame_len_field < 4u) {
         return false;
     }
+    /* 总长度必须精确匹配，防止粘包/截断被误解析。 */
     if ((size_t)(frame_len_field + 6u) != frame_len) {
         return false;
     }
 
     actual_crc = get_le16(frame + frame_len - 2u);
     expected_crc = m9p_crc16_ccitt_false(frame + 4, frame_len_field);
+    /* CRC 错直接失败，上层会把响应当 malformed 或 EIO。 */
     if (actual_crc != expected_crc) {
         return false;
     }
