@@ -50,6 +50,9 @@ typedef struct {
     uint32_t link_state_rx;
     uint32_t route_update_tx;
     uint32_t host_advertise_tx;
+    uint32_t time_sync_rx;
+    uint32_t time_sync_tx;
+    uint32_t time_sync_unavailable;
     uint32_t nonleader_rx_drop;
     uint32_t data_rx;
     uint32_t mini9p_tx;

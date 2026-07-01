@@ -28,7 +28,7 @@ ctrl_tx/link_tx queue -> link_tx_task -> UART DMA TX
 - `uart_dma_port`：HAL UART/DMA、parser、rearm、TX complete、硬件统计。
 - `frame_pool`：固定帧块生命周期。
 - `port_manager`：HELLO FSM、peer UID/boot/capability 和端口健康。
-- `node_control`：地址、lease、authority、route、relay bootstrap 和数据转发。
+- `node_control`：地址、lease、authority、route、时间映射、relay bootstrap 和数据转发。
 - `service_runtime`：本机 typed data 分发和 mini9P server。
 - `rpc_service`：MCU RPC 方法和延期/流式调用状态。
 - `job_service`：远端 job 协议和静态 job 槽。
@@ -53,7 +53,7 @@ ctrl_tx/link_tx queue -> link_tx_task -> UART DMA TX
 
 ```text
 /sys
-  health tasks ports links neighbors routes sessions queues
+  health time tasks ports links neighbors routes sessions queues
   log build fault info uart
 
 /compute
@@ -82,6 +82,7 @@ route、health 和 RPC 仍应正常推进。
 
 ```text
 cat /mcu1/sys/health
+cat /mcu1/sys/time
 cat /mcu1/sys/ports
 cat /mcu1/sys/routes
 cat /mcu1/sys/queues
@@ -112,3 +113,5 @@ print ((pwos_uart_dma_port_t *)'uart_dma_port.c'::g_ports)[0].stats
 - service/compute 不直接操作 UART。
 - 无 route 立即失败，不等待成 deadline。
 - boot ID 改变后不接受旧启动实例的数据响应。
+- wall-clock 是本地单调 tick 加同步偏移，不修改 HAL/FreeRTOS tick。
+- deadline、lease 和重试不得使用 wall-clock。

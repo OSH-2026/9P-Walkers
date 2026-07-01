@@ -545,6 +545,45 @@ static int handle_link_state(
     return 0;
 }
 
+static int handle_time_sync(
+    pwos_coordinator_runtime_t *runtime,
+    const pwos_link_frame_view_t *view)
+{
+    pwos_mesh2_time_sync_t exchange;
+    uint8_t payload[PWOS_MESH2_TIME_SYNC_PAYLOAD_LEN];
+    uint64_t server_rx_us = 0u;
+    size_t payload_len = 0u;
+
+    ++runtime->stats.time_sync_rx;
+    if (view->dst != PWOS_LINK_ADDR_HOST ||
+        pwos_host_rpc_runtime_wall_time_us(&server_rx_us) != 0 ||
+        pwos_mesh2_decode_time_sync(
+            view->payload, view->payload_len, &exchange) != PWOS_OK ||
+        exchange.kind != PWOS_MESH2_TIME_SYNC_REQUEST) {
+        ++runtime->stats.time_sync_unavailable;
+        return -1;
+    }
+
+    exchange.kind = PWOS_MESH2_TIME_SYNC_RESPONSE;
+    exchange.flags = PWOS_MESH2_TIME_SYNC_FLAG_WALL_VALID;
+    exchange.server_rx_unix_us = server_rx_us;
+    if (pwos_host_rpc_runtime_wall_time_us(
+            &exchange.server_tx_unix_us) != 0 ||
+        pwos_mesh2_encode_time_sync(
+            &exchange, payload, sizeof(payload), &payload_len) != PWOS_OK ||
+        send_mesh2_payload(
+            runtime,
+            (uint8_t)PWOS_LINK_TYPE_CTRL_TIME_SYNC,
+            view->src,
+            payload,
+            (uint16_t)payload_len) != 0) {
+        ++runtime->stats.time_sync_unavailable;
+        return -1;
+    }
+    ++runtime->stats.time_sync_tx;
+    return 0;
+}
+
 static void handle_frame(
     pwos_coordinator_runtime_t *runtime,
     const pwos_link_frame_view_t *view)
@@ -577,6 +616,9 @@ static void handle_frame(
         break;
     case PWOS_LINK_TYPE_CTRL_LINK_STATE:
         (void)handle_link_state(runtime, view);
+        break;
+    case PWOS_LINK_TYPE_CTRL_TIME_SYNC:
+        (void)handle_time_sync(runtime, view);
         break;
     case PWOS_LINK_TYPE_DATA_MINI9P:
         ++runtime->stats.data_rx;

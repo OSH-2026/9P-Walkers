@@ -65,10 +65,21 @@ typedef struct {
     uint32_t host_advertise_forward_tx;
     uint32_t host_advertise_duplicate_rx;
     uint32_t nonleader_ctrl_drop;
+    uint8_t time_valid;
+    uint32_t last_time_sync_tick;
+    uint32_t time_delay_us;
+    int64_t time_offset_us;
+    uint64_t wall_time_us;
+    uint32_t time_sync_tx;
+    uint32_t time_sync_rx;
+    uint32_t time_sync_reject;
 } pwos_node_control_snapshot_t;
 
 void pwos_node_control_init(void);
 void pwos_node_control_tick(void);
+
+/* 用同步偏移将本地单调 tick 映射为 Unix 微秒，不调整 FreeRTOS tick。 */
+int pwos_node_control_wall_time_us(uint64_t *out_unix_us);
 
 /*
  * 处理 mesh 控制面/数据面帧。

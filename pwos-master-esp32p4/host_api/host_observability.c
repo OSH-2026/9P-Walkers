@@ -40,6 +40,7 @@ static const host_node_t g_host_nodes[] = {
     {"/host/sys/log", "log", 0u, PWOS_HOST_QID_BASE + 8u},
     {"/host/sys/jobs", "jobs", 0u, PWOS_HOST_QID_BASE + 9u},
     {"/host/sys/hosts", "hosts", 0u, PWOS_HOST_QID_BASE + 10u},
+    {"/host/sys/time", "time", 0u, PWOS_HOST_QID_BASE + 11u},
 };
 
 static void text_append(text_buffer_t *buffer, const char *format, ...)
@@ -422,6 +423,45 @@ static void render_hosts(text_buffer_t *output)
     }
 }
 
+static void render_time(text_buffer_t *output)
+{
+    pwos_lan_runtime_status_t lan;
+    pwos_host_rpc_runtime_status_t status;
+    uint64_t wall_us = 0u;
+    size_t i;
+
+    memset(&lan, 0, sizeof(lan));
+    memset(&status, 0, sizeof(status));
+    pwos_lan_runtime_get_status(&lan);
+    pwos_host_rpc_runtime_get_status(&status);
+    text_append(output,
+        "valid=%u unix_us=%llu sntp_started=%u sntp_sync=%lu "
+        "last_sntp_unix_ms=%llu peer_sync=%lu/%lu last_offset_us=%lld "
+        "last_delay_us=%lu last_sync_ms=%lu\n",
+        pwos_host_rpc_runtime_wall_time_us(&wall_us) == 0 ? 1u : 0u,
+        (unsigned long long)wall_us,
+        lan.sntp_started,
+        (unsigned long)lan.sntp_sync_events,
+        (unsigned long long)lan.last_sync_unix_ms,
+        (unsigned long)status.time_sync_ok,
+        (unsigned long)status.time_sync_fail,
+        (long long)status.last_time_offset_us,
+        (unsigned long)status.last_time_delay_us,
+        (unsigned long)status.last_time_sync_ms);
+    for (i = 0u; i < PWOS_HOST_RPC_MAX_PEERS; ++i) {
+        pwos_host_rpc_peer_snapshot_t peer;
+
+        if (pwos_host_rpc_runtime_get_peer(i, &peer) != 0) continue;
+        text_append(output,
+            "peer=%s valid=%u offset_us=%lld delay_us=%lu last_sync_ms=%lu\n",
+            peer.hostname,
+            peer.time_valid,
+            (long long)peer.time_offset_us,
+            (unsigned long)peer.time_delay_us,
+            (unsigned long)peer.last_time_sync_ms);
+    }
+}
+
 static void render_web(text_buffer_t *output)
 {
     pwos_lan_runtime_status_t lan;
@@ -603,6 +643,8 @@ int pwos_host_observability_read(
         render_jobs(&output);
     } else if (strcmp(path, "/host/sys/hosts") == 0) {
         render_hosts(&output);
+    } else if (strcmp(path, "/host/sys/time") == 0) {
+        render_time(&output);
     }
     *in_out_len = (uint16_t)output.len;
     return 0;

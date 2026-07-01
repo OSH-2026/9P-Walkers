@@ -184,6 +184,39 @@ static void test_host_advertise_roundtrip(void)
     CHECK(pwos_mesh2_decode_host_advertise(payload, len, &out) == PWOS_E_BAD_LENGTH);
 }
 
+static void test_time_sync_roundtrip(void)
+{
+    pwos_mesh2_time_sync_t in = {
+        .kind = PWOS_MESH2_TIME_SYNC_RESPONSE,
+        .flags = PWOS_MESH2_TIME_SYNC_FLAG_WALL_VALID,
+        .sequence = 0x10203040u,
+        .client_tx_mono_us = UINT64_C(0x0000000123456789),
+        .server_rx_unix_us = UINT64_C(1719792000123456),
+        .server_tx_unix_us = UINT64_C(1719792000124567),
+    };
+    pwos_mesh2_time_sync_t out;
+    uint8_t payload[PWOS_MESH2_TIME_SYNC_PAYLOAD_LEN];
+    size_t len = 0u;
+
+    CHECK(pwos_mesh2_encode_time_sync(
+        &in, payload, sizeof(payload), &len) == PWOS_OK);
+    CHECK(len == PWOS_MESH2_TIME_SYNC_PAYLOAD_LEN);
+    CHECK(pwos_mesh2_decode_time_sync(payload, len, &out) == PWOS_OK);
+    CHECK(out.kind == in.kind);
+    CHECK(out.flags == in.flags);
+    CHECK(out.sequence == in.sequence);
+    CHECK(out.client_tx_mono_us == in.client_tx_mono_us);
+    CHECK(out.server_rx_unix_us == in.server_rx_unix_us);
+    CHECK(out.server_tx_unix_us == in.server_tx_unix_us);
+
+    payload[1] = 0xFFu;
+    CHECK(pwos_mesh2_decode_time_sync(payload, len, &out) == PWOS_E_BAD_LENGTH);
+    CHECK(pwos_mesh2_encode_time_sync(
+        &in, payload, sizeof(payload), &len) == PWOS_OK);
+    payload[3] = 1u;
+    CHECK(pwos_mesh2_decode_time_sync(payload, len, &out) == PWOS_E_BAD_LENGTH);
+}
+
 int main(void)
 {
     test_node_register_roundtrip();
@@ -192,6 +225,7 @@ int main(void)
     test_route_update_roundtrip();
     test_link_frame_integration();
     test_host_advertise_roundtrip();
+    test_time_sync_roundtrip();
 
     if (g_failures != 0) {
         printf("pwos mesh2 control tests failed: %d\n", g_failures);

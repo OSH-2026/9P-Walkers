@@ -36,6 +36,12 @@ static void put_be32(uint8_t *dst, uint32_t value)
     dst[3] = (uint8_t)value;
 }
 
+static void put_be64(uint8_t *dst, uint64_t value)
+{
+    put_be32(dst, (uint32_t)(value >> 32));
+    put_be32(dst + 4u, (uint32_t)value);
+}
+
 uint32_t pwos_host_rpc_body_len(const uint8_t prefix[PWOS_HOST_RPC_PREFIX_LEN])
 {
     if (prefix == NULL) {
@@ -933,4 +939,70 @@ int pwos_host_rpc_decode_topology(
         }
     }
     return seen == 0x06u && reader.pos == reader.len ? 0 : -1;
+}
+
+int pwos_host_rpc_encode_time_exchange(
+    const pwos_host_rpc_time_exchange_t *exchange,
+    uint8_t *out,
+    size_t out_cap,
+    uint16_t *out_len)
+{
+    if (exchange == NULL || out == NULL || out_len == NULL ||
+        out_cap < PWOS_HOST_RPC_TIME_EXCHANGE_PAYLOAD_LEN ||
+        exchange->sequence == 0u || exchange->client_tx_mono_us == 0u ||
+        (exchange->flags & ~PWOS_HOST_RPC_TIME_FLAG_WALL_VALID) != 0u ||
+        ((exchange->flags & PWOS_HOST_RPC_TIME_FLAG_WALL_VALID) != 0u &&
+         (exchange->server_rx_unix_us == 0u ||
+          exchange->server_tx_unix_us == 0u)) ||
+        (exchange->flags == 0u &&
+         (exchange->server_rx_unix_us != 0u ||
+          exchange->server_tx_unix_us != 0u))) {
+        return -1;
+    }
+    memset(out, 0, PWOS_HOST_RPC_TIME_EXCHANGE_PAYLOAD_LEN);
+    out[0] = PWOS_HOST_RPC_TIME_VERSION;
+    out[1] = exchange->flags;
+    put_be32(out + 4u, exchange->sequence);
+    put_be64(out + 8u, exchange->client_tx_mono_us);
+    put_be64(out + 16u, exchange->server_rx_unix_us);
+    put_be64(out + 24u, exchange->server_tx_unix_us);
+    *out_len = PWOS_HOST_RPC_TIME_EXCHANGE_PAYLOAD_LEN;
+    return 0;
+}
+
+int pwos_host_rpc_decode_time_exchange(
+    const uint8_t *payload,
+    uint16_t payload_len,
+    pwos_host_rpc_time_exchange_t *out_exchange)
+{
+    if (payload == NULL || out_exchange == NULL ||
+        payload_len != PWOS_HOST_RPC_TIME_EXCHANGE_PAYLOAD_LEN ||
+        payload[0] != PWOS_HOST_RPC_TIME_VERSION || payload[2] != 0u ||
+        payload[3] != 0u) {
+        return -1;
+    }
+    memset(out_exchange, 0, sizeof(*out_exchange));
+    out_exchange->flags = payload[1];
+    out_exchange->sequence = pwos_host_rpc_body_len(payload + 4u);
+    out_exchange->client_tx_mono_us =
+        ((uint64_t)pwos_host_rpc_body_len(payload + 8u) << 32) |
+        pwos_host_rpc_body_len(payload + 12u);
+    out_exchange->server_rx_unix_us =
+        ((uint64_t)pwos_host_rpc_body_len(payload + 16u) << 32) |
+        pwos_host_rpc_body_len(payload + 20u);
+    out_exchange->server_tx_unix_us =
+        ((uint64_t)pwos_host_rpc_body_len(payload + 24u) << 32) |
+        pwos_host_rpc_body_len(payload + 28u);
+    if (out_exchange->sequence == 0u ||
+        out_exchange->client_tx_mono_us == 0u ||
+        (out_exchange->flags & ~PWOS_HOST_RPC_TIME_FLAG_WALL_VALID) != 0u ||
+        ((out_exchange->flags & PWOS_HOST_RPC_TIME_FLAG_WALL_VALID) != 0u &&
+         (out_exchange->server_rx_unix_us == 0u ||
+          out_exchange->server_tx_unix_us == 0u)) ||
+        (out_exchange->flags == 0u &&
+         (out_exchange->server_rx_unix_us != 0u ||
+          out_exchange->server_tx_unix_us != 0u))) {
+        return -1;
+    }
+    return 0;
 }

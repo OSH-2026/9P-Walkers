@@ -72,6 +72,7 @@ static const struct local_vfs_node k_nodes[] = {
     {"/sys/log", NULL, {{M9P_QID_VIRTUAL | M9P_QID_READONLY, 0u, 1u, 11u}, M9P_SERVER_PERM_READ, M9P_STAT_VIRTUAL, 0u, 0u, "log"}},
     {"/sys/build", NULL, {{M9P_QID_VIRTUAL | M9P_QID_READONLY, 0u, 1u, 12u}, M9P_SERVER_PERM_READ, M9P_STAT_VIRTUAL, 0u, 0u, "build"}},
     {"/sys/fault", NULL, {{M9P_QID_VIRTUAL, 0u, 1u, 13u}, M9P_SERVER_PERM_READ | M9P_SERVER_PERM_WRITE, M9P_STAT_VIRTUAL, 0u, 0u, "fault"}},
+    {"/sys/time", NULL, {{M9P_QID_VIRTUAL | M9P_QID_READONLY, 0u, 1u, 20u}, M9P_SERVER_PERM_READ, M9P_STAT_VIRTUAL, 0u, 0u, "time"}},
     /* 兼容此前现场调试使用的路径。 */
     {"/sys/info", NULL, {{M9P_QID_VIRTUAL | M9P_QID_READONLY, 0u, 1u, 14u}, M9P_SERVER_PERM_READ, M9P_STAT_VIRTUAL, 0u, 0u, "info"}},
     {"/sys/uart", NULL, {{M9P_QID_VIRTUAL | M9P_QID_READONLY, 0u, 1u, 15u}, M9P_SERVER_PERM_READ, M9P_STAT_VIRTUAL, 0u, 0u, "uart"}},

@@ -1,6 +1,7 @@
 #include "host_rpc_runtime.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/time.h>
@@ -16,6 +17,7 @@
 #ifdef ESP_PLATFORM
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -35,6 +37,7 @@
 #define PWOS_HOST_RPC_DISCOVERY_INTERVAL_MS 5000u
 #define PWOS_HOST_RPC_DISCOVERY_QUERY_MS 1200u
 #define PWOS_HOST_RPC_DEFAULT_DEADLINE_MS 1500u
+#define PWOS_HOST_RPC_TIME_SYNC_STALE_MS 20000u
 
 typedef struct {
     uint8_t used;
@@ -54,6 +57,7 @@ typedef struct {
     pwos_host_rpc_advertise_t local_advertise;
     pwos_host_rpc_runtime_status_t status;
     char current_remote_ip[16];
+    uint32_t time_sequence;
 #ifdef ESP_PLATFORM
     SemaphoreHandle_t mutex;
     TaskHandle_t server_task;
@@ -79,6 +83,34 @@ static void runtime_unlock(void)
 static uint32_t now_ms(void)
 {
     return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+}
+
+static uint64_t monotonic_us(void)
+{
+    return (uint64_t)esp_timer_get_time();
+}
+
+static int wall_time_now_us(uint64_t *out_unix_us)
+{
+    struct timeval now;
+
+    if (out_unix_us == NULL || gettimeofday(&now, NULL) != 0 ||
+        now.tv_sec < 1700000000) {
+        return -1;
+    }
+    *out_unix_us = (uint64_t)now.tv_sec * 1000000u + (uint64_t)now.tv_usec;
+    return 0;
+}
+
+static uint64_t service_wall_time_us(void *ctx, uint8_t *out_valid)
+{
+    uint64_t wall_us = 0u;
+
+    (void)ctx;
+    if (out_valid != NULL) {
+        *out_valid = wall_time_now_us(&wall_us) == 0 ? 1u : 0u;
+    }
+    return wall_us;
 }
 
 static uint32_t load_next_epoch(void)
@@ -809,6 +841,96 @@ static int topology_sync_to(const char *ip, uint16_t port, const uint32_t peer_u
     return 0;
 }
 
+static int time_sync_to(const char *ip, uint16_t port, const uint32_t peer_uid[3])
+{
+    pwos_host_rpc_time_exchange_t request;
+    pwos_host_rpc_time_exchange_t response_time;
+    uint8_t args[PWOS_HOST_RPC_TIME_EXCHANGE_PAYLOAD_LEN];
+    uint8_t response[PWOS_HOST_RPC_TIME_EXCHANGE_PAYLOAD_LEN];
+    uint16_t args_len = 0u;
+    uint16_t response_len = sizeof(response);
+    uint16_t status = PWOS_HOST_RPC_STATUS_INTERNAL;
+    uint64_t local_wall_us = 0u;
+    uint64_t remote_wall_us;
+    uint64_t t4_mono_us;
+    uint64_t transit_us;
+    uint64_t server_work_us;
+    uint64_t delay_us;
+    int64_t mono_to_remote_us;
+    int64_t peer_offset_us = 0;
+    int local_wall_valid;
+    int rc;
+
+    memset(&request, 0, sizeof(request));
+    runtime_lock();
+    request.sequence = ++g_host_rpc.time_sequence;
+    runtime_unlock();
+    request.client_tx_mono_us = monotonic_us();
+    if (pwos_host_rpc_encode_time_exchange(
+            &request, args, sizeof(args), &args_len) != 0) {
+        return -(int)M9P_ERR_EINVAL;
+    }
+    rc = call_address(
+        ip, port, "time", "exchange", args, args_len,
+        PWOS_HOST_RPC_DEFAULT_DEADLINE_MS,
+        response, &response_len, &status);
+    t4_mono_us = monotonic_us();
+    if (rc != 0) return rc;
+    if (status != PWOS_HOST_RPC_STATUS_OK ||
+        pwos_host_rpc_decode_time_exchange(
+            response, response_len, &response_time) != 0 ||
+        response_time.sequence != request.sequence ||
+        response_time.client_tx_mono_us != request.client_tx_mono_us ||
+        (response_time.flags & PWOS_HOST_RPC_TIME_FLAG_WALL_VALID) == 0u ||
+        response_time.server_tx_unix_us < response_time.server_rx_unix_us ||
+        t4_mono_us < request.client_tx_mono_us) {
+        return -(int)M9P_ERR_EIO;
+    }
+
+    transit_us = t4_mono_us - request.client_tx_mono_us;
+    server_work_us = response_time.server_tx_unix_us -
+        response_time.server_rx_unix_us;
+    delay_us = transit_us > server_work_us ? transit_us - server_work_us : 0u;
+
+    /* NTP 四时间戳公式，但客户端时间轴使用不会跳变的 esp_timer。 */
+    mono_to_remote_us =
+        ((int64_t)response_time.server_rx_unix_us -
+            (int64_t)request.client_tx_mono_us) / 2 +
+        ((int64_t)response_time.server_tx_unix_us -
+            (int64_t)t4_mono_us) / 2;
+    remote_wall_us = (uint64_t)((int64_t)t4_mono_us + mono_to_remote_us);
+    local_wall_valid = wall_time_now_us(&local_wall_us) == 0;
+    if (local_wall_valid != 0) {
+        peer_offset_us = (int64_t)remote_wall_us - (int64_t)local_wall_us;
+    } else {
+        struct timeval adjusted;
+
+        adjusted.tv_sec = (time_t)(remote_wall_us / 1000000u);
+        adjusted.tv_usec = (suseconds_t)(remote_wall_us % 1000000u);
+        if (settimeofday(&adjusted, NULL) != 0) return -(int)M9P_ERR_EIO;
+    }
+
+    runtime_lock();
+    {
+        runtime_peer_t *peer = find_peer_uid_locked(peer_uid);
+
+        if (peer != NULL) {
+            peer->snapshot.time_valid = 1u;
+            peer->snapshot.last_time_sync_ms = now_ms();
+            peer->snapshot.time_delay_us = delay_us > UINT32_MAX ?
+                UINT32_MAX : (uint32_t)delay_us;
+            peer->snapshot.time_offset_us = peer_offset_us;
+        }
+    }
+    g_host_rpc.status.wall_clock_valid = 1u;
+    g_host_rpc.status.last_time_sync_ms = now_ms();
+    g_host_rpc.status.last_time_delay_us = delay_us > UINT32_MAX ?
+        UINT32_MAX : (uint32_t)delay_us;
+    g_host_rpc.status.last_time_offset_us = peer_offset_us;
+    runtime_unlock();
+    return 0;
+}
+
 static void process_mdns_result(mdns_result_t *result)
 {
     mdns_ip_addr_t *address;
@@ -833,6 +955,15 @@ static void process_mdns_result(mdns_result_t *result)
         }
         runtime_unlock();
         if (rc == 0) {
+            int time_rc = time_sync_to(ip, remote.rpc_port, remote.uid);
+
+            runtime_lock();
+            if (time_rc == 0) ++g_host_rpc.status.time_sync_ok;
+            else {
+                ++g_host_rpc.status.time_sync_fail;
+                g_host_rpc.status.last_error = time_rc;
+            }
+            runtime_unlock();
             rc = topology_sync_to(ip, remote.rpc_port, remote.uid);
             runtime_lock();
             if (rc == 0) ++g_host_rpc.status.topology_sync_ok;
@@ -860,6 +991,12 @@ static void expire_peers(void)
             prune_owner_locked(g_host_rpc.peers[i].snapshot.uid, NULL);
             memset(&g_host_rpc.peers[i], 0, sizeof(g_host_rpc.peers[i]));
             if (g_host_rpc.status.peer_count > 0u) --g_host_rpc.status.peer_count;
+        } else if (g_host_rpc.peers[i].used != 0u &&
+                   g_host_rpc.peers[i].snapshot.time_valid != 0u &&
+                   (uint32_t)(now -
+                       g_host_rpc.peers[i].snapshot.last_time_sync_ms) >=
+                       PWOS_HOST_RPC_TIME_SYNC_STALE_MS) {
+            g_host_rpc.peers[i].snapshot.time_valid = 0u;
         }
     }
     refresh_role_locked();
@@ -940,6 +1077,7 @@ int pwos_host_rpc_runtime_start(void)
     service_config.local_advertise = service_local_advertise;
     service_config.whoowns = service_whoowns;
     service_config.topology_sync = service_topology_sync;
+    service_config.wall_time_us = service_wall_time_us;
     if (pwos_host_rpc_service_init(&g_host_rpc.service, &service_config) != 0) {
         return -(int)M9P_ERR_EINVAL;
     }
@@ -984,6 +1122,16 @@ int pwos_host_rpc_runtime_start(void)
 
 #endif
 
+int pwos_host_rpc_runtime_wall_time_us(uint64_t *out_unix_us)
+{
+#ifdef ESP_PLATFORM
+    return wall_time_now_us(out_unix_us);
+#else
+    (void)out_unix_us;
+    return -1;
+#endif
+}
+
 void pwos_host_rpc_runtime_get_status(
     pwos_host_rpc_runtime_status_t *out_status)
 {
@@ -994,6 +1142,12 @@ void pwos_host_rpc_runtime_get_status(
     *out_status = g_host_rpc.status;
 #ifdef ESP_PLATFORM
     if (g_host_rpc.mutex != NULL) runtime_unlock();
+    {
+        uint64_t wall_us;
+
+        out_status->wall_clock_valid =
+            wall_time_now_us(&wall_us) == 0 ? 1u : 0u;
+    }
 #endif
 }
 

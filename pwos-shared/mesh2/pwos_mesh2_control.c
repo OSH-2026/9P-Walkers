@@ -29,6 +29,18 @@ static uint32_t get_le32(const uint8_t *src)
         ((uint32_t)src[3] << 24);
 }
 
+static void put_le64(uint8_t *dst, uint64_t value)
+{
+    put_le32(dst, (uint32_t)value);
+    put_le32(dst + 4u, (uint32_t)(value >> 32));
+}
+
+static uint64_t get_le64(const uint8_t *src)
+{
+    return (uint64_t)get_le32(src) |
+        ((uint64_t)get_le32(src + 4u) << 32);
+}
+
 static pwos_status_t check_encode_args(
     const void *msg,
     uint8_t *payload,
@@ -391,6 +403,83 @@ pwos_status_t pwos_mesh2_decode_host_advertise(
     out_msg->host_uid[2] = get_le32(payload + 20u);
     out_msg->cluster_id = get_le32(payload + 24u);
     if (out_msg->role > PWOS_MESH2_HOST_ROLE_LEADER) {
+        return PWOS_E_BAD_LENGTH;
+    }
+    return PWOS_OK;
+}
+
+pwos_status_t pwos_mesh2_encode_time_sync(
+    const pwos_mesh2_time_sync_t *msg,
+    uint8_t *payload,
+    size_t payload_cap,
+    size_t *out_len)
+{
+    pwos_status_t status = check_encode_args(
+        msg, payload, payload_cap, PWOS_MESH2_TIME_SYNC_PAYLOAD_LEN, out_len);
+
+    if (status != PWOS_OK) {
+        return status;
+    }
+    if ((msg->kind != PWOS_MESH2_TIME_SYNC_REQUEST &&
+         msg->kind != PWOS_MESH2_TIME_SYNC_RESPONSE) ||
+        msg->sequence == 0u || msg->client_tx_mono_us == 0u ||
+        (msg->flags & ~PWOS_MESH2_TIME_SYNC_FLAG_WALL_VALID) != 0u ||
+        (msg->kind == PWOS_MESH2_TIME_SYNC_REQUEST &&
+         (msg->flags != 0u || msg->server_rx_unix_us != 0u ||
+          msg->server_tx_unix_us != 0u)) ||
+        (msg->kind == PWOS_MESH2_TIME_SYNC_RESPONSE &&
+         (((msg->flags & PWOS_MESH2_TIME_SYNC_FLAG_WALL_VALID) != 0u &&
+           (msg->server_rx_unix_us == 0u || msg->server_tx_unix_us == 0u)) ||
+          (msg->flags == 0u &&
+           (msg->server_rx_unix_us != 0u || msg->server_tx_unix_us != 0u))))) {
+        return PWOS_E_BAD_LENGTH;
+    }
+
+    memset(payload, 0, PWOS_MESH2_TIME_SYNC_PAYLOAD_LEN);
+    payload[0] = PWOS_MESH2_CONTROL_VERSION;
+    payload[1] = msg->kind;
+    payload[2] = msg->flags;
+    put_le32(payload + 4u, msg->sequence);
+    put_le64(payload + 8u, msg->client_tx_mono_us);
+    put_le64(payload + 16u, msg->server_rx_unix_us);
+    put_le64(payload + 24u, msg->server_tx_unix_us);
+    *out_len = PWOS_MESH2_TIME_SYNC_PAYLOAD_LEN;
+    return PWOS_OK;
+}
+
+pwos_status_t pwos_mesh2_decode_time_sync(
+    const uint8_t *payload,
+    size_t payload_len,
+    pwos_mesh2_time_sync_t *out_msg)
+{
+    pwos_status_t status = check_decode_args(
+        payload, payload_len, PWOS_MESH2_TIME_SYNC_PAYLOAD_LEN, out_msg);
+
+    if (status != PWOS_OK) {
+        return status;
+    }
+    memset(out_msg, 0, sizeof(*out_msg));
+    out_msg->kind = payload[1];
+    out_msg->flags = payload[2];
+    out_msg->sequence = get_le32(payload + 4u);
+    out_msg->client_tx_mono_us = get_le64(payload + 8u);
+    out_msg->server_rx_unix_us = get_le64(payload + 16u);
+    out_msg->server_tx_unix_us = get_le64(payload + 24u);
+    if (payload[3] != 0u ||
+        (out_msg->kind != PWOS_MESH2_TIME_SYNC_REQUEST &&
+         out_msg->kind != PWOS_MESH2_TIME_SYNC_RESPONSE) ||
+        out_msg->sequence == 0u || out_msg->client_tx_mono_us == 0u ||
+        (out_msg->flags & ~PWOS_MESH2_TIME_SYNC_FLAG_WALL_VALID) != 0u ||
+        (out_msg->kind == PWOS_MESH2_TIME_SYNC_REQUEST &&
+         (out_msg->flags != 0u || out_msg->server_rx_unix_us != 0u ||
+          out_msg->server_tx_unix_us != 0u)) ||
+        (out_msg->kind == PWOS_MESH2_TIME_SYNC_RESPONSE &&
+         (((out_msg->flags & PWOS_MESH2_TIME_SYNC_FLAG_WALL_VALID) != 0u &&
+           (out_msg->server_rx_unix_us == 0u ||
+            out_msg->server_tx_unix_us == 0u)) ||
+          (out_msg->flags == 0u &&
+           (out_msg->server_rx_unix_us != 0u ||
+            out_msg->server_tx_unix_us != 0u))))) {
         return PWOS_E_BAD_LENGTH;
     }
     return PWOS_OK;

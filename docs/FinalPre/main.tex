@@ -3,6 +3,35 @@
 \usepackage[bluetheme]{ustcbeamer}
 \input{ustctheme.tex}
 
+\usepackage{listings}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{textcomp}
+
+\definecolor{codebg}{RGB}{245,245,245}
+\definecolor{codeframe}{RGB}{180,180,180}
+\definecolor{codekw}{RGB}{0,0,180}
+\definecolor{codecm}{RGB}{100,100,100}
+
+\lstset{
+  basicstyle=\ttfamily\scriptsize,
+  keywordstyle=\color{codekw}\bfseries,
+  commentstyle=\color{codecm},
+  stringstyle=\color{red},
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  frame=single,
+  backgroundcolor=\color{codebg},
+  rulecolor=\color{codeframe},
+  breaklines=true,
+  language=C,
+  showstringspaces=false,
+  tabsize=2,
+  xleftmargin=1.5em,
+  framexleftmargin=1em
+}
+
 \title[9P-Walkers 项目答辩]{
   9P-Walkers\\
   基于 mini9P 的 MCU 集群分布式系统\\
@@ -264,7 +293,7 @@
   \frametitle{节点上线流程}
   \begin{figure}
     \centering
-    \fbox{\parbox{0.9\textwidth}{\centering\vspace{2cm}节点上线状态转换图\\HELLO → REGISTER → ASSIGN → RENEW → LINK STATE → ROUTE UPDATE\\（请替换为 node\_join.pdf）\vspace{2cm}}}
+    \fbox{\parbox{0.9\textwidth}{\centering\vspace{2cm}节点上线状态转换图\\HELLO $\rightarrow$ REGISTER $\rightarrow$ ASSIGN $\rightarrow$ RENEW $\rightarrow$ LINK STATE $\rightarrow$ ROUTE UPDATE\\（请替换为 node\_join.pdf）\vspace{2cm}}}
     \caption{STM32 节点上线状态机}
   \end{figure}
   \begin{enumerate}
@@ -284,9 +313,9 @@
       \begin{block}{\small \texttt{cat /mcu1/sys/health}}
         \small
         \begin{enumerate}
-          \item 解析路径 → 节点地址
+          \item 解析路径 $\rightarrow$ 节点地址
           \item 建立/复用 mini9P session
-          \item attach → walk → open → read
+          \item attach $\rightarrow$ walk $\rightarrow$ open $\rightarrow$ read
           \item 节点 local\_vfs 生成健康文本
           \item 响应沿原路返回
         \end{enumerate}
@@ -329,261 +358,792 @@
 \end{frame}
 
 %==============================================================================
-\section{核心模块详解}
+\section{协议栈详解}
 %==============================================================================
 
 \begin{frame}
-  \frametitle{链路帧与流式解析器}
+  \frametitle{链路帧 v2 线缆格式}
   \begin{columns}[T]
-    \begin{column}{0.48\textwidth}
-      \begin{block}{帧格式}
-        \small
-        19 字节头部 + 最多 512 字节 payload
+    \begin{column}{0.58\textwidth}
+      \begin{table}
+        \centering
+        \scriptsize
+        \begin{tabular}{|c|c|p{2.2cm}|p{4cm}|}
+          \hline
+          \textbf{偏移} & \textbf{长度} & \textbf{字段} & \textbf{说明} \\
+          \hline
+          0 & 2B & magic & 固定 \texttt{'M'}\texttt{'H'} \\
+          \hline
+          2 & 1B & version & 当前为 2 \\
+          \hline
+          3 & 1B & hdr\_len & 固定 19，支持未来扩展 \\
+          \hline
+          4 & 1B & type & LINK/CTRL/DATA 类型 \\
+          \hline
+          5 & 1B & flags & 分片/压缩/加密预留 \\
+          \hline
+          6 & 1B & src & 源 mesh 短地址 \\
+          \hline
+          7 & 1B & dst & 目的短地址，0xFF 表示未分配/广播 \\
+          \hline
+          8 & 1B & ttl & 多跳防环 \\
+          \hline
+          9 & 2B & seq & 发送序号，小端序 \\
+          \hline
+          11 & 2B & ack & 确认序号，第一版未启用 \\
+          \hline
+          13 & 2B & payload\_len & 最大 512 \\
+          \hline
+          15 & 2B & hdr\_crc & 覆盖头部 magic\textasciitilde payload\_len \\
+          \hline
+          17 & 2B & payload\_crc & 空 payload 时为 0xFFFF \\
+          \hline
+          19 & N & payload & 上层数据 \\
+          \hline
+        \end{tabular}
+        \caption{link frame v2 格式（总长度 19+N，最大 531B）}
+      \end{table}
+    \end{column}
+    \begin{column}{0.38\textwidth}
+      \begin{block}{设计要点}
+        \scriptsize
         \begin{itemize}
-          \item magic、版本、长度、地址、TTL
-          \item 双层 CRC：头 CRC + payload CRC
-          \item 小端序，与硬件无关
+          \item 双层 CRC：先校验头部，再校验 payload
+          \item 小端序，与 HAL 无关
+          \item 特殊地址：0x00=Host，0xFF=未分配
+          \item 数据面类型：\texttt{0x80} mini9P，\texttt{0x81} RPC，\texttt{0x82} Job，\texttt{0x83} Bulk
         \end{itemize}
       \end{block}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{链路帧类型与解析器}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{帧类型分类}
+        \scriptsize
+        \begin{itemize}
+          \item \textbf{链路维护} \texttt{0x01\textasciitilde 0x04}：HELLO、HELLO\_ACK、HEARTBEAT、ERROR
+          \item \textbf{控制面} \texttt{0x10\textasciitilde 0x1F}：REGISTER、ADDR\_ASSIGN、LEASE\_RENEW/ACK、LINK\_STATE、ROUTE\_UPDATE、HOST\_ADVERTISE、TIME\_SYNC
+          \item \textbf{数据面} \texttt{0x80\textasciitilde 0x83}：mini9P、RPC、Job、Bulk
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
       \begin{block}{流式解析器}
-        \small
+        \scriptsize
         \begin{itemize}
           \item 从任意字节流中恢复完整帧
-          \item 支持噪声重同步和半帧保留
-          \item 固定缓冲区，无动态内存
+          \item 先寻找 magic 前缀
+          \item 收齐 19B 头部并校验 hdr\_crc
+          \item 按 payload\_len 收齐 payload 后校验 payload\_crc
+          \item 错误时保留尾部 magic 快速重同步
         \end{itemize}
       \end{block}
     \end{column}
-    \begin{column}{0.48\textwidth}
-      \begin{figure}
-        \centering
-        \fbox{\parbox{0.85\textwidth}{\centering\vspace{2cm}帧格式与解析器状态机图\\（请替换为 link\_frame.pdf）\vspace{2cm}}}
-        \caption{链路帧格式}
-      \end{figure}
-    \end{column}
   \end{columns}
+  \vspace{0.2cm}
+  \begin{figure}
+    \centering
+    \fbox{\parbox{0.85\textwidth}{\centering\vspace{0.8cm}链路解析器状态机图（请替换为 link\_parser\_fsm.pdf）\vspace{0.8cm}}}
+    \caption{流式帧解析状态机}
+  \end{figure}
 \end{frame}
 
 \begin{frame}
-  \frametitle{控制面协议}
+  \frametitle{控制面协议：节点注册与地址分配}
   \begin{columns}[T]
     \begin{column}{0.48\textwidth}
+      \begin{table}
+        \centering
+        \scriptsize
+        \begin{tabular}{|c|c|p{3.5cm}|}
+          \hline
+          \textbf{偏移} & \textbf{长度} & \textbf{NODE\_REGISTER} \\
+          \hline
+          0 & 12B & uid[3]（96-bit 唯一标识） \\
+          \hline
+          12 & 4B & boot\_id \\
+          \hline
+          16 & 4B & caps（RELAY=0x1, COORD=0x2） \\
+          \hline
+          20 & 1B & upstream\_port \\
+          \hline
+          21 & 3B & 保留，共 24B \\
+          \hline
+        \end{tabular}
+        \caption{节点注册请求（24B）}
+      \end{table}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{table}
+        \centering
+        \scriptsize
+        \begin{tabular}{|c|c|p{3.5cm}|}
+          \hline
+          \textbf{偏移} & \textbf{长度} & \textbf{ADDR\_ASSIGN} \\
+          \hline
+          0 & 12B & uid[3] \\
+          \hline
+          12 & 4B & boot\_id \\
+          \hline
+          16 & 4B & lease\_epoch \\
+          \hline
+          20 & 4B & lease\_ms \\
+          \hline
+          24 & 1B & addr \\
+          \hline
+          25 & 1B & flags（OK=0x01） \\
+          \hline
+          26 & 2B & 保留，共 28B \\
+          \hline
+        \end{tabular}
+        \caption{地址分配响应（28B）}
+      \end{table}
+    \end{column}
+  \end{columns}
+  \vspace{0.3cm}
+  \begin{alertblock}{关键设计}
+    \centering
+    \small
+    UID + boot\_id 双标识：UID 区分硬件，boot\_id 区分一次启动，避免节点重启后旧租约/路由混淆。
+  \end{alertblock}
+\end{frame}
+
+\begin{frame}
+  \frametitle{控制面协议：租约、链路与路由}
+  \begin{columns}[T]
+    \begin{column}{0.32\textwidth}
+      \begin{table}
+        \centering
+        \tiny
+        \begin{tabular}{|c|c|p{1.6cm}|}
+          \hline
+          \textbf{偏移} & \textbf{长度} & \textbf{LEASE\_RENEW} \\
+          \hline
+          0 & 12B & uid \\
+          \hline
+          12 & 4B & boot\_id \\
+          \hline
+          16 & 4B & lease\_epoch \\
+          \hline
+          20 & 1B & addr \\
+          \hline
+          21 & 3B & 保留 \\
+          \hline
+        \end{tabular}
+        \caption{租约续期 24B}
+      \end{table}
+    \end{column}
+    \begin{column}{0.32\textwidth}
+      \begin{table}
+        \centering
+        \tiny
+        \begin{tabular}{|c|c|p{1.6cm}|}
+          \hline
+          \textbf{偏移} & \textbf{长度} & \textbf{LINK\_STATE} \\
+          \hline
+          0 & 12B & peer\_uid \\
+          \hline
+          12 & 4B & peer\_boot\_id \\
+          \hline
+          16 & 2B & metric \\
+          \hline
+          18 & 1B & local\_addr \\
+          \hline
+          19 & 1B & local\_port \\
+          \hline
+          20 & 1B & peer\_addr \\
+          \hline
+          21 & 1B & peer\_port \\
+          \hline
+          22 & 1B & flags \\
+          \hline
+          23 & 1B & 保留 \\
+          \hline
+        \end{tabular}
+        \caption{链路状态 24B}
+      \end{table}
+    \end{column}
+    \begin{column}{0.32\textwidth}
+      \begin{table}
+        \centering
+        \tiny
+        \begin{tabular}{|c|c|p{1.6cm}|}
+          \hline
+          \textbf{偏移} & \textbf{长度} & \textbf{ROUTE\_UPDATE} \\
+          \hline
+          0 & 4B & route\_version \\
+          \hline
+          4 & 2B & metric \\
+          \hline
+          6 & 1B & dst \\
+          \hline
+          7 & 1B & next\_hop \\
+          \hline
+          8 & 1B & action（SET=1, DEL=2） \\
+          \hline
+          9 & 3B & 保留，共 12B \\
+          \hline
+        \end{tabular}
+        \caption{路由更新 12B}
+      \end{table}
+    \end{column}
+  \end{columns}
+  \vspace{0.3cm}
+  \begin{block}{路由计算示例}
+    \small
+    节点 A 上报 ``端口 1 连接到 B'' 后，coordinator 同时生成两条 \texttt{ROUTE\_UPDATE}：
+    \begin{itemize}
+      \item 告诉 A：dst=B, next\_hop=B，metric=1
+      \item 告诉 B：dst=A, next\_hop=A，metric=1
+    \end{itemize}
+    节点只按 \texttt{route\_version} 更新本地表，旧版本直接忽略。
+  \end{block}
+\end{frame}
+
+\begin{frame}
+  \frametitle{mini9P 协议帧}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{table}
+        \centering
+        \scriptsize
+        \begin{tabular}{|c|c|p{3.5cm}|}
+          \hline
+          \textbf{偏移} & \textbf{长度} & \textbf{字段} \\
+          \hline
+          0 & 1B & version（=1） \\
+          \hline
+          1 & 1B & type \\
+          \hline
+          2 & 2B & tag \\
+          \hline
+          4 & N & payload \\
+          \hline
+        \end{tabular}
+        \caption{mini9P 帧头 4B + payload}
+      \end{table}
       \begin{block}{消息类型}
-        \small
+        \scriptsize
         \begin{itemize}
-          \item 节点注册与地址分配
-          \item 租约续期与确认
-          \item 链路状态上报
-          \item 路由更新下发
-          \item 主机权威通告
+          \item TATTACH/RATTACH、TWALK/RWALK、TOPEN/ROPEN
+          \item TREAD/RREAD、TWRITE/RWRITE、TSTAT/RSTAT
+          \item TCLUNK/RCLUNK、RERROR（\texttt{0xFF}）
         \end{itemize}
       \end{block}
-      \begin{block}{身份标识}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{qid 与 stat 标志}
+        \scriptsize
+        \begin{itemize}
+          \item \texttt{M9P\_QID\_DIR=0x80}：目录
+          \item \texttt{M9P\_QID\_VIRTUAL=0x08}：虚拟文件
+          \item \texttt{M9P\_QID\_DEVICE=0x04}：设备文件
+          \item \texttt{M9P\_QID\_COMPUTE=0x02}：计算文件
+          \item \texttt{M9P\_QID\_READONLY=0x01}：只读
+        \end{itemize}
+      \end{block}
+      \begin{block}{限制}
+        \scriptsize
+        最大路径 255B，文件名 64B，错误文本 64B，帧开销 10B。
+      \end{block}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{mini9P 请求/响应示例}
+  \begin{table}
+    \centering
+    \scriptsize
+    \begin{tabular}{|c|p{4cm}|p{4cm}|p{4cm}|}
+      \hline
+      \textbf{类型} & \textbf{关键字段} & \textbf{发送方} & \textbf{用途} \\
+      \hline
+      TATTACH & fid, requested\_msize, requested\_inflight & 主机 & 建立 session \\
+      \hline
+      RATTACH & negotiated\_msize, max\_fids, max\_inflight, root\_qid & 节点 & 协商参数 \\
+      \hline
+      TWALK & fid, newfid, path & 主机 & 定位文件 \\
+      \hline
+      RWALK & qid & 节点 & 返回对象标识 \\
+      \hline
+      TREAD & fid, offset, count & 主机 & 读取数据 \\
+      \hline
+      RREAD & data & 节点 & 返回读取内容 \\
+      \hline
+      TWRITE & fid, offset, count, data & 主机 & 写入数据 \\
+      \hline
+      RWRITE & count & 节点 & 返回实际写入长度 \\
+      \hline
+      RERROR & code, msg & 节点 & 错误响应 \\
+      \hline
+    \end{tabular}
+    \caption{mini9P 主要请求/响应}
+  \end{table}
+\end{frame}
+
+\begin{frame}
+  \frametitle{MCU RPC 协议}
+  \begin{columns}[T]
+    \begin{column}{0.52\textwidth}
+      \begin{table}
+        \centering
+        \scriptsize
+        \begin{tabular}{|c|c|p{3.5cm}|}
+          \hline
+          \textbf{偏移} & \textbf{长度} & \textbf{字段} \\
+          \hline
+          0 & 1B & version（=1） \\
+          \hline
+          1 & 1B & kind（REQUEST/RESPONSE/CANCEL/STREAM\_CHUNK/STREAM\_END） \\
+          \hline
+          2 & 1B & flags（ONEWAY=0x01, STREAM=0x02） \\
+          \hline
+          3 & 1B & service\_len \\
+          \hline
+          4 & 1B & method\_len \\
+          \hline
+          5 & 1B & 保留 \\
+          \hline
+          6 & 2B & call\_id \\
+          \hline
+          8 & 2B & status（OK/NOT\_FOUND/BUSY/...） \\
+          \hline
+          10 & 4B & deadline\_ms \\
+          \hline
+          14 & 2B & payload\_len \\
+          \hline
+          16 & N & service + method + payload \\
+          \hline
+        \end{tabular}
+        \caption{RPC 帧头 16B（最大 512B）}
+      \end{table}
+    \end{column}
+    \begin{column}{0.44\textwidth}
+      \begin{block}{特点}
+        \scriptsize
+        \begin{itemize}
+          \item service/method 最大各 31B
+          \item STREAM\_CHUNK 的 status 字段复用为 chunk 序号
+          \item 支持 oneway 调用
+          \item 支持 deadline 超时
+          \item 完整性由外层 link payload CRC 保证
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Job 协议帧}
+  \begin{columns}[T]
+    \begin{column}{0.55\textwidth}
+      \begin{table}
+        \centering
+        \scriptsize
+        \begin{tabular}{|c|c|p{4cm}|}
+          \hline
+          \textbf{偏移} & \textbf{长度} & \textbf{字段} \\
+          \hline
+          0 & 1B & version（=1） \\
+          \hline
+          1 & 1B & kind \\
+          \hline
+          2 & 1B & state \\
+          \hline
+          3 & 1B & kernel \\
+          \hline
+          4 & 2B & request\_id \\
+          \hline
+          6 & 2B & status \\
+          \hline
+          8 & 4B & job\_id \\
+          \hline
+          12 & 2B & progress\_permille \\
+          \hline
+          14 & 4B & result\_len \\
+          \hline
+          18 & 2B & payload\_len \\
+          \hline
+          20 & N & payload（最大 492B） \\
+          \hline
+        \end{tabular}
+        \caption{Job 帧头 20B（最大 512B）}
+      \end{table}
+    \end{column}
+    \begin{column}{0.41\textwidth}
+      \begin{block}{消息种类}
+        \scriptsize
+        \begin{itemize}
+          \item CAPS\_REQUEST/RESPONSE
+          \item SUBMIT/SUBMIT\_ACK
+          \item STATUS\_REQUEST/RESPONSE
+          \item RESULT\_REQUEST/RESPONSE
+          \item CANCEL\_REQUEST/CANCEL\_ACK
+        \end{itemize}
+      \end{block}
+      \begin{block}{状态}
+        \scriptsize
+        EMPTY $\rightarrow$ CREATED $\rightarrow$ QUEUED $\rightarrow$ ASSIGNED $\rightarrow$ RUNNING $\rightarrow$ DONE/FAILED/CANCELLED/LOST
+      \end{block}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Host RPC 与 Leader 选举}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{Host RPC 帧}
+        \scriptsize
+        \begin{itemize}
+          \item TCP/9909，4B 网络序 CBOR body 长度前缀
+          \item 最大 payload 1024B，最大帧 1280B
+          \item kind：REQUEST/RESPONSE/CANCEL/STREAM\_CHUNK/STREAM\_END
+          \item status 包含 \texttt{NOT\_LEADER}，便于客户端重定向
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{Leader 选举}
+        \scriptsize
+        \begin{itemize}
+          \item mDNS 发布 \texttt{\_pwos.\_tcp}
+          \item 每个主机维护最多 8 个 peer
+          \item 比较键：(epoch, priority, host\_uid)
+          \item 角色：OBSERVER / FOLLOWER / LEADER
+          \item 默认超时 15 秒
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+  \vspace{0.3cm}
+  \begin{figure}
+    \centering
+    \fbox{\parbox{0.85\textwidth}{\centering\vspace{0.8cm}多主机 leader 选举与全局命名同步图（请替换为 host\_election.pdf）\vspace{0.8cm}}}
+    \caption{主机间协作}
+  \end{figure}
+\end{frame}
+
+%==============================================================================
+\section{计算任务系统}
+%==============================================================================
+
+\begin{frame}
+  \frametitle{为什么需要独立的计算任务系统？}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{问题}
         \small
         \begin{itemize}
-          \item UID：硬件唯一标识
-          \item boot\_id：一次启动标识
-          \item 两者结合保证节点重启后旧状态可清理
+          \item STM32F4 主频 168MHz，RAM 192KB
+          \item 矩阵乘、Mandelbrot、光线追踪一个 tile 可能耗时数百毫秒
+          \item 如果放在 service\_task 中执行，会阻塞 mini9P/RPC/控制面
         \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{设计目标}
+        \small
+        \begin{itemize}
+          \item 长计算不阻塞通信
+          \item 支持提交、查询、取消、获取结果
+          \item 资源受限：固定 job 槽位，无动态内存
+          \item 可扩展：新增 kernel 只需注册 stepping 函数
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+  \vspace{0.3cm}
+  \begin{alertblock}{核心思路}
+    \centering
+    独立的低优先级 \texttt{compute\_task} + 增量 \texttt{pwos\_compute\_worker\_step()}，每次只推进一个最小工作单元，完成后主动让出 CPU。
+  \end{alertblock}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Job 状态机}
+  \begin{figure}
+    \centering
+    \fbox{\parbox{0.9\textwidth}{\centering\vspace{2cm}Job 状态转换图\\EMPTY $\rightarrow$ CREATED $\rightarrow$ QUEUED $\rightarrow$ ASSIGNED $\rightarrow$ RUNNING $\rightarrow$ DONE/FAILED/CANCELLED/LOST\\（请替换为 job\_state\_machine.pdf）\vspace{2cm}}}
+    \caption{Job 生命周期状态机}
+  \end{figure}
+  \begin{itemize}
+    \item \textbf{EMPTY}：槽位空闲
+    \item \textbf{QUEUED}：已提交，等待 CPU
+    \item \textbf{RUNNING}：compute\_worker 正在增量执行
+    \item \textbf{DONE/FAILED/CANCELLED}：终止状态，槽位可被复用
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Kernel 目录与输入格式}
+  \begin{table}
+    \centering
+    \scriptsize
+    \begin{tabular}{|c|p{3.5cm}|p{3.5cm}|p{4cm}|}
+      \hline
+      \textbf{Kernel} & \textbf{输入格式} & \textbf{输出格式} & \textbf{说明} \\
+      \hline
+      HASH & 任意字节串 & 4B FNV-1a hash & 每字节一步 \\
+      \hline
+      VECTOR\_ADD & le16 count + A[] + B[] & le16 count + C[] & 最大 32 个 int16 \\
+      \hline
+      MATMUL & rows, inner, cols, A, B & rows, cols, C & 最大 8x8 \\
+      \hline
+      MANDELBROT & width, height, max\_iter, cx0, cy0, dx, dy & width, height, max\_iter, pixels & 最大 16x16 \\
+      \hline
+      RAYTRACE\_TILE & pwos\_render\_request\_t 22B & 16B 头 + RGB565 pixels & 最大 16x7 tile \\
+      \hline
+    \end{tabular}
+    \caption{compute\_worker 内置 kernel}
+  \end{table}
+  \begin{itemize}
+    \item \texttt{PWOS\_COMPUTE\_MAX\_JOBS = 4}，\texttt{INPUT\_CAP = 320B}，\texttt{RESULT\_CAP = 320B}
+    \item 每个 job 包含 \texttt{work\_index / work\_total}，用于计算 \texttt{progress\_permille}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{compute\_worker 数据结构}
+  \begin{columns}[T]
+    \begin{column}{0.58\textwidth}
+      \begin{lstlisting}[caption={\scriptsize compute\_worker.h 核心结构}]
+typedef struct {
+    uint8_t used;
+    uint8_t owner_addr;
+    uint8_t kernel;
+    uint8_t state;
+    uint32_t job_id;
+    uint16_t progress_permille;
+    uint16_t input_len;
+    uint16_t result_len;
+    uint32_t sequence;
+    uint32_t work_index;
+    uint32_t work_total;
+    uint32_t accumulator;
+    uint8_t input[PWOS_COMPUTE_INPUT_CAP];
+    uint8_t result[PWOS_COMPUTE_RESULT_CAP];
+    char log[PWOS_COMPUTE_LOG_CAP];
+} pwos_compute_job_t;
+      \end{lstlisting}
+    \end{column}
+    \begin{column}{0.38\textwidth}
+      \begin{block}{字段含义}
+        \scriptsize
+        \begin{itemize}
+          \item \texttt{used}：槽位是否占用
+          \item \texttt{owner\_addr + job\_id}：全局唯一键
+          \item \texttt{sequence}：FIFO 顺序
+          \item \texttt{work\_index / total}：进度
+          \item \texttt{accumulator}：hash 累加器
+          \item \texttt{log[48]}：人类可读状态
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{增量调度核心代码}
+  \begin{lstlisting}[caption={\scriptsize pwos\_compute\_worker\_step() 主循环}]
+int pwos_compute_worker_step(pwos_compute_worker_t *worker) {
+    worker_lock(worker);
+    // 1) 找正在运行的 job
+    for (i = 0; i < PWOS_COMPUTE_MAX_JOBS; ++i)
+        if (worker->jobs[i].used &&
+            worker->jobs[i].state == PWOS_JOB_STATE_RUNNING) {
+            job = &worker->jobs[i]; break;
+        }
+    // 2) 没有则把最老的 QUEUED 切为 RUNNING
+    if (job == NULL) {
+        for (i = 0; i < PWOS_COMPUTE_MAX_JOBS; ++i)
+            if (worker->jobs[i].used &&
+                worker->jobs[i].state == PWOS_JOB_STATE_QUEUED &&
+                (job == NULL || worker->jobs[i].sequence < job->sequence))
+                job = &worker->jobs[i];
+        if (job != NULL) {
+            job->state = PWOS_JOB_STATE_RUNNING;
+            --worker->stats.queued_jobs;
+            ++worker->stats.active_jobs;
+            ++worker->stats.started;
+        }
+    }
+    // 3) 执行一个 work unit
+    switch (job->kernel) {
+        case PWOS_JOB_KERNEL_HASH: step_hash(job); break;
+        case PWOS_JOB_KERNEL_MATMUL: step_matmul(job); break;
+        ...
+    }
+    ++worker->stats.steps;
+    job->progress_permille =
+        (job->work_index * PWOS_JOB_PROGRESS_MAX) / job->work_total;
+    if (job->work_index >= job->work_total) {
+        job->state = PWOS_JOB_STATE_DONE;
+        ++worker->stats.completed;
+        --worker->stats.active_jobs;
+    }
+    worker_unlock(worker);
+    return 1;
+}
+  \end{lstlisting}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Stepping 函数示例}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{lstlisting}[caption={\scriptsize hash kernel}]
+static void step_hash(pwos_compute_job_t *job) {
+    job->accumulator ^=
+        job->input[job->work_index];
+    job->accumulator *= 16777619u;
+    ++job->work_index;
+    if (job->work_index == job->work_total)
+        pwos_job_put_le32(job->result,
+                          job->accumulator);
+}
+      \end{lstlisting}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{lstlisting}[caption={\scriptsize matmul kernel}]
+static void step_matmul(pwos_compute_job_t *job) {
+    uint8_t inner = job->input[1];
+    uint8_t cols  = job->input[2];
+    uint32_t row = job->work_index / cols;
+    uint32_t col = job->work_index % cols;
+    uint32_t a_off = 4u;
+    uint32_t b_off = a_off + 2u * job->input[0] * inner;
+    int32_t sum = 0;
+    for (uint32_t k = 0; k < inner; ++k) {
+        int32_t a = pwos_job_get_i16(
+            job->input + a_off + 2*(row*inner+k));
+        int32_t b = pwos_job_get_i16(
+            job->input + b_off + 2*(k*cols+col));
+        sum += a * b;
+    }
+    pwos_job_put_i32(
+        job->result + 4u + job->work_index*4u, sum);
+    ++job->work_index;
+}
+      \end{lstlisting}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Raytrace Tile 分布式渲染示例}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{渲染请求 22B}
+        \scriptsize
+        \begin{itemize}
+          \item scene\_id, tile\_x, tile\_y, tile\_w, tile\_h
+          \item image\_w, image\_h, samples, max\_depth
+          \item frame\_id, seed, camera\_phase
+          \item 最大 tile：16 $\times$ 7，结果最多 240B
+        \end{itemize}
+      \end{block}
+      \begin{block}{执行流程}
+        \scriptsize
+        \begin{enumerate}
+          \item P4 Lua 调度器把 240x320 画面切分为多个 tile
+          \item 每个 tile 作为一个 Job 提交到不同 MCU
+          \item MCU 用 smallpt 逐像素渲染
+          \item F429 LCD 节点接收 tile 结果并显示
+        \end{enumerate}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{lstlisting}[caption={\scriptsize raytrace stepping}]
+static void step_raytrace_tile(pwos_compute_job_t *job) {
+    pwos_render_request_t request;
+    if (pwos_render_decode_request(
+            job->input, job->input_len, &request) != 0) {
+        job->state = PWOS_JOB_STATE_FAILED;
+        return;
+    }
+    uint16_t pixel = pwos_smallpt_render_pixel(
+        &request, job->work_index);
+    uint32_t offset = PWOS_RENDER_RESULT_HEADER_LEN
+                    + job->work_index * 2u;
+    job->result[offset]   = (uint8_t)(pixel & 0xFFu);
+    job->result[offset+1] = (uint8_t)(pixel >> 8);
+    ++job->work_index;
+}
+      \end{lstlisting}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{计算任务演示流程}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{Shell 命令示例}
+        \scriptsize
+        \begin{enumerate}
+          \item \texttt{job caps mcu1}：查询能力
+          \item \texttt{job submit mcu1 matmul}：提交矩阵乘
+          \item \texttt{job status <id>}：查看进度
+          \item \texttt{job result <id>}：获取结果
+          \item \texttt{job cancel <id>}：取消任务
+        \end{enumerate}
       \end{block}
     \end{column}
     \begin{column}{0.48\textwidth}
       \begin{figure}
         \centering
-        \fbox{\parbox{0.85\textwidth}{\centering\vspace{2cm}控制面消息交互图\\（请替换为 mesh2\_control.pdf）\vspace{2cm}}}
-        \caption{控制面消息}
+        \fbox{\parbox{0.85\textwidth}{\centering\vspace{2cm}分布式渲染演示截图\\Job 提交 + tile 结果 + LCD 显示\\（请替换为 raytrace\_demo.png）\vspace{2cm}}}
+        \caption{计算任务演示}
       \end{figure}
     \end{column}
   \end{columns}
 \end{frame}
 
 \begin{frame}
-  \frametitle{mini9P 与统一命名空间}
+  \frametitle{任务槽位复用与取消}
   \begin{columns}[T]
     \begin{column}{0.48\textwidth}
-      \begin{block}{mini9P 协议}
-        \small
-        精简版 9P 文件协议：
-        \begin{itemize}
-          \item attach / walk / open / read
-          \item write / stat / clunk
-          \item 每个对象用 qid 标识
-        \end{itemize}
-      \end{block}
-      \begin{block}{cluster\_vfs}
+      \begin{block}{槽位复用策略}
         \small
         \begin{itemize}
-          \item 把 \texttt{/mcuN/sys/health} 映射为节点本地 \texttt{/sys/health}
-          \item 用 generation 检测节点身份变化
-          \item 防止 fd 指向错误节点
+          \item 优先找未使用的槽位
+          \item 满时选择最早完成的终止态 job（sequence 最小）
+          \item 通过 \texttt{stats.slots\_reused} 统计复用次数
         \end{itemize}
       \end{block}
     \end{column}
     \begin{column}{0.48\textwidth}
-      \begin{figure}
-        \centering
-        \fbox{\parbox{0.85\textwidth}{\centering\vspace{2cm}路径映射示意图\\（请替换为 path\_mapping.pdf）\vspace{2cm}}}
-        \caption{统一命名空间映射}
-      \end{figure}
+      \begin{block}{取消机制}
+        \small
+        \begin{itemize}
+          \item 只能在 QUEUED 或 RUNNING 状态取消
+          \item 立即把状态置为 CANCELLED
+          \item 更新 queued/active 计数
+          \item 后续 result 请求返回 CANCELLED 状态
+        \end{itemize}
+      \end{block}
     \end{column}
   \end{columns}
-\end{frame}
-
-\begin{frame}
-  \frametitle{session\_manager：并发请求管理}
-  \begin{columns}[T]
-    \begin{column}{0.48\textwidth}
-      \begin{block}{核心机制}
-        \small
-        \begin{itemize}
-          \item 最多 32 个 session，每个节点一个
-          \item 最多 8 个 pending 槽位
-          \item 按 \texttt{(数据类型, 源地址, 标签)} 匹配响应
-          \item 支持普通响应和流式分片
-        \end{itemize}
-      \end{block}
-      \begin{block}{并发策略}
-        \small
-        \begin{itemize}
-          \item 每个节点独立 client 锁
-          \item 不同节点可真正并发
-          \item boot\_id 变化时清理旧 pending
-        \end{itemize}
-      \end{block}
-    \end{column}
-    \begin{column}{0.48\textwidth}
-      \begin{figure}
-        \centering
-        \fbox{\parbox{0.85\textwidth}{\centering\vspace{2cm}pending 匹配示意图\\（请替换为 pending.pdf）\vspace{2cm}}}
-        \caption{typed pending 匹配}
-      \end{figure}
-    \end{column}
-  \end{columns}
-\end{frame}
-
-\begin{frame}
-  \frametitle{host\_coordinator：地址与路由}
-  \begin{columns}[T]
-    \begin{column}{0.48\textwidth}
-      \begin{block}{职责}
-        \small
-        \begin{itemize}
-          \item 维护最多 32 个节点
-          \item 线性扫描分配地址（1\textasciitilde253）
-          \item 处理租约续期
-          \item 根据链路状态计算路由
-        \end{itemize}
-      \end{block}
-      \begin{block}{路由计算}
-        \small
-        收到链路状态后同时生成：
-        \begin{itemize}
-          \item 正向路由：告诉 local 怎么到 peer
-          \item 反向路由：告诉 peer 怎么到 local
-        \end{itemize}
-      \end{block}
-    \end{column}
-    \begin{column}{0.48\textwidth}
-      \begin{figure}
-        \centering
-        \fbox{\parbox{0.85\textwidth}{\centering\vspace{2cm}路由计算示例图\\（请替换为 routing.pdf）\vspace{2cm}}}
-        \caption{路由下发}
-      \end{figure}
-    \end{column}
-  \end{columns}
-\end{frame}
-
-\begin{frame}
-  \frametitle{STM32 端口管理与节点控制}
-  \begin{columns}[T]
-    \begin{column}{0.48\textwidth}
-      \begin{block}{port\_manager}
-        \small
-        \begin{itemize}
-          \item 维护物理 UART 端口状态机
-          \item HELLO/ACK 发现邻居
-          \item 选择上游：主机直连 > relay
-        \end{itemize}
-      \end{block}
-      \begin{block}{node\_control}
-        \small
-        \begin{itemize}
-          \item 本机地址、上游、路由表
-          \item 非本地目的帧：查表 → TTL-1 → 转发
-          \item 多主机时选择权威主机，避免抖动
-        \end{itemize}
-      \end{block}
-    \end{column}
-    \begin{column}{0.48\textwidth}
-      \begin{figure}
-        \centering
-        \fbox{\parbox{0.85\textwidth}{\centering\vspace{2cm}节点端口状态与转发示意图\\（请替换为 node\_control.pdf）\vspace{2cm}}}
-        \caption{STM32 控制面}
-      \end{figure}
-    \end{column}
-  \end{columns}
-\end{frame}
-
-\begin{frame}
-  \frametitle{服务运行时与计算 worker}
-  \begin{columns}[T]
-    \begin{column}{0.48\textwidth}
-      \begin{block}{service\_runtime}
-        \small
-        \begin{itemize}
-          \item 本机数据面唯一入口
-          \item 串行处理 mini9P / RPC / Job
-          \item 不执行长计算
-        \end{itemize}
-      \end{block}
-      \begin{block}{compute\_worker}
-        \small
-        \begin{itemize}
-          \item 低优先级 compute\_task 增量执行
-          \item 支持 hash、向量加、矩阵乘、Mandelbrot、光线追踪 tile
-          \item 每步后主动让出 CPU
-        \end{itemize}
-      \end{block}
-    \end{column}
-    \begin{column}{0.48\textwidth}
-      \begin{figure}
-        \centering
-        \fbox{\parbox{0.85\textwidth}{\centering\vspace{2cm}计算任务调度示意图\\（请替换为 compute\_worker.pdf）\vspace{2cm}}}
-        \caption{增量计算调度}
-      \end{figure}
-    \end{column}
-  \end{columns}
-\end{frame}
-
-\begin{frame}
-  \frametitle{主机间协作}
-  \begin{columns}[T]
-    \begin{column}{0.48\textwidth}
-      \begin{block}{发现与选举}
-        \small
-        \begin{itemize}
-          \item mDNS 发布 \texttt{\_pwos.\_tcp} 服务
-          \item TCP/9909 + CBOR RPC
-          \item leader 按 \texttt{(epoch, priority, host\_uid)} 选举
-        \end{itemize}
-      \end{block}
-      \begin{block}{协作能力}
-        \small
-        \begin{itemize}
-          \item 全局节点命名同步
-          \item 跨主机 read/write
-          \item 分布式推理服务接口
-        \end{itemize}
-      \end{block}
-    \end{column}
-    \begin{column}{0.48\textwidth}
-      \begin{figure}
-        \centering
-        \fbox{\parbox{0.85\textwidth}{\centering\vspace{2cm}多主机协作拓扑图\\（请替换为 host\_rpc.pdf）\vspace{2cm}}}
-        \caption{主机间发现与协作}
-      \end{figure}
-    \end{column}
-  \end{columns}
+  \vspace{0.3cm}
+  \begin{lstlisting}[caption={\scriptsize 槽位分配与复用}]
+static pwos_compute_job_t *alloc_job_locked(pwos_compute_worker_t *worker) {
+    pwos_compute_job_t *oldest = NULL;
+    for (i = 0; i < PWOS_COMPUTE_MAX_JOBS; ++i) {
+        if (worker->jobs[i].used == 0) return &worker->jobs[i];
+        if (terminal_state(worker->jobs[i].state) &&
+            (oldest == NULL || worker->jobs[i].sequence < oldest->sequence))
+            oldest = &worker->jobs[i];
+    }
+    if (oldest != NULL) ++worker->stats.slots_reused;
+    return oldest;
+}
+  \end{lstlisting}
 \end{frame}
 
 %==============================================================================
@@ -633,6 +1193,7 @@
           \item 从 next\_addr 开始线性扫描
           \item 跳过 0x00 和 0xFF
           \item 最多 254 次尝试
+          \item 节点地址空间 1\textasciitilde 253
         \end{itemize}
       \end{block}
       \begin{block}{租约机制}
@@ -664,10 +1225,10 @@
       \end{block}
       \begin{block}{输出}
         \small
-        两条路由更新：
+        收到链路状态后同时生成：
         \begin{itemize}
-          \item 正向：告诉 local 怎么到 peer
-          \item 反向：告诉 peer 怎么到 local
+          \item 正向路由：告诉 local 怎么到 peer
+          \item 反向路由：告诉 peer 怎么到 local
         \end{itemize}
       \end{block}
       \begin{block}{节点更新}
@@ -696,9 +1257,9 @@
       \begin{block}{匹配键}
         \small
         \begin{itemize}
-          \item 数据类型
+          \item 数据类型（mini9P/RPC/Job）
           \item 源地址
-          \item 标签（wire\_tag）
+          \item 标签（wire\_tag / call\_id / request\_id）
         \end{itemize}
       \end{block}
       \begin{block}{流式响应}
@@ -750,20 +1311,29 @@
 
 \begin{frame}
   \frametitle{关键代码片段}
-  \begin{block}{片段 1：coordinator 主循环帧分发}
-    \small
-    \texttt{handle\_frame()} 根据帧类型分发：HELLO 回复 ACK，注册/租约/链路状态进入对应 handler，数据面交给 session\_manager 匹配 pending。
-  \end{block}
-  \pause
-  \begin{block}{片段 2：地址分配线性扫描}
-    \small
-    \texttt{alloc\_addr()} 从 \texttt{next\_addr} 开始扫描 1\textasciitilde253，跳过已用地址，最多 254 次尝试。
-  \end{block}
-  \pause
-  \begin{block}{片段 3：pending 匹配}
-    \small
-    \texttt{session\_manager\_deliver\_data()} 遍历 pending 表，严格匹配数据类型、源地址、标签，并校验 boot\_id 是否一致。
-  \end{block}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{片段 1：coordinator 主循环帧分发}
+        \scriptsize
+        \texttt{handle\_frame()} 根据帧类型分发：HELLO 回复 ACK，注册/租约/链路状态进入对应 handler，数据面交给 session\_manager 匹配 pending。
+      \end{block}
+      \begin{block}{片段 2：地址分配线性扫描}
+        \scriptsize
+        \texttt{alloc\_addr()} 从 \texttt{next\_addr} 开始扫描 1\textasciitilde 253，跳过已用地址，最多 254 次尝试。
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{片段 3：pending 匹配}
+        \scriptsize
+        \texttt{session\_manager\_deliver\_data()} 遍历 pending 表，严格匹配数据类型、源地址、标签，并校验 boot\_id 是否一致。
+      \end{block}
+      \begin{block}{片段 4：compute\_worker 增量 step}
+        \scriptsize
+        \texttt{pwos\_compute\_worker\_step()} 每次推进一个 work unit，更新进度，完成后让出 CPU。
+      \end{block}
+    \end{column}
+  \end{columns}
+  \vspace{0.3cm}
   \begin{figure}
     \centering
     \fbox{\parbox{0.6\textwidth}{\centering\vspace{0.6cm}关键代码截图（请替换为 code\_snippet.png）\vspace{0.6cm}}}
@@ -779,9 +1349,156 @@
     \caption{完整数据流与调用链}
   \end{figure}
   \begin{itemize}
-    \item 主机侧：路径解析 → session → UART 发送
-    \item 节点侧：UART ISR → 任务队列 → node\_control → service\_runtime → 响应返回
+    \item 主机侧：路径解析 $\rightarrow$ session $\rightarrow$ UART 发送
+    \item 节点侧：UART ISR $\rightarrow$ 任务队列 $\rightarrow$ node\_control $\rightarrow$ service\_runtime / compute\_task $\rightarrow$ 响应返回
   \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{调用链：\texttt{cat /mcu1/sys/health}}
+  \begin{table}
+    \centering
+    \scriptsize
+    \begin{tabular}{|c|p{4cm}|p{6cm}|}
+      \hline
+      \textbf{层级} & \textbf{主机侧} & \textbf{节点侧} \\
+      \hline
+      用户入口 & WebShell / HTTP & -- \\
+      \hline
+      命名空间 & cluster\_vfs 解析 /mcu1/sys/health & local\_vfs 生成 /sys/health \\
+      \hline
+      会话 & session\_manager 获取/创建 client & service\_runtime 分发 \\
+      \hline
+          协议 & mini9P client：TATTACH/TWALK/TOPEN/TREAD & mini9P server 处理 \\
+      \hline
+      传输 & link frame DATA\_MINI9P & node\_control 转发/投递 \\
+      \hline
+      物理 & UART TX & UART RX DMA + IDLE 中断 \\
+      \hline
+    \end{tabular}
+    \caption{读取健康状态的完整调用链}
+  \end{table}
+\end{frame}
+
+\begin{frame}
+  \frametitle{调用链：\texttt{job submit mcu1 matmul}}
+  \begin{table}
+    \centering
+    \scriptsize
+    \begin{tabular}{|c|p{4cm}|p{6cm}|}
+      \hline
+      \textbf{层级} & \textbf{主机侧} & \textbf{节点侧} \\
+      \hline
+      用户入口 & host\_shell：job submit & -- \\
+      \hline
+      任务管理 & job\_manager 分配 host\_job\_id & job\_service 接收 \\
+      \hline
+      会话 & session\_manager 发送 DATA\_JOB SUBMIT & service\_runtime 解析 \\
+      \hline
+      协议 & Job 协议：SUBMIT / STATUS / RESULT & Job 协议响应 \\
+      \hline
+      计算 & -- & compute\_worker 入队、compute\_task 增量执行 \\
+      \hline
+      结果 & job\_result 命令轮询 & 返回 RESULT\_RESPONSE \\
+      \hline
+    \end{tabular}
+    \caption{提交计算任务的完整调用链}
+  \end{table}
+\end{frame}
+
+%==============================================================================
+\section{错误处理与容错}
+%==============================================================================
+
+\begin{frame}
+  \frametitle{CRC 与噪声恢复}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{双层 CRC}
+        \small
+        \begin{itemize}
+          \item 头部 CRC 覆盖 magic\textasciitilde payload\_len
+          \item payload CRC 覆盖 payload，空 payload 为 0xFFFF
+          \item 头部错误可立即丢弃，不必等待完整帧
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{重同步策略}
+        \small
+        \begin{itemize}
+          \item 解码失败时扫描缓冲区中的下一个 magic
+          \item 保留未处理字节，避免丢整段数据
+          \item 流式 parser 支持任意分片
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+  \vspace{0.3cm}
+  \begin{figure}
+    \centering
+    \fbox{\parbox{0.85\textwidth}{\centering\vspace{0.8cm}噪声帧恢复示意图（请替换为 noise\_recovery.pdf）\vspace{0.8cm}}}
+    \caption{链路层错误恢复}
+  \end{figure}
+\end{frame}
+
+\begin{frame}
+  \frametitle{超时、重试与租约过期}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{请求超时}
+        \small
+        \begin{itemize}
+          \item RPC 带 deadline\_ms
+          \item session\_manager pending 槽带超时
+          \item 超时后清理 pending，返回 DEADLINE
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{租约过期}
+        \small
+        \begin{itemize}
+          \item 节点在租约过半续期
+          \item coordinator 超时未收到续期则释放地址
+          \item 节点重启后 boot\_id 变化，旧状态不混淆
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+  \vspace{0.3cm}
+  \begin{block}{节点丢失检测}
+    \small
+    结合 HELLO 超时、LEASE 超时、LINK\_STATE 缺失，coordinator 标记节点 LOST，清理路由和 pending。
+  \end{block}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Job 取消与失败处理}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{取消机制}
+        \small
+        \begin{itemize}
+          \item CANCEL\_REQUEST 在 QUEUED/RUNNING 时生效
+          \item 立即转 CANCELLED，更新计数
+          \item result 请求返回 CANCELLED 状态
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{失败来源}
+        \small
+        \begin{itemize}
+          \item 输入校验失败：BAD\_REQUEST
+          \item 槽位满：BUSY
+          \item 未知 kernel：UNSUPPORTED
+          \item 渲染请求解码失败：FAILED
+          \item 结果未准备好：NOT\_READY
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
 \end{frame}
 
 %==============================================================================
@@ -798,6 +1515,7 @@
           \item 控制面与数据面严格分离
           \item 主机集中协调，节点只维护本地状态
           \item 多主机 leader 选举与全局命名
+          \item 统一文件抽象覆盖诊断、RPC、Job
         \end{itemize}
       \end{block}
     \end{column}
@@ -809,15 +1527,11 @@
           \item 固定任务、固定帧池、固定 job 槽位
           \item typed pending 精确匹配
           \item generation 机制保证一致性
+          \item 共享协议模块提供 PC 单元测试
         \end{itemize}
       \end{block}
     \end{column}
   \end{columns}
-  \vspace{0.3cm}
-  \begin{block}{可测试性}
-    \small
-    共享协议模块均提供 PC 单元测试；session\_manager 同步回调可注入，便于测试并发场景。
-  \end{block}
 \end{frame}
 
 \begin{frame}
@@ -830,6 +1544,7 @@
           \item \texttt{cat /mcu1/sys/health}
           \item \texttt{rpc mcu1 system.ping hello}
           \item \texttt{job submit mcu1 matmul}
+          \item \texttt{job submit mcu1 mandelbrot}
         \end{itemize}
       \end{block}
     \end{column}
@@ -863,6 +1578,7 @@
           \item 地址分配：最多 254 次扫描
           \item 路由查找：小表线性扫描
           \item 计算任务：增量执行，不阻塞通信
+          \item 结果进度粒度：1\textperthousand
         \end{itemize}
       \end{block}
     \end{column}
