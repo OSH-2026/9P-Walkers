@@ -36,6 +36,7 @@ static uint32_t effective_deadline(
     const pwos_session_manager_t *manager,
     uint32_t requested_deadline_ms)
 {
+    /* 0 表示调用者接受默认值；默认值也可能由 init config 覆盖。 */
     if (requested_deadline_ms != 0u) {
         return requested_deadline_ms;
     }
@@ -51,6 +52,7 @@ static pwos_session_entry_t *find_session_locked(
 {
     size_t i;
 
+    /* 该函数要求调用者已经持有 manager_lock，避免 session 表被并发修改。 */
     for (i = 0u; i < PWOS_SESSION_MANAGER_MAX_SESSIONS; ++i) {
         if (manager->sessions[i].used != 0u && manager->sessions[i].addr == addr) {
             return &manager->sessions[i];
@@ -90,6 +92,10 @@ static uint8_t tag_is_active_locked(
 {
     size_t i;
 
+    /*
+     * wire_tag 在 manager 内全局递增。虽然响应匹配还包含 data_type/src_addr，
+     * 这里仍避免任何 active pending 复用同一个 tag，方便日志和排错。
+     */
     for (i = 0u; i < PWOS_SESSION_MANAGER_MAX_PENDING; ++i) {
         if (manager->pending[i].used != 0u && manager->pending[i].wire_tag == tag) {
             return 1u;
@@ -102,6 +108,7 @@ static uint16_t alloc_wire_tag_locked(pwos_session_manager_t *manager)
 {
     uint32_t attempts;
 
+    /* tag=0 作为无效值保留，因此递增后如果回绕到 0 要再跳一次。 */
     for (attempts = 0u; attempts < UINT16_MAX; ++attempts) {
         ++manager->next_wire_tag;
         if (manager->next_wire_tag == 0u) {
@@ -126,6 +133,7 @@ static int reserve_pending_locked(
     uint16_t wire_tag;
     uint32_t count;
 
+    /* 找一个空 pending 槽；满了直接让调用者收到 QUEUE_FULL，不动态扩容。 */
     for (i = 0u; i < PWOS_SESSION_MANAGER_MAX_PENDING; ++i) {
         if (manager->pending[i].used == 0u) {
             break;
@@ -140,6 +148,10 @@ static int reserve_pending_locked(
         return PWOS_SESSION_ERR_QUEUE_FULL;
     }
 
+    /*
+     * pending_reset 清空平台层等待事件，防止复用槽位时吃到上一次 signal。
+     * FreeRTOS 端是 binary semaphore，PC 测试端是 condition/event 标志。
+     */
     if (manager->config.pending_reset != NULL) {
         manager->config.pending_reset(manager->config.sync_ctx, (uint8_t)i);
     }
@@ -147,9 +159,11 @@ static int reserve_pending_locked(
     manager->pending[i].used = 1u;
     manager->pending[i].streaming = streaming;
     manager->pending[i].data_type = data_type;
+    /* 响应必须来自这个 addr；来源不符会被 deliver_data() 计为 unmatched。 */
     manager->pending[i].src_addr = session->addr;
     manager->pending[i].session_index = session->index;
     manager->pending[i].wire_tag = wire_tag;
+    /* 记录 boot_id 是为了响应回来时发现节点已经重启，避免旧响应污染新会话。 */
     manager->pending[i].boot_id = session->boot_id;
 
     count = pending_count_locked(manager);
@@ -197,6 +211,7 @@ static int wait_for_pending(
 
         manager_lock(manager);
         pending = &manager->pending[pending_index];
+        /* 槽位被 reset_node/update_node 清掉，说明请求绑定的 boot 已失效。 */
         if (pending->used == 0u) {
             manager_unlock(manager);
             return PWOS_SESSION_ERR_STALE_BOOT;
@@ -204,6 +219,7 @@ static int wait_for_pending(
         if (pending->completed != 0u) {
             rc = (int)pending->status;
             if (rc == 0) {
+                /* response 先存入固定 pending 缓冲，再在等待方上下文拷贝给调用者。 */
                 if ((size_t)pending->response_len > rx_cap) {
                     rc = -(int)M9P_ERR_EMSIZE;
                 } else {
@@ -225,6 +241,10 @@ static int wait_for_pending(
         }
         manager_unlock(manager);
 
+        /*
+         * 如果平台没有 pending_wait 回调，说明没有异步等待机制；
+         * PC 同步假链路会在 send() 内直接 deliver，否则这里按超时处理。
+         */
         if (manager->config.pending_wait == NULL) {
             rc = PWOS_SESSION_ERR_DEADLINE;
         } else {
@@ -237,6 +257,7 @@ static int wait_for_pending(
         manager_lock(manager);
         if (manager->pending[pending_index].used != 0u &&
             manager->pending[pending_index].completed != 0u) {
+            /* 避免 wait 返回和 signal 竞争：如果刚好已完成，回到循环顶部收结果。 */
             manager_unlock(manager);
             continue;
         }
@@ -246,6 +267,7 @@ static int wait_for_pending(
             manager_lock(manager);
             release_pending_locked(manager, pending_index);
             manager_unlock(manager);
+            /* pending_wait 的具体错误统一映射到 deadline，NO_ROUTE 是保留透传。 */
             return rc == PWOS_SESSION_ERR_NO_ROUTE ? rc : PWOS_SESSION_ERR_DEADLINE;
         }
 
@@ -253,6 +275,7 @@ static int wait_for_pending(
             uint32_t elapsed = now_ms(manager) - start;
 
             if (elapsed >= deadline_ms) {
+                /* 真正超时后释放 pending 槽，后续迟到响应会变成 unmatched。 */
                 manager_lock(manager);
                 release_pending_locked(manager, pending_index);
                 manager_unlock(manager);
@@ -316,6 +339,10 @@ static int session_transport(
         return -(int)M9P_ERR_ENOTSUP;
     }
 
+    /*
+     * m9p_client 自己生成的 tag 只是本地 tag。真正上 wire 前复制一份，
+     * 然后替换成 session_manager 分配的全局 wire_tag。
+     */
     memcpy(wire_data, tx_data, tx_len);
     manager_lock(manager);
     if (session->resetting != 0u) {
@@ -325,7 +352,7 @@ static int session_transport(
     rc = reserve_pending_locked(
         manager,
         session,
-        0x80u,
+        0x80u, /* DATA_MINI9P：这里没有直接包含 pwos_link_frame.h，保持轻依赖。 */
         0u,
         &pending_index,
         &wire_tag);
@@ -346,6 +373,7 @@ static int session_transport(
         return -(int)M9P_ERR_EIO;
     }
 
+    /* send 只负责把 DATA_MINI9P payload 发出去，响应由唯一 RX consumer 调 deliver。 */
     rc = manager->config.send(
         manager->config.io_ctx,
         0x80u,
@@ -366,6 +394,7 @@ static int session_transport(
     manager_unlock(manager);
     *rx_len = 0u;
 
+    /* 等待 deliver_mini9p()/deliver_data() 按 (type,src,wire_tag) 命中该 pending。 */
     rc = wait_for_pending(
         manager,
         pending_index,
@@ -392,7 +421,10 @@ static int session_transport(
     ++manager->stats.rx_responses;
     manager_unlock(manager);
 
-    /* mini9P client 仍校验自己的本地 tag，因此返回前恢复原 tag。 */
+    /*
+     * mini9P client 只知道 tx_view.tag；如果不把响应 tag 改回本地 tag，
+     * request_with_frame() 会认为响应 ETAG。wire_tag 只存在于 session 层。
+     */
     if (!m9p_retag_frame(rx_data, *rx_len, tx_view.tag)) {
         return -(int)M9P_ERR_EIO;
     }
@@ -474,6 +506,7 @@ int pwos_session_manager_update_node(
     manager_lock(manager);
     session = find_session_locked(manager, addr);
     if (session == NULL) {
+        /* 第一次看到该地址：创建 session，并初始化绑定到该 session 的 mini9P client。 */
         session = alloc_session_locked(manager);
         if (session == NULL) {
             manager_unlock(manager);
@@ -492,10 +525,15 @@ int pwos_session_manager_update_node(
     }
 
     if (session->boot_id == boot_id && session->resetting == 0u) {
+        /* 同一 addr/boot_id 的重复同步是幂等的，不需要重新 attach。 */
         manager_unlock(manager);
         return 0;
     }
 
+    /*
+     * boot_id 变化代表节点重启。先标记 resetting 并取消所有旧 pending，
+     * 再拿 client_lock 重置 mini9P client，避免旧请求和新会话交叉。
+     */
     index = session->index;
     session->resetting = 1u;
     signal_count = cancel_pending_for_session_locked(manager, index, signal_indices);
@@ -534,6 +572,7 @@ void pwos_session_manager_reset_node(pwos_session_manager_t *manager, uint8_t ad
     }
     index = session->index;
     session->resetting = 1u;
+    /* reset_node 不改变 boot_id，只让当前 session 断开 attach 并唤醒等待者。 */
     signal_count = cancel_pending_for_session_locked(manager, index, signal_indices);
     manager_unlock(manager);
     signal_pending_indices(manager, signal_indices, signal_count);
@@ -568,11 +607,13 @@ int pwos_session_manager_acquire_client(
     manager_lock(manager);
     session = find_session_locked(manager, addr);
     if (session == NULL) {
+        /* cluster_vfs 尚未从 coordinator 同步该节点，或者节点已经离线。 */
         ++manager->stats.no_route_errors;
         manager_unlock(manager);
         return PWOS_SESSION_ERR_NO_ROUTE;
     }
     if (session->boot_id != boot_id || session->resetting != 0u) {
+        /* 调用方拿到的是旧 route_ref，拒绝继续使用旧 boot 的 client。 */
         ++manager->stats.stale_boot_errors;
         manager_unlock(manager);
         return PWOS_SESSION_ERR_STALE_BOOT;
@@ -583,6 +624,10 @@ int pwos_session_manager_acquire_client(
     client_lock(manager, index);
     manager_lock(manager);
     session = &manager->sessions[index];
+    /*
+     * 双重检查：拿 client_lock 期间 update_node/reset_node 可能已经改变状态，
+     * 所以持有 client 锁后还要重新校验 addr/boot_id/resetting。
+     */
     if (session->used == 0u || session->addr != addr ||
         session->boot_id != boot_id || session->resetting != 0u) {
         ++manager->stats.stale_boot_errors;
@@ -680,6 +725,7 @@ int pwos_session_manager_deliver_data(
     for (i = 0u; i < PWOS_SESSION_MANAGER_MAX_PENDING; ++i) {
         pwos_session_pending_t *pending = &manager->pending[i];
 
+        /* 普通响应只匹配非 streaming pending，匹配键是 (data_type, src_addr, wire_tag)。 */
         if (pending->used == 0u || pending->completed != 0u ||
             pending->streaming != 0u ||
             pending->data_type != data_type || pending->src_addr != src_addr ||
@@ -689,6 +735,7 @@ int pwos_session_manager_deliver_data(
         if (pending->session_index >= PWOS_SESSION_MANAGER_MAX_SESSIONS ||
             manager->sessions[pending->session_index].boot_id != pending->boot_id ||
             manager->sessions[pending->session_index].resetting != 0u) {
+            /* 响应虽命中 tag，但所属节点已经换 boot，等待方收到 STALE_BOOT。 */
             pending->status = PWOS_SESSION_ERR_STALE_BOOT;
         } else {
             memcpy(pending->response, payload, payload_len);
@@ -741,6 +788,7 @@ int pwos_session_manager_deliver_data_part(
     for (i = 0u; i < PWOS_SESSION_MANAGER_MAX_PENDING; ++i) {
         pwos_session_pending_t *pending = &manager->pending[i];
 
+        /* 流式响应必须命中 streaming pending，普通 deliver_data() 不会消费它。 */
         if (pending->used == 0u || pending->completed != 0u ||
             pending->streaming == 0u || pending->data_type != data_type ||
             pending->src_addr != src_addr || pending->wire_tag != wire_tag) {
@@ -775,6 +823,7 @@ int pwos_session_manager_deliver_data_part(
                 ++pending->stream_parts;
                 ++manager->stats.stream_parts_delivered;
             } else {
+                /* final part 不携带序号，status_or_part_index 改为远端最终状态。 */
                 pending->remote_status = status_or_part_index;
                 pending->status = 0;
                 pending->completed = 1u;
@@ -854,6 +903,7 @@ static int request_data_internal(
     if (out_part_count != NULL) {
         *out_part_count = 0u;
     }
+    /* request 是协议层本地帧；wire_data 会被 retag 后发到链路层。 */
     memcpy(wire_data, request, request_len);
 
     manager_lock(manager);
@@ -868,6 +918,7 @@ static int request_data_internal(
         manager_unlock(manager);
         return PWOS_SESSION_ERR_STALE_BOOT;
     }
+    /* RPC/Job 通过 data_type 区分，因此可以和 mini9P 共用同一个 pending 表。 */
     rc = reserve_pending_locked(
         manager, session, data_type, streaming, &pending_index, &wire_tag);
     manager_unlock(manager);
@@ -876,6 +927,7 @@ static int request_data_internal(
         return rc;
     }
     *out_wire_tag = wire_tag;
+    /* retag 把 RPC call_id 或 Job request_id 改成统一分配的 wire_tag。 */
     if (retag(wire_data, request_len, wire_tag) != 0) {
         manager_lock(manager);
         release_pending_locked(manager, pending_index);
@@ -901,6 +953,7 @@ static int request_data_internal(
     ++session->tx_requests;
     ++manager->stats.tx_requests;
     manager_unlock(manager);
+    /* streaming=1 时等待 final part；streaming=0 时等待单个完整响应。 */
     rc = wait_for_pending(
         manager,
         pending_index,
@@ -1043,6 +1096,10 @@ int pwos_session_manager_send_oneway_data(
         manager_unlock(manager);
         return PWOS_SESSION_ERR_STALE_BOOT;
     }
+    /*
+     * fire-and-forget 不占 pending 槽，但仍分配非零 wire_tag，
+     * 方便远端日志和本地主调侧统计关联。
+     */
     wire_tag = alloc_wire_tag_locked(manager);
     manager_unlock(manager);
     if (wire_tag == 0u) {

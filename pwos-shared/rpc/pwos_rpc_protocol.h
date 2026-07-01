@@ -40,11 +40,16 @@ typedef enum {
 } pwos_rpc_status_t;
 
 typedef struct {
+    /* kind/flags 决定这是 REQUEST、RESPONSE、CANCEL 还是流式 chunk/end。 */
     uint8_t kind;
     uint8_t flags;
+    /* call_id 等于 session_manager 分配的 wire_tag，用于响应匹配。 */
     uint16_t call_id;
+    /* RESPONSE/STREAM_END 的远端业务状态；STREAM_CHUNK 中承载 chunk 序号。 */
     uint16_t status;
+    /* REQUEST 写入远端业务 deadline，远端服务可据此主动停止。 */
     uint32_t deadline_ms;
+    /* REQUEST 才携带 service/method；响应类帧这些字段长度必须为 0。 */
     const uint8_t *service;
     uint8_t service_len;
     const uint8_t *method;

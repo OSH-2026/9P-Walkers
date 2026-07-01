@@ -31,8 +31,9 @@ static int request_with_frame(
         size_t rx_len = 0u;
         int rc;
         /*
-         * M5 会把这个同步 transport 回调接到新的 DATA_MINI9P/session 层。
-         * 这里保持协议 client 只关心 tag/type 校验，不依赖具体通信栈。
+         * transport 是协议层和数据面之间的唯一接口：
+         * 在 ESP32 主机上它就是 session_transport()，负责 pending/tag/deadline。
+         * mini9P client 本身只关心请求帧、响应帧、tag/type 校验。
          */
         rc = client->transport(
             client->transport_ctx,
@@ -43,6 +44,7 @@ static int request_with_frame(
             &rx_len);
         if ((rc == -(int)M9P_ERR_EAGAIN || rc == -(int)M9P_ERR_EBUSY) &&
             (attempt + 1u) < M9P_CLIENT_TIMEOUT_RETRY_ATTEMPTS) {
+            /* 只对协议级暂时不可用重试；deadline/stale_boot 这类会直接返回。 */
             continue;
         }
         if (rc != 0) {
@@ -55,6 +57,7 @@ static int request_with_frame(
             return -(int)M9P_ERR_EINVAL;
         }
         if (frame.tag != expected_tag) {
+            /* session_transport 返回前会把 wire_tag 改回本地 tag，所以这里仍能严格校验。 */
             return -(int)M9P_ERR_ETAG;
         }
         if (frame.type == M9P_RERROR) {
@@ -101,6 +104,7 @@ void m9p_client_reset_session(struct m9p_client *client)
         return;
     }
 
+    /* 节点重启或 session reset 后，清空协商状态与 root qid。 */
     client->next_tag = 1u;
     client->next_fid = M9P_FIRST_DYNAMIC_FID;
     client->negotiated_msize = 256u;
@@ -125,6 +129,7 @@ uint16_t m9p_client_alloc_fid(struct m9p_client *client)
         return 0u;
     }
 
+    /* fid 只在单个 mini9P session 内有效，节点重启后会由 reset_session 归零。 */
     fid = client->next_fid;
     ++client->next_fid;
     if (client->next_fid < M9P_FIRST_DYNAMIC_FID || client->next_fid == M9P_ROOT_FID) {
@@ -450,6 +455,7 @@ int m9p_client_walk_path(struct m9p_client *client, const char *path, uint16_t *
         return -(int)M9P_ERR_EPERM;
     }
 
+    /* cluster_vfs open/stat 使用这个 helper：从 root fid walk 到远端绝对路径。 */
     fid = m9p_client_alloc_fid(client);
     if (fid < M9P_FIRST_DYNAMIC_FID) {
         return -(int)M9P_ERR_EFID;
@@ -491,6 +497,7 @@ int m9p_client_open_path(
         return -(int)M9P_ERR_EINVAL;
     }
 
+    /* open_path = walk 分配 fid + open；open 失败时必须 clunk 释放 fid。 */
     rc = m9p_client_walk_path(client, path, &fid, &qid);
     if (rc != 0) {
         return rc;

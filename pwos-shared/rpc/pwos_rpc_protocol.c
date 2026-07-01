@@ -72,6 +72,7 @@ int pwos_rpc_encode(
         (payload_len > 0u && payload == NULL)) {
         return -1;
     }
+    /* 只有 REQUEST 携带 service/method，响应、cancel、stream chunk/end 不携带名称。 */
     if (kind == PWOS_RPC_KIND_REQUEST &&
         (service_len == 0u || method_len == 0u)) {
         return -1;
@@ -85,6 +86,7 @@ int pwos_rpc_encode(
         return -1;
     }
 
+    /* 头部固定 16 字节，后面紧跟 service、method、payload 三段变长区域。 */
     memset(out, 0, PWOS_RPC_HEADER_LEN);
     out[RPC_OFF_VERSION] = PWOS_RPC_VERSION;
     out[RPC_OFF_KIND] = kind;
@@ -132,6 +134,7 @@ int pwos_rpc_decode(
     }
     expected = PWOS_RPC_HEADER_LEN + frame[RPC_OFF_SERVICE_LEN] +
         frame[RPC_OFF_METHOD_LEN] + get_le16(frame + RPC_OFF_PAYLOAD_LEN);
+    /* 长度必须精确匹配，防止截断帧或多余字节被误接受。 */
     if (expected != frame_len ||
         (frame[RPC_OFF_KIND] == PWOS_RPC_KIND_REQUEST &&
          (frame[RPC_OFF_SERVICE_LEN] == 0u || frame[RPC_OFF_METHOD_LEN] == 0u)) ||
@@ -165,6 +168,7 @@ int pwos_rpc_retag(uint8_t *frame, size_t frame_len, uint16_t call_id)
     if (pwos_rpc_decode(frame, frame_len, &view) != 0) {
         return -1;
     }
+    /* RPC 内层没有 CRC，完整性由外层 link payload CRC 负责。 */
     put_le16(frame + RPC_OFF_CALL_ID, call_id);
     return 0;
 }

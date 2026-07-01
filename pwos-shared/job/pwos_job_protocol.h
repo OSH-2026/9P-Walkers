@@ -60,13 +60,21 @@ typedef enum {
 } pwos_job_status_t;
 
 typedef struct {
+    /* kind 表示操作类型：caps/submit/status/result/cancel。 */
     uint8_t kind;
+    /* state 是远端任务当前状态，也会同步到主机 job_manager。 */
     uint8_t state;
+    /* kernel 表示 hash/vector_add/matmul/mandelbrot/raytrace_tile。 */
     uint8_t kernel;
+    /* request_id 等于 session_manager 分配的 wire_tag，用于匹配本次操作响应。 */
     uint16_t request_id;
+    /* status 是远端业务状态，如 OK/NOT_READY/NOT_FOUND。 */
     uint16_t status;
+    /* job_id 是 STM32 远端 job id；主机侧另有 host_job_id。 */
     uint32_t job_id;
+    /* 0..1000 表示 0.0%..100.0%。 */
     uint16_t progress_permille;
+    /* result_len 是完整结果长度；payload 可能只是本次返回的一部分。 */
     uint32_t result_len;
     const uint8_t *payload;
     uint16_t payload_len;

@@ -116,6 +116,7 @@ static int resolve_target(
     if (target == NULL || target[0] == '\0') {
         return -(int)M9P_ERR_EINVAL;
     }
+    /* 命令层只认识 mcuN 字符串；addr/boot_id 一定交给外部 resolver。 */
     return command->config.resolve(
         command->config.resolve_ctx, target, out_addr, out_boot_id);
 }
@@ -130,6 +131,7 @@ static int build_submit_input(
     char *arg;
 
     if (kernel == PWOS_JOB_KERNEL_HASH) {
+        /* hash 的 payload 就是原始文本字节，STM32 端计算 FNV-1a。 */
         char *text = trim_left(cursor);
         size_t len;
 
@@ -145,6 +147,7 @@ static int build_submit_input(
     }
 
     if (kernel == PWOS_JOB_KERNEL_VECTOR_ADD) {
+        /* vector_add payload: count + int16 向量 A + int16 向量 B。 */
         uint32_t count = 8u;
         uint32_t i;
 
@@ -167,6 +170,7 @@ static int build_submit_input(
     }
 
     if (kernel == PWOS_JOB_KERNEL_MATMUL) {
+        /* matmul 这里内置 2x2 验收样例，便于答辩现场演示。 */
         static const int16_t a[] = {1, 2, 3, 4};
         static const int16_t b[] = {5, 6, 7, 8};
         size_t i;
@@ -189,6 +193,7 @@ static int build_submit_input(
     }
 
     if (kernel == PWOS_JOB_KERNEL_MANDELBROT) {
+        /* Mandelbrot 使用 Q16 定点坐标参数，避免 MCU 浮点依赖。 */
         uint32_t width = 16u;
         uint32_t height = 16u;
         uint32_t max_iter = 80u;
@@ -332,6 +337,7 @@ static int execute_submit(
     }
     rc = resolve_target(command, target, &addr, &boot_id);
     if (rc == 0) {
+        /* 文本命令最终只调用 job_manager_submit()，不直接接触 session_manager。 */
         rc = pwos_job_manager_submit(
             command->config.manager,
             target,
@@ -459,6 +465,7 @@ static int execute_existing(
         output_append(output, "job %s: transport error=%d\r\n", operation, rc);
         return rc;
     }
+    /* 所有已有 job 操作先输出 job 元数据，再按需输出 result 内容。 */
     render_entry(output, &entry);
     if (status == PWOS_JOB_STATUS_OK && strcmp(operation, "result") == 0) {
         render_result(output, &entry, result, result_len);
