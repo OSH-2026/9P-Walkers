@@ -20,8 +20,7 @@
             "name": "F407Debug",
             "inherits": "default",
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Debug",
-                "PWOS_ENABLE_MINI9P_SERIAL": "ON"
+                "CMAKE_BUILD_TYPE": "Debug"
             }
         },
         {

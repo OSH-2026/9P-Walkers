@@ -341,6 +341,18 @@ static void test_job_command(void)
     CHECK(strcmp(output, "id=7 state=queued\r\n") == 0);
 }
 
+static void test_optional_llm_command(void)
+{
+    pwos_command_service_t service;
+    fake_io_t io;
+    char output[512];
+
+    init_service(&service, &io);
+    CHECK(execute(&service, "llm status", output, sizeof(output)) ==
+          -(int)M9P_ERR_ENOTSUP);
+    CHECK(strcmp(output, "llm: unavailable\r\n") == 0);
+}
+
 int main(void)
 {
     test_paths_and_aliases();
@@ -349,6 +361,7 @@ int main(void)
     test_fault_command();
     test_rpc_commands();
     test_job_command();
+    test_optional_llm_command();
 
     if (g_failures != 0) {
         printf("pwos command service tests failed: %d\n", g_failures);

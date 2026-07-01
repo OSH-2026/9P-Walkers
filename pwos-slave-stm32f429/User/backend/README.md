@@ -5,11 +5,15 @@
 
 ```text
 /
-└── /sys
-    ├── health      tasks       ports       links
-    ├── neighbors   routes      sessions    queues
-    ├── log         build       fault
-    └── info/uart   compatibility aliases
+├── /sys
+│   ├── health      tasks       ports       links
+│   ├── neighbors   routes      sessions    queues
+│   ├── log         build       fault
+│   └── info/uart   compatibility aliases
+├── /compute
+│   ├── caps        load        jobs
+└── /display
+    ├── status      tile
 ```
 
 ## 所有权
@@ -19,5 +23,6 @@
 - `fault_control`：Debug 构建的故障注入状态；`/sys/fault` 是唯一可写节点。
 - `mini9p_server`：fid、open mode、offset 和请求响应协议。
 
-旧的 `node_vfs/sys_vfs/dev_vfs/lfs_vfs` 未进入重构后运行时，已经删除。存储
-驱动仍独立保留，后续重新接入 `/fs` 时应基于当前 session/并发约束设计新后端。
+旧的 `node_vfs/sys_vfs/dev_vfs/lfs_vfs`、littlefs/SD 实验后端和立方体 demo
+已删除。后续重新引入持久化 `/fs` 时，应作为独立 backend 接入当前
+session/并发模型。

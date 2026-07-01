@@ -1,55 +1,25 @@
-# 增加 TCP/9000 WiFi 透传链路
+# TCP/9000 WiFi mesh 透传
 
 ## 状态
 
-accepted
+superseded
 
-## 上下文
+## 历史决策
 
-ESP32-P4 主控板不带 WiFi 射频，但集群中的某些从机可能通过 WiFi 模块（ESP8266/ESP32 等 AT 透传模块）接入局域网。需要一种机制让这些 WiFi 节点也能像 UART 节点一样收发 mesh 帧，而不改变上层 mesh runtime 的语义。
+早期方案计划让 P4 监听 TCP/9000，把 STM32 mesh envelope 原样透传给外部 WiFi
+模块，并把该连接伪装成一个 UART 入口。
 
-## 决策
+## 废弃原因
 
-在 ESP32-P4 主机侧增加 `mesh_wifi_link`：
+- 它把 STM32 路由平面延伸到 IP 网络，模糊 owner host 的边界。
+- 单连接地址学习和 bootstrap 广播难以支持可靠多主机。
+- P4、S3 已经需要独立的主机发现、选主和跨主机服务协议。
 
-- 主机监听固定 TCP 端口（默认 `9000`）。
-- WiFi 透传模块作为 TCP client 连入后，原始 mesh 帧以字节流形式在该 TCP 连接上透传。
-- 帧边界仍由 mesh envelope 的 `Magic + FrameLen` 自描述。
-- `mesh_host_service` 把 WiFi 链路与 UART 链路并列处理：接收时先扫描 WiFi，发送时对已学习地址走 WiFi 单播，对 bootstrap 帧（`dst=0xFF`）同时向 WiFi 和 UART 广播。
+## 替代方案
 
-## 理由
+- P4 使用 Ethernet，S3 使用 WiFi，二者进入主机间 IP 平面。
+- 主机通过 mDNS `_pwos._tcp` 和 TCP/9909 CBOR host RPC 通信。
+- 每台主机只终止和管理自己的 STM32 UART 子树。
+- 跨主机访问由 owner host 代理，不透传 link frame。
 
-1. **与 UART 同构**：上层 runtime 看不到传输介质差异，只需处理“原始 mesh 帧”。
-2. **复用现有 envelope**：不需要为 WiFi 单独设计帧格式。
-3. **最小化硬件改动**：ESP32-P4 通过以太网接入局域网，WiFi 由外部模块完成。
-4. **bootstrap 兼容性**：对未分配地址的节点，ASSIGN 必须同时走 WiFi 和 UART 广播，否则 WiFi 侧节点收不到地址分配。
-
-## 共存策略
-
-| 场景 | 发送路径 |
-|------|----------|
-| `next_hop` 已学习为 WiFi 可达 | 仅走 `mesh_wifi_link_send_frame()` |
-| `next_hop == MESH_ADDR_UNASSIGNED`（bootstrap） | WiFi + UART 同时广播 |
-| 其他情况 | 走 UART |
-
-接收路径：`mesh_host_service_receive_frame()` 先调用 `mesh_wifi_link_receive_frame()`，命中时返回虚拟入口端口 `MESH_HOST_SERVICE_WIFI_INGRESS_PORT`（`0x80`）。
-
-## 当前限制
-
-- 只支持一个 TCP client；新连接替换旧连接。
-- 一条 TCP 链路可承载多个下游节点（relay），通过 src 地址学习表区分。
-- 当前不实现 TCP keepalive，断链依赖 `send/recv` 失败检测。
-- ESP32-P4 独占；PC 测试环境为空实现。
-
-## 影响
-
-- `pwos-master-esp32p4/mesh/` 增加 `mesh_wifi_link.c/.h`。
-- `mesh_host_service.c` 的收发路径增加 WiFi 分支。
-- mesh 协议保留 `MESH_PORT_SELECTOR_WIFI_ID`（bit 7）供未来声明 WiFi 能力。
-
-## 相关文件
-
-- `pwos-master-esp32p4/mesh/mesh_wifi_link.c/.h`
-- `pwos-master-esp32p4/mesh/mesh_host_service.c`
-- `pwos-shared/mesh/envelope/mesh_protocal.h`
-- `docs/mesh_wifi_link.md`
+现行设计见 `docs/host_network.md`。旧 `mesh_wifi_link` 实现和专用文档已经删除。

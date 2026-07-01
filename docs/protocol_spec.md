@@ -1,208 +1,145 @@
-# 9P-Walkers 协议规范（v1）
+# 9P-Walkers 协议规范
 
-本项目的通信协议分为两层：
+现行协议分为 STM32 有线平面和 ESP32 主机间平面。源码头文件是字段定义的最终依据。
 
-1. **Mesh Envelope v1**：负责节点编址、多跳转发、控制面消息（发现、分配、路由、拓扑）。
-2. **mini9P v1**：负责文件访问语义（attach/walk/open/read/write/stat/clunk），作为 `MESH_TYPE_MINI9P` 的 payload 被 mesh envelope 承载。
+## 1. Link Frame v2
 
-> 线缆上实际传输的是 **mesh envelope 帧**，mini9P 帧不再直接出现。旧版文档中“mini9P 直接跑在 UART/SPI/WiFi 上”的描述已过时。
+定义：`pwos-shared/link/pwos_link_frame.h`
 
----
-
-## 1. Mesh Envelope 层
-
-Mesh Envelope 是项目当前的底层网络协议，定义在 `pwos-shared/mesh/envelope/mesh_protocal.h`。
-
-详细规范见：
-
-- `pwos-shared/mesh/envelope/mesh_protocol_spec.md`
-- `docs/mesh_envelope_spec.md`（本文档的镜像副本，便于顶层查阅）
-
-### 1.1 帧格式
+所有多字节字段使用小端序，总长度为 `19 + payload_len`，payload 最大 512 字节。
 
 ```text
-| Magic(2) | FrameLen(2) | Version(1) | Type(1) | Src(1) | Dst(1) |
-| Seq(2)   | Hop(1)      | Flags(1)   | Payload(N)             | CRC16(2) |
+offset size field
+0      2    magic = 'M' 'H'
+2      1    version = 2
+3      1    hdr_len = 19
+4      1    type
+5      1    flags
+6      1    src
+7      1    dst
+8      1    ttl
+9      2    seq
+11     2    ack
+13     2    payload_len
+15     2    header_crc
+17     2    payload_crc
+19     N    payload
 ```
 
-- `Magic = "MH"`。
-- `FrameLen = 8 + payload_len`；整帧长度 = `FrameLen + 6`。
-- `Version = 0x01`；所有整数小端序。
-- `Src/Dst`：短地址，`0x00` 为主机，`0xFF` 为未分配。
-- `Hop`：剩余跳数，转发时递减；到 0 丢帧。
-- `Flags`：`NEEDS_ACK(0x01)` / `IS_RETRY(0x02)` / `CONTROL(0x04)`。
-- CRC-16/CCITT-FALSE 覆盖 `Version..Payload`。
+CRC 使用 CRC-16/CCITT-FALSE。头 CRC 覆盖 `magic..payload_len`，payload CRC 只覆盖
+payload。流式 parser 支持任意分块输入、半帧保留、噪声重同步和非法长度拒绝。
 
-### 1.2 消息类型
+### 1.1 类型
 
-| 类型 | 值 | 平面 | 用途 |
-|---|---:|---|---|
-| `MESH_TYPE_MINI9P` | 0x01 | 数据面 | 承载完整 mini9P 帧 |
-| `MESH_TYPE_REGISTER` | 0x10 | 控制面 | 新节点 bootstrap 注册 |
-| `MESH_TYPE_ASSIGN` | 0x11 | 控制面 | 主机分配地址与节点名 |
-| `MESH_TYPE_PING` | 0x12 | 控制面 | 探活请求 |
-| `MESH_TYPE_PONG` | 0x13 | 控制面 | 探活响应 |
-| `MESH_TYPE_TIME_SYNC` | 0x14 | 控制面 | 四时间戳同步 |
-| `MESH_TYPE_ROUTE_UPDATE` | 0x15 | 控制面 | 路由项更新 |
-| `MESH_TYPE_LINK_STATE` | 0x16 | 控制面 | 邻居链路状态上报 |
-| `MESH_TYPE_NEIGHBOR_PROBE_REQUEST` | 0x17 | 控制面 | 单链路邻居探测请求 |
-| `MESH_TYPE_NEIGHBOR_PROBE_RESPONSE` | 0x18 | 控制面 | 单链路邻居探测响应 |
-| `MESH_TYPE_ERROR` | 0x7F | 控制面 | 错误上报 |
+| 值 | 名称 | 作用域 |
+|---:|---|---|
+| `0x01` | `LINK_HELLO` | 物理邻居发现 |
+| `0x02` | `LINK_HELLO_ACK` | HELLO 确认 |
+| `0x03` | `LINK_HEARTBEAT` | 链路保活预留 |
+| `0x04` | `LINK_ERROR` | 链路错误 |
+| `0x10` | `CTRL_NODE_REGISTER` | 节点注册 |
+| `0x11` | `CTRL_ADDR_ASSIGN` | 地址和 lease 分配 |
+| `0x12` | `CTRL_LEASE_RENEW` | lease 续期 |
+| `0x13` | `CTRL_LEASE_ACK` | 续期确认 |
+| `0x14` | `CTRL_LINK_STATE` | 邻接上报 |
+| `0x15` | `CTRL_ROUTE_UPDATE` | 路由设置/删除 |
+| `0x16` | `CTRL_HOST_ADVERTISE` | 主机 authority 通告 |
+| `0x17` | `CTRL_TIME_SYNC` | 时间同步预留 |
+| `0x1f` | `CTRL_ERROR` | 控制面错误 |
+| `0x80` | `DATA_MINI9P` | mini9P |
+| `0x81` | `DATA_RPC` | MCU RPC |
+| `0x82` | `DATA_JOB` | Job System |
+| `0x83` | `DATA_BULK` | 大数据预留 |
 
-### 1.3 转发规则
+`0x00` 是 host 地址，`0xff` 是未分配/广播地址。中继转发时必须递减 TTL。
 
-中继节点：
+## 2. Mesh2 控制 payload
 
-1. 校验结构、Magic、CRC。
-2. 若 `Dst == local_addr`，交本地处理。
-3. 若 `Hop == 0`，丢弃。
-4. 否则 `Hop--`，查路由表转发。
-5. **不解析 mini9P payload**。
+定义：`pwos-shared/mesh2/pwos_mesh2_control.h`
 
----
+控制 payload 版本为 1，使用固定长度和小端序：
 
-## 2. mini9P 层
+| 消息 | 长度 |
+|---|---:|
+| node register | 24 |
+| addr assign | 28 |
+| lease renew | 24 |
+| lease ack | 28 |
+| link state | 24 |
+| route update | 12 |
+| host advertise | 28 |
 
-mini9P 是面向 MCU 集群的极简远程文件协议，参考 9P 的核心思想但只保留当前阶段需要的能力。
+节点身份由 `uid[3] + boot_id` 组成。UID 标识硬件，boot ID 标识一次启动。地址分配和
+路由更新由 coordinator 权威生成；节点不能自行选择正式地址。
 
-完整帧格式与消息类型详解见：
+## 3. mini9P
 
-- `pwos-master-esp32p4/README.md#mini9P-协议帧格式`
-- `pwos-shared/mini9p/README.md`
+定义：`pwos-shared/mini9p/mini9p_protocol.h`
 
-### 2.1 设计目标
+mini9P 只表达目标节点本地文件语义：attach、walk、open、read、write、stat、clunk。
+完整 mini9P 帧作为 `DATA_MINI9P` payload 传输，中继不解析其内容。
 
-- 支撑 `ls`、`cat`、`echo`、`stat` 等最小 Shell 交互。
-- 适配低带宽、低内存场景。
-- 从机实现不依赖动态内存，使用静态缓冲区和固定表项。
-- 协议语义接近 9P，便于后续扩展。
+主机路径 `/mcu2/sys/health` 在发往节点前转换为本地路径 `/sys/health`。主机通过
+全局 wire tag 和 `(DATA_MINI9P, src_addr, tag)` 匹配响应。
 
-### 2.2 v1 非目标
-
-- 不实现完整 9P2000。
-- 不实现 `auth`、`flush`、`create`、`remove`、`rename`、`wstat`。
-- 不做分布式锁和缓存一致性协议。
-- 不支持让一次 RPC 长时间阻塞。
-
-耗时任务（如 Jacobi、矩阵乘法）应设计为文件语义：
-
-- 向命令文件写参数，立即返回。
-- 通过状态文件轮询任务状态。
-- 从结果文件读取最终输出。
-
-### 2.3 基本帧结构
-
-mini9P v1 帧作为 mesh `MESH_TYPE_MINI9P` 的 payload 出现：
+STM32 当前命名空间：
 
 ```text
-| Magic(2) | FrameLen(2) | Version(1) | Type(1) | Tag(2) | Payload(N) | CRC16(2) |
+/sys/{health,tasks,ports,links,neighbors,routes,sessions,queues,log,build,fault}
+/compute/{caps,load,jobs}
+/display/{status,tile}       # 仅 F429
 ```
 
-- `Magic = 0x39 0x50`（即 ASCII `'9P'`）。
-- `FrameLen = 4 + payload_len`；总长度 = `10 + payload_len`。
-- `Version = 0x01`。
-- `Type`：最高位为 1 表示响应（R*），为 0 表示请求（T*）。
-- `Tag`：事务标签，请求与对应响应 tag 相同。
-- CRC-16/CCITT-FALSE 覆盖 `Version..Payload`。
+## 4. MCU RPC v1
 
-### 2.4 消息类型
+定义：`pwos-shared/rpc/pwos_rpc_protocol.h`
 
-| 类型 | 值 | 方向 | 说明 |
-|---|---:|---|---|
-| Tattach | 0x01 | C→S | 建立会话 |
-| Rattach | 0x81 | S→C | 会话确认 |
-| Twalk | 0x02 | C→S | 路径遍历 |
-| Rwalk | 0x82 | S→C | 返回 QID |
-| Topen | 0x03 | C→S | 打开对象 |
-| Ropen | 0x83 | S→C | 打开确认 |
-| Tread | 0x04 | C→S | 读取数据 |
-| Rread | 0x84 | S→C | 返回数据 |
-| Twrite | 0x05 | C→S | 写入数据 |
-| Rwrite | 0x85 | S→C | 写入确认 |
-| Tstat | 0x06 | C→S | 查询元数据 |
-| Rstat | 0x86 | S→C | 返回元数据 |
-| Tclunk | 0x07 | C→S | 释放 fid |
-| Rclunk | 0x87 | S→C | 释放确认 |
-| Rerror | 0xFF | S→C | 通用错误响应 |
+- 固定头 16 字节，完整内层帧最大 512 字节。
+- kind：request、response、cancel、stream chunk、stream end。
+- flags：oneway、stream。
+- `call_id` 由主机 session manager 分配。
+- deadline 是请求预算；超时后主机发送 CANCEL，并释放 pending。
+- stream chunk 的 `status` 字段承载从 0 开始的 chunk 序号。
 
-### 2.5 典型访问流程
+当前内置服务包括 `system.ping/stream/info/notify/delay/fail`。
 
-1. `Tattach(fid=0)`：建立会话，绑定根目录。
-2. `Twalk(fid=0, newfid=1, path="dev/temp")`：解析路径。
-3. `Topen(fid=1)`：打开目标对象。
-4. `Tread` / `Twrite` / `Tstat`：数据与元数据操作。
-5. `Tclunk(fid=1)`：释放 fid。
+## 5. Job v1
 
-### 2.6 路径作用域
+定义：`pwos-shared/job/pwos_job_protocol.h`
 
-mini9P 只处理节点本地路径，不处理集群前缀。
+- 固定头 20 字节，完整内层帧最大 512 字节。
+- 支持 caps、submit、status、result、cancel 请求/响应。
+- 状态：created、queued、assigned、running、done、failed、cancelled、lost。
+- kernel：hash、vector add、matmul、Mandelbrot、raytrace tile。
+- `request_id` 参与 typed pending；`job_id` 标识远端任务。
 
-主控 VFS 中的全局路径：
+节点重启、事务超时或远端任务丢失时，主机将本地 job 标记为 LOST。retry 创建新 job，
+不复活旧 boot 上的远端 ID。
 
-```text
-/mcu1/temperature
-/mcu1/motor/speed
-/mcu2/compute/jacobi/result
-```
+## 6. Host RPC v1
 
-发到对应 Slave 的 mini9P `Twalk` 中应为：
+定义：
 
-```text
-/temperature
-/motor/speed
-/compute/jacobi/result
-```
+- `pwos-shared/host_rpc/pwos_host_rpc_protocol.h`
+- `pwos-shared/host_rpc/pwos_host_rpc_methods.h`
 
-`/mcuN` 这一层命名空间聚合由主控 `cluster_vfs` 完成。
+Host RPC 运行在 TCP/9909，不封装进 link frame。每帧由 4 字节网络序 CBOR body 长度
+和规范 CBOR map 组成，完整 wire frame 上限 1280 字节。
 
-### 2.7 推荐文件树约定
+kind：request、response、cancel、stream chunk、stream end。当前方法覆盖：
 
-协议不强制目录结构，但建议 Slave 统一暴露：
+- host advertise
+- topology owner 查询和同步
+- 跨主机节点 read/write
+- 分布式推理服务
 
-- `/sys`：节点信息、版本、健康状态、心跳、统计信息。
-- `/dev`：传感器、GPIO、电机等设备文件。
-- `/compute`：计算任务入口、状态和结果。
+当前协议没有 TLS、鉴权和重放保护，只允许部署在可信隔离 LAN。
 
----
+## 7. 错误与并发规则
 
-## 3. 两层协议的关系
-
-```text
-应用层：cat /mcu1/sys/health
-    │
-    ▼
-cluster_vfs: /mcu1/sys/health → target=mcu1, local_path=/sys/health
-    │
-    ▼
-mini9p_client: 构造 Tread 帧
-    │
-    ▼
-mesh_host_runtime: 把 mini9P 帧封装成 MESH_TYPE_MINI9P
-    │ src=host_addr, dst=mcu1_addr
-    ▼
-mesh_processer: route_lookup → 转发
-    │
-    ▼
-mesh_uart_transport / mesh_wifi_link: 字节流传输
-    │
-    ▼
-从机 mesh_node_runtime: 解出 mini9P Tread
-    │
-    ▼
-mini9p_server → local_vfs backend
-    │
-    ▼
-构造 Rread，反向封装回 mesh MINI9P，返回主机
-```
-
----
-
-## 4. 相关文档
-
-- `docs/architecture.md`：系统架构与目录结构
-- `docs/mesh_envelope_spec.md`：mesh envelope 详细规范
-- `pwos-shared/mesh/envelope/mesh_protocol_spec.md`：同上
-- `pwos-shared/mesh/cluster/mesh_cluster_spec.md`：cluster 拓扑与路由
-- `pwos-shared/mesh/processer/mesh_processer_spec.md`：processor 分流规则
-- `pwos-shared/mini9p/README.md`：mini9P client/server/service 说明
-- `pwos-master-esp32p4/README.md#mini9P-协议帧格式`：完整 mini9P 帧实例
+1. link CRC 错误只丢弃当前帧，不重置其他端口。
+2. 无路由立即返回 `E_NO_ROUTE`，不伪装成 deadline。
+3. pending 必须同时校验数据类型、源地址和 tag/request ID。
+4. 节点 boot ID 改变后，旧响应、fid、RPC 和 Job 状态全部失效。
+5. 控制队列优先于普通数据队列。
+6. 所有协议输入都必须先校验版本、固定长度和上限，再访问字段。

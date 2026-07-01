@@ -1,42 +1,28 @@
 # pwos-shared
 
-`pwos-shared` 存放主控和从机共同使用的协议代码。当前重构线只保留新链路层、
-`mesh2` 控制面和 mini9P；旧 `pwos-shared/mesh/` 已删除，避免继续误用旧轮询
-transport / legacy mesh runtime。
-
-## 当前模块
+共享目录只保存与具体 HAL/ESP-IDF 无关的协议和算法。
 
 ```text
-pwos-shared/
-├── link/       # M1 链路帧、CRC、流式 parser
-├── mesh2/      # M3/M4 控制面 payload 编解码
-├── mini9p/     # mini9P 协议本体、client、server
-├── csc/        # lttit 通信栈实验/供应商代码，暂未接入当前固件
-└── vfs/        # 预留说明
+link/       link frame v2、CRC、增量 parser
+mesh2/      注册、lease、链路、路由和 host advertise payload
+mini9p/     mini9P protocol/client/server
+rpc/        STM32 DATA_RPC 内层协议
+job/        STM32 DATA_JOB 内层协议
+host_rpc/   ESP32 主机间 CBOR RPC 和 leader election
+render/     STM32 smallpt raytrace tile kernel
 ```
 
-## 构建关系
+旧 `pwos-shared/mesh` 和未接入固件的 `csc` 实验副本已删除。硬件 UART/DMA 实现在
+各固件工程中，不再由共享目录提供跨平台 transport。
 
-- P4 coordinator 使用 `link/`、`mesh2/`、`mini9p/`。
-- STM32 从机使用 `link/`、`mesh2/`、`mini9p/`。
-- `csc/` 当前不在默认固件构建路径内，后续若继续复用 lttit 通信栈再单独接入。
-
-## PC 测试
+## 测试
 
 ```bash
-cmake -S pwos-shared/link/tests -B /tmp/pwos-link-tests
-cmake --build /tmp/pwos-link-tests
-/tmp/pwos-link-tests/pwos_link_test
-
-cmake -S pwos-shared/mesh2/tests -B /tmp/pwos-mesh2-tests
-cmake --build /tmp/pwos-mesh2-tests
-/tmp/pwos-mesh2-tests/pwos_mesh2_control_test
-
-gcc -std=c11 -Wall -Wextra \
-  -I pwos-shared/mini9p \
-  pwos-shared/mini9p/test_mini9p_client_host.c \
-  pwos-shared/mini9p/mini9p_client.c \
-  pwos-shared/mini9p/mini9p_protocol.c \
-  -o /tmp/test_mini9p_client_host
-/tmp/test_mini9p_client_host
+for suite in link mesh2 rpc job host_rpc; do
+  cmake -S "pwos-shared/$suite/tests" -B "/tmp/pwos-$suite-tests"
+  cmake --build "/tmp/pwos-$suite-tests"
+  ctest --test-dir "/tmp/pwos-$suite-tests" --output-on-failure
+done
 ```
+
+协议字段和 wire 上限见 `docs/protocol_spec.md`。

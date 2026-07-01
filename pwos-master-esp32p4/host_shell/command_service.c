@@ -1,3 +1,7 @@
+#ifndef ESP_PLATFORM
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "command_service.h"
 
 #include <stdarg.h>
@@ -7,8 +11,12 @@
 
 #include "pwos_rpc_protocol.h"
 #include "session_manager.h"
+#ifdef ESP_PLATFORM
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#else
+#include <time.h>
+#endif
 
 #define PWOS_COMMAND_READ_CAP 1024u
 #define PWOS_COMMAND_LIST_CAP 24u
@@ -20,6 +28,20 @@ typedef struct {
     size_t len;
     uint8_t truncated;
 } output_builder_t;
+
+static void command_sleep_ms(uint32_t delay_ms)
+{
+#ifdef ESP_PLATFORM
+    vTaskDelay(pdMS_TO_TICKS(delay_ms));
+#else
+    struct timespec delay = {
+        .tv_sec = (time_t)(delay_ms / 1000u),
+        .tv_nsec = (long)(delay_ms % 1000u) * 1000000L,
+    };
+
+    (void)nanosleep(&delay, NULL);
+#endif
+}
 
 static void output_append(output_builder_t *builder, const char *fmt, ...)
 {
@@ -276,6 +298,11 @@ static int execute_llm(
     size_t out_len = 0u;
     int rc;
 
+    /* LLM 是可选能力；没有推理后端的主机仍可使用其余 shell 命令。 */
+    if (service->config.llm == NULL) {
+        output_append(output, "llm: unavailable\r\n");
+        return -(int)M9P_ERR_ENOTSUP;
+    }
     if (args == NULL || args[0] == '\0') {
         output_append(output,
             "usage: llm <prompt>\r\n"
@@ -344,7 +371,7 @@ static int execute_llm(
     {
         int wait_ms;
         for (wait_ms = 0; wait_ms < 30000; wait_ms += 1000) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
+            command_sleep_ms(1000u);
             rc = service->config.llm(
                 service->config.io_ctx, hostname, PWOS_LLM_MODE_STATUS, NULL,
                 buf, sizeof(buf), &out_len, service->config.default_deadline_ms);
@@ -594,8 +621,7 @@ int pwos_command_service_init(
     const pwos_command_service_config_t *config)
 {
     if (service == NULL || config == NULL || config->read_path == NULL ||
-        config->write_path == NULL || config->list == NULL || config->stat == NULL ||
-        config->llm == NULL) {
+        config->write_path == NULL || config->list == NULL || config->stat == NULL) {
         return -(int)M9P_ERR_EINVAL;
     }
 

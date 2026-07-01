@@ -28,14 +28,6 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 project(${CMAKE_PROJECT_NAME})
 message("Build type: " ${CMAKE_BUILD_TYPE})
 
-option(PWOS_ENABLE_MINI9P_SERIAL "Enable F407 Mini9P mesh serial mode" OFF)
-option(PWOS_ENABLE_LFS_SELFTEST "Populate littlefs debug fixtures on boot" ON)
-option(PWOS_ENABLE_UART5_MESH "Enable UART5 mesh port; this conflicts with SDIO and disables SD-backed VFS" OFF)
-
-if(PWOS_ENABLE_UART5_MESH)
-    message(WARNING "PWOS_ENABLE_UART5_MESH uses PC12/PD2, which conflicts with SDIO; SD-backed VFS will be unavailable")
-endif()
-
 # Enable CMake support for ASM and C languages
 enable_language(C CXX ASM)
 

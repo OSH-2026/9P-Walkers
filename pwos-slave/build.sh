@@ -2,7 +2,6 @@
 set -euo pipefail
 
 ACTION="${1:-build}"
-PWOS_ENABLE_UART5_MESH="${PWOS_ENABLE_UART5_MESH:-OFF}"
 PRESET="${PRESET:-F407Debug}"
 OPENOCD_INTERFACE="${OPENOCD_INTERFACE:-interface/stlink.cfg}"
 OPENOCD_TARGET="${OPENOCD_TARGET:-target/stm32f4x.cfg}"
@@ -17,13 +16,11 @@ env:
   PRESET             CMake preset, default: F407Debug
   OPENOCD_INTERFACE  OpenOCD interface config, default: interface/stlink.cfg
   OPENOCD_TARGET     OpenOCD target config, default: target/stm32f4x.cfg
-  PWOS_ENABLE_UART5_MESH
-                      enable UART5 mesh port and disable SDIO VFS, default: OFF
 EOF
 }
 
 build_firmware() {
-    cmake --preset "$PRESET" -DPWOS_ENABLE_UART5_MESH="$PWOS_ENABLE_UART5_MESH"
+    cmake --preset "$PRESET"
     cmake --build --preset "$PRESET"
 }
 

@@ -15,13 +15,17 @@ pwos-master/
 
 # IDE / editor
 .vscode/
+.clangd
 pwos-slave/.vscode/
 .codex
 .cache/
+.omo/
+**/.omo/
 
 # Local development files
 venv/
 AGENTS.md
 *.o
+*.exe
 tmp*.md
 ref/

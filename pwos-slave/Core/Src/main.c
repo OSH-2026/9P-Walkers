@@ -202,14 +202,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-#ifndef PWOS_ENABLE_MINI9P_SERIAL
-  /* User can add his own implementation to report the HAL error return state */
-  {
-    const uint8_t error_message[] = "error: entered Error_Handler\n";
-    (void)HAL_UART_Transmit(&huart2, error_message, sizeof(error_message) - 1U,
-                            100U);
-  }
-#endif
+  /* USART2 属于 mesh 数据面，错误路径不能向链路注入调试文本。 */
   __disable_irq();
   while (1) {
   }

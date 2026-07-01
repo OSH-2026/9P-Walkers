@@ -29,7 +29,6 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     User/bsp/bsp_lcd.c
     User/bsp/display_sync.c
     User/gfx/gfx.c
-    User/app/cube_demo.c
     User/app/render_display.c
     # pwos-slave core
     ${PWOS_USER_DIR}/os/frame_pool.c
@@ -44,8 +43,6 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${PWOS_USER_DIR}/compute/compute_worker.c
     ${PWOS_USER_DIR}/diag/fault_control.c
     ${PWOS_USER_DIR}/backend/local_vfs.c
-    ${PWOS_USER_DIR}/fs/lfs.c
-    ${PWOS_USER_DIR}/fs/lfs_util.c
     # Shared protocol
     ${PWOS_SHARED_DIR}/link/pwos_link_crc.c
     ${PWOS_SHARED_DIR}/link/pwos_link_frame.c
@@ -71,7 +68,6 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${PWOS_USER_DIR}/backend
     ${PWOS_USER_DIR}/diag
     ${PWOS_USER_DIR}/compute
-    ${PWOS_USER_DIR}/fs
     ${PWOS_SHARED_DIR}/link
     ${PWOS_SHARED_DIR}/mesh2
     ${PWOS_SHARED_DIR}/mini9p

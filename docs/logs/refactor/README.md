@@ -1,24 +1,9 @@
 # Refactor Logs
 
+状态：M1-M10 已完成。部分早期里程碑只保存在提交历史中；本目录保留有独立验收记录
+的阶段。
+
 本目录记录 `docs/refactor_plan.md` 各里程碑的验收记录、硬件现象和问题档案。
-
-建议文件命名：
-
-```text
-M0-baseline.md
-M1-link-parser.md
-M2-slave-rtos-dma.md
-M3-port-manager.md
-...
-```
-
-每份记录至少包含：
-
-- 日期、提交号、测试拓扑。
-- 构建命令和结果。
-- 硬件连接方式和串口参数。
-- 执行的命令及输出。
-- 失败现象、错误计数和下一步判断。
 
 当前记录：
 
@@ -28,3 +13,5 @@ M3-port-manager.md
 - `M8-slave-rpc.md`
 - `M9-job-system.md`
 - `M10-host-rpc-multihost.md`
+
+最终状态和后续边界见 `docs/refactor_plan.md`。

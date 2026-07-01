@@ -28,7 +28,7 @@ list(REMOVE_ITEM PWOS_LUA_SRCS
 
 idf_component_register(
     SRCS
-        "hello_world_main.c"
+        "app_main.c"
         "../inference/llm_engine.cpp"
         "../inference/inference_runtime.cpp"
         "../inference/dist_inference_service.c"

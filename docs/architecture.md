@@ -1,300 +1,131 @@
-# Distributed MCU Cluster OS - 工程架构与开发规划
+# 9P-Walkers 当前架构
 
-## 1. 总体架构
+## 1. 系统边界
 
-当前项目已经演进为**主控（ESP32-P4 / PC 模拟器）+ 多 STM32 从机**的集群系统，核心通信层是 `pwos-shared/mesh` 提供的 mesh envelope：
-
-- mini9P 数据面帧被封装为 `MESH_TYPE_MINI9P` 的 payload；
-- 控制面消息（REGISTER、ASSIGN、ROUTE_UPDATE、LINK_STATE 等）通过同一 envelope 传输；
-- 中继节点只解析 envelope 头，不解析 mini9P 内容；
-- 主机维护拓扑并派生路由，从机维护简化 direct-table 路由表。
+系统包含两个相互独立、只在 ESP32 主机汇合的网络平面。
 
 ```text
-Shell / Lua / WebShell
-        │
-        ▼
-  cluster_vfs          # /mcuN/... 统一命名空间、UID↔名字映射、attach 状态
-        │
-        ▼
-  mini9p_client        # 主机侧 9P 请求/响应 client
-        │
-        ▼
-  mesh_host_runtime    # 处理 REGISTER/LINK_STATE/ROUTE_UPDATE，绑定 mesh-backed client
-        │
-        ▼
-  mesh_processer       # 帧分流：转发 / 控制面 / mini9P 数据面
-        │
-        ├──► cluster   # 拓扑/路由管理（主机 TOPOLOGY / 从机 DIRECT_TABLE）
-        │
-        └──► mini9p_server / mini9p_client
-        │
-        ▼
-  mesh_uart_transport  # UART DMA + IDLE 中断 + frame queue（STM32）/ ESP-IDF / POSIX
-  mesh_wifi_link       # ESP32-P4 侧 TCP/9000 WiFi 透传接入
-        │
-        ▼
-  mesh_node_runtime    # 从机侧 REGISTER/ASSIGN/NEIGHBOR_PROBE/LINK_STATE 处理
-        │
-        ▼
-  mini9p_server        # 从机侧 9P 请求处理
-        │
-        ▼
-  local_vfs backend    # littleFS / sys / dev / 计算任务回调
+┌──────────────── 主机间 IP 平面 ────────────────┐
+│ ESP32-P4 Ethernet <-> router <-> ESP32-S3 WiFi │
+│ mDNS discovery + TCP/9909 + CBOR host RPC      │
+└───────────────┬───────────────────┬────────────┘
+                │ UART              │ UART
+┌───────────────▼───────────────────▼────────────┐
+│ STM32 有线 mesh 平面                           │
+│ link frame v2 + mesh2 control + typed data     │
+│ 节点可以作为 relay，多 UART、多跳转发           │
+└────────────────────────────────────────────────┘
 ```
 
-## 2. 仓库目录结构
+主机间不透传 STM32 link frame。跨主机访问由 owner 主机终止 host RPC，再在自己的
+STM32 子树中发起 mini9P/RPC/Job 请求。
 
-```
-9P-Walkers/
-│
-├── docs/
-│   ├── architecture.md              # 本文件
-│   ├── protocol_spec.md             # mini9P payload 规范
-│   ├── mesh_envelope_spec.md        # mesh envelope 协议规范
-│   ├── mesh_wifi_link.md            # WiFi 链路说明
-│   ├── slave_mesh_runtime.md        # 从机 runtime 开发者指南
-│   ├── build_and_flash.md           # 编译烧录指南
-│   ├── adr/                         # 架构决策记录
-│   ├── 调研报告.md
-│   └── 可行性分析.md
-│
-├── pwos-master-esp32p4/             # ESP32-P4 主控固件
-│   ├── main/                        # app_main、Lua 绑定、VFS 绑定
-│   ├── cluster/                     # cluster_config：mesh 事件 → VFS 状态
-│   ├── mesh/                        # mesh_host_runtime / mesh_host_service / mesh_wifi_link
-│   ├── vfs_bridge/                  # cluster_host_vfs
-│   ├── shell/                       # 本地 C Shell
-│   ├── web/                         # HTTP + WebSocket + WiFi softAP
-│   └── build/                       # ESP-IDF 构建输出
-│
-├── pwos-slave/                      # STM32F407 从机工程
-│   ├── Core/                        # STM32 HAL 生成的 Core 代码
-│   ├── Drivers/                     # HAL 驱动
-│   └── User/                        # 用户业务代码
-│       ├── app/
-│       │   └── mesh_node_mini9p_init.c   # 从机组装入口
-│       ├── mesh/                    # mesh_node_runtime / mesh_node_service
-│       ├── fs/                      # littleFS port、local_vfs
-│       ├── dev/                     # 外设回调
-│       └── compute/                 # 计算任务后端
-│
-├── pwos-shared/                     # 主从共享代码
-│   ├── mini9p/                      # mini9P 协议本体
-│   │   ├── mini9p_protocol.c/.h
-│   │   ├── mini9p_client.c/.h
-│   │   ├── mini9p_server.c/.h
-│   │   └── README.md
-│   └── mesh/                        # mesh envelope 与路由层
-│       ├── envelope/
-│       │   ├── mesh_protocal.c/.h
-│       │   └── mesh_protocol_spec.md
-│       ├── processer/
-│       │   ├── mesh_processer.c/.h
-│       │   └── mesh_processer_spec.md
-│       ├── cluster/
-│       │   ├── cluster.c/.h
-│       │   └── mesh_cluster_spec.md
-│       ├── transport/
-│       │   ├── mesh_uart_transport.c/.h
-│       │   └── (transport_abstraction.md)
-│       ├── mesh_overview_spec.md
-│       ├── mesh_host_vfs_spec.md
-│       └── module test(on PC)/
-│
-└── tools/pc_master_emulator/        # PC 端主控模拟器
-    ├── main.c
-    └── README.md
-```
+## 2. STM32 平面
 
-## 3. 各层职责
-
-### 3.1 Mesh Envelope 层
-
-位置：`pwos-shared/mesh/envelope/`
-
-职责：
-- 定义 mesh 帧格式（Magic、FrameLen、Version、Type、Src/Dst、Seq、Hop、Flags、Payload、CRC16）。
-- 实现帧编解码与 CRC-16/CCITT-FALSE 校验。
-- 实现控制面 payload 的构造/解析。
-
-关键文件：
-- `mesh_protocal.h`：类型、常量、payload 结构体。
-- `mesh_protocal.c`：编码/解码/校验函数。
-
-### 3.2 Mesh Processor 层
-
-位置：`pwos-shared/mesh/processer/`
-
-职责：
-- 从链路收帧、解帧、校验。
-- 判断目标地址是否为本机。
-- 非本机帧：查询 cluster 下一跳，`hop--` 后转发。
-- 本机控制帧：交给 `control_handler`。
-- 本机数据帧（`MESH_TYPE_MINI9P`）：解出 mini9P，T* 给 server，R* 给 client。
-
-关键文件：
-- `mesh_processer.h/c`
-
-### 3.3 Cluster 层
-
-位置：`pwos-shared/mesh/cluster/`
-
-职责：
-- 维护节点表、路由表、拓扑链路表。
-- 提供 `route_lookup` 给 processor。
-- 主机 TOPOLOGY 模式下从拓扑派生路由；从机 DIRECT_TABLE 模式下直接查表。
-
-关键文件：
-- `cluster.h/c`
-
-### 3.4 Transport 层
-
-位置：`pwos-shared/mesh/transport/`
-
-职责：
-- 屏蔽 UART 平台差异（ESP-IDF / STM32 HAL / POSIX）。
-- STM32 侧已实现 DMA + IDLE 中断 + per-port frame queue。
-- 每次 `receive_frame()` 返回一帧完整 mesh 数据。
-
-关键文件：
-- `mesh_uart_transport.h/c`
-
-### 3.5 主机 Runtime / Service
-
-位置：`pwos-master-esp32p4/mesh/`
-
-职责：
-- `mesh_host_runtime`：处理 REGISTER、LINK_STATE、ROUTE_UPDATE，维护 mesh-backed mini9P client，等待 R* 时继续处理控制帧。
-- `mesh_host_service`：管理最多 4 个 UART 端口，启动默认后台任务。
-- `mesh_wifi_link`：监听 TCP/9000，让 WiFi 透传模块以与 UART 同构的方式收发 mesh 帧。
-
-关键文件：
-- `mesh_host_runtime.c/h`
-- `mesh_host_service.c/h`
-- `mesh_wifi_link.c/h`
-
-### 3.6 主机 VFS 桥接
-
-位置：`pwos-master-esp32p4/vfs_bridge/`
-
-职责：
-- `cluster_host_vfs`：把 UID 映射为 `/mcuN` 名字，维护 9P attach 状态，按 cluster 可达性刷新在线状态。
-- `cluster_config`：把 mesh 控制面事件翻译给 VFS。
-
-关键文件：
-- `cluster_host_vfs.c/h`
-- `cluster_config.c/h`
-
-### 3.7 从机 Runtime / Service
-
-位置：`pwos-slave/User/mesh/`
-
-职责：
-- `mesh_node_runtime`：bootstrap REGISTER、ASSIGN 落地、邻居探测、direct-table 路由、Mini9P 分流。
-- `mesh_node_service`：多 UART 端口管理、`addr -> port` 学习表、轮询收包。
-- `mesh_node_mini9p_init`：板级组装入口。
-
-关键文件：
-- `mesh_node_runtime.c/h`
-- `mesh_node_service.c/h`
-- `User/app/mesh_node_mini9p_init.c`
-
-### 3.8 Mini9P 层
-
-位置：`pwos-shared/mini9p/`
-
-职责：
-- 文件访问语义：attach/walk/open/read/write/stat/clunk。
-- 主机侧 client、从机侧 server。
-- 在线缆上**不直接出现**，而是作为 mesh `MESH_TYPE_MINI9P` 的 payload。
-
-关键文件：
-- `mini9p_protocol.h/c`
-- `mini9p_client.h/c`
-- `mini9p_server.h/c`
-
-## 4. 控制面与数据面流转
-
-### 4.1 新节点上线（从机上电）
+### 2.1 分层
 
 ```text
-从机（addr=0xFF）
-    │ broadcast REGISTER(src=0xFF, dst=0xFF)
-    ▼
-中继 A（如有）: 记录 uid+ingress_port，转发上游
-    ▼
-主机
-    │ 识别 UID，分配/复用地址，发送 ASSIGN(dst=0xFF)
-    ▼
-从机
-    │ 更新本地地址，记录 upstream_port
-    │ broadcast NEIGHBOR_PROBE_REQUEST
-    ▼
-邻居回复 NEIGHBOR_PROBE_RESPONSE
-    │ 学习 direct neighbor，若已知上游则上报 LINK_STATE
-    ▼
-主机收到 LINK_STATE → 更新拓扑 → 下发 ROUTE_UPDATE
+HAL UART/DMA
+  -> uart_dma_port
+  -> frame_pool + FreeRTOS queues
+  -> port_manager
+  -> node_control
+  -> service_runtime
+       -> mini9P server -> local_vfs
+       -> rpc_service
+       -> job_service -> compute_worker
 ```
 
-### 4.2 文件访问
+- `uart_dma_port` 拥有 DMA、parser、TX 完成和硬件错误统计。
+- `port_manager` 拥有每个物理端口的 HELLO FSM 和 peer 身份。
+- `node_control` 拥有本机地址、lease、upstream、route 和 relay pending。
+- `service_runtime` 是本机数据面唯一入口，不参与链路发现和路由决策。
+- `compute_worker` 在低优先级任务中增量执行 kernel，避免阻塞控制面。
+
+ISR 只搬运字节、更新 DMA 状态并通知任务，不执行 mesh、mini9P、RPC 或计算逻辑。
+
+### 2.2 控制面
+
+1. 相邻端口交换 `LINK_HELLO/ACK`。
+2. 未分配节点选择 coordinator 或可到达 upstream 的 relay。
+3. `CTRL_NODE_REGISTER` 可由已分配 relay 向上游转发。
+4. coordinator 返回 `CTRL_ADDR_ASSIGN`，节点进入 lease 周期。
+5. 节点上报 `CTRL_LINK_STATE`，主机计算并下发 `CTRL_ROUTE_UPDATE`。
+6. 数据帧按目标地址本地投递或递减 TTL 后转发。
+
+## 3. 主机内部
 
 ```text
-Shell/Lua/WebShell
-    │ cat /mcu1/sys/health
-    ▼
-cluster_vfs: 解析 target=mcu1，本地 path=/sys/health
-    ▼
-mini9p_client → mesh_host_runtime_client_request
-    │ 构造 MESH_TYPE_MINI9P，src=host, dst=mcu1_addr
-    ▼
-mesh_processer → route_lookup → 转发或本地处理
-    ▼
-从机 mesh_node_runtime 收到 → 解出 mini9P Tread
-    ▼
-mini9p_server → local_vfs backend → 构造 Rread
-    ▼
-回包经 mesh MINI9P envelope 返回主机
+UART RX task (唯一消费者)
+  -> coordinator_runtime
+       -> host_coordinator       地址、lease、拓扑、路由
+       -> session_manager        typed pending、tag、deadline
+       -> cluster_vfs            /mcuN 路径、fid、generation
+       -> slave_rpc              DATA_RPC client
+       -> job_manager            DATA_JOB 生命周期
+
+WebShell / Lua / inference
+  -> host_shell / host_api / host_jobs
+  -> 上述主机服务
 ```
 
-## 5. 关键设计约束
+P4 额外运行 Ethernet、HTTP/WebSocket、Lua 渲染调度器。S3 运行 WiFi STA 和推理；
+两者复用 coordinator、session、job 和 host RPC 实现。
 
-1. **UID 是节点身份主键**，不是 mesh 短地址。mesh 地址可重分配，UID 永久稳定。
-2. **拓扑有向**：收到 `A → B` 不自动补 `B → A`；反向路径必须由 B 自行上报 LINK_STATE。
-3. **mini9P 是 payload**：mesh 中继不解析 mini9P 内容，只做 envelope 头转发。
-4. **route_lookup 是核心接口**：processor 只依赖“本机还是转发”这个查询结果，不关心路由怎么来。
-5. **离线保留映射**：节点离线后不删除 UID → 名字映射，只清除在线绑定和 9P 状态。
-6. **单事务同步模型**：当前 `mesh_host_runtime_client_request` 仍是单事务，等待 R* 期间继续消费控制帧，但同一时刻只允许一个同步 Mini9P 请求占用接收链路。
+## 4. 主机间平面
 
-## 6. 开发路线（当前状态）
+- P4 从 Ethernet MAC、S3 从 WiFi STA MAC 派生稳定 `host_uid` 和 hostname。
+- `_pwos._tcp` mDNS 服务发布 TCP/9909。
+- `epoch` 持久化在 NVS；主机按 `(epoch, priority, host_uid)` 选举 leader。
+- leader 汇总 owner 节点快照并分配全局 `mcuN` 名称。
+- follower 保留 `global_target -> owner_target` 映射。
+- 当前跨主机支持节点 read/write；远端目录 list/stat 和高吞吐 bulk 不在 alpha 范围。
 
-已落地：
-- [x] mini9P v1 文件协议
-- [x] mesh envelope v1 + 控制面消息
-- [x] 主机/从机 runtime
-- [x] 多跳路由与拓扑维护
-- [x] PC 模拟器 smoke test
-- [x] STM32 UART DMA + IDLE 中断 + frame queue
-- [x] ESP32-P4 WiFi 透传链路（mesh_wifi_link）
+## 5. 数据面
 
-进行中 / 待完善：
-- [ ] host runtime 并发请求模型（当前单事务）
-- [ ] 主机侧为远端主动发来的 mini9P T* 提供完整本地 server handler
-- [ ] 邻居传播路由模型评估
-- [ ] 拓扑有向/双向语义最终确定
-- [ ] VFS list_routes、自动重连、离线恢复策略
+| 类型 | 用途 | 主机端 | STM32 端 |
+|---|---|---|---|
+| `DATA_MINI9P` | 文件/诊断 | `cluster_vfs` + `session_manager` | `mini9p_server` + `local_vfs` |
+| `DATA_RPC` | 短调用/流 | `slave_rpc` | `rpc_service` |
+| `DATA_JOB` | 异步计算 | `job_manager` | `job_service` + `compute_worker` |
+| `DATA_BULK` | 大数据预留 | 未实现 | 未实现 |
 
-## 7. 相关文档
+pending 键至少包含 `(data_type, src_addr, tag)`。节点 boot ID 改变时，主机清理该节点
+旧 session、fid 和未完成事务，避免旧响应污染新实例。
 
-- `docs/protocol_spec.md`：顶层协议栈说明（mesh envelope + mini9P payload）
-- `docs/mesh_envelope_spec.md` / `pwos-shared/mesh/envelope/mesh_protocol_spec.md`：mesh envelope 协议规范
-- `docs/mesh_wifi_link.md`：ESP32-P4 主机侧 WiFi 透传链路
-- `docs/slave_mesh_runtime.md`：从机 runtime 开发者指南
-- `docs/cluster_config_usage.md`：`cluster_config` 与 VFS 的协作流程
-- `docs/transport_abstraction.md`：UART/WiFi transport 抽象与 STM32 DMA 设计
-- `docs/build_and_flash.md`：编译烧录指南
-- `pwos-shared/mesh/cluster/mesh_cluster_spec.md`：cluster 数据模型与 API
-- `pwos-shared/mesh/processer/mesh_processer_spec.md`：processor 回调与分流
-- `pwos-shared/mesh/mesh_host_vfs_spec.md`：主机侧 VFS 桥接语义
-- `pwos-shared/RUN_TIME_NODE_MESH.md`：主机侧 runtime 调用指南
-- `pwos-master-esp32p4/vfs_bridge/design.md`：`cluster_host_vfs` 设计说明
-- `tools/pc_master_emulator/README.md`：PC 串口联调指南
+## 6. 分布式计算
+
+Job System 使用静态槽和有界 payload。当前 kernel 包括 hash、vector add、matmul、
+Mandelbrot 和 raytrace tile。P4 的 Lua 调度器动态枚举在线 MCU，将 240x320 场景拆成
+16x7 tile，完成后写入 F429 的 `/display/tile`。
+
+P4/S3 的 LLM 引擎独立于 MCU Job System；`dist_inference_service` 通过 host RPC 提供
+主机间推理协作接口，目前仍属于实验能力。
+
+## 7. 关键约束
+
+1. UID 是物理节点身份；短地址和 `mcuN` 名称都可重新分配。
+2. coordinator 拥有全局拓扑；STM32 不运行全局路由算法。
+3. link、控制面和数据面状态分别由单一模块拥有。
+4. 热路径不动态分配内存；协议、队列和 job 使用固定上限。
+5. UART RX 每个平台只有一个消费者；上层通过 pending/semaphore 等待结果。
+6. 控制面不能因文件访问、RPC、Job 或渲染而阻塞。
+7. 主机间平面只用于可信局域网，当前没有 TLS 或鉴权。
+
+## 8. 代码位置
+
+```text
+pwos-shared/
+  link/ mesh2/ mini9p/ rpc/ job/ host_rpc/ render/
+
+pwos-master-esp32p4/
+  coordinator_runtime/ host_coordinator/ host_sessions/
+  host_api/ slave_rpc/ host_jobs/ host_rpc/
+  host_shell/ host_net/ web/ render/ inference/
+
+pwos-master-esp32s3/
+  main/ host_net/ inference/
+
+pwos-slave*/User/
+  drivers/ link/ mesh2/ rtos/ os/ service/ compute/ backend/ diag/
+```

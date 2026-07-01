@@ -1,159 +1,62 @@
-# PWOS 集群
+# PWOS 领域术语
 
-本文档定义 MCU 集群命名空间、动态节点注册、路由，以及基于 mini9P 的远端文件访问中的领域语言。
+本文档只定义现行实现中的术语。历史文档使用旧名称时，以这里和源码为准。
 
-## 语言
+## 身份和命名
 
-**节点 UID**：
-一块物理 MCU 设备的稳定硬件身份，重启、重连、重命名后仍保持不变。
-_避免使用_：节点名、路由目标
+**节点 UID**：STM32 物理设备的稳定身份，当前表示为三个 32 位值。
 
-**节点名**：
-主机分配的用户可见集群名字，例如 `mcu1`，作为集群命名空间中的第一级路径。
-_避免使用_：节点 UID、硬件 ID
+**boot ID**：一次设备启动的随机/变化标识。UID 相同但 boot ID 改变表示节点重启，
+旧 session、fid、pending 和 job 不能继续复用。
 
-**路由目标**：
-路由层用于在集群网络中投递帧的目标身份。
-_避免使用_：在讨论传输投递时使用“节点名”
+**mesh 地址**：STM32 平面的 8 位短地址。`0x00` 是 host，`0xff` 是未分配/广播。
 
-**节点地址**：
-mesh envelope 中用于帧投递的短地址，属于网络层内部字段。
-_避免使用_：节点名、节点 UID、用户路径
+**节点名**：用户可见的 `mcuN`。单主机时由本机分配，多主机时由 leader 分配全局名。
 
-**mesh envelope**：
-包在 mini9P 帧外侧的集群网络信封，用于承载路由、注册、命名和转发所需的控制信息。
-_避免使用_：peer link、mini9P 消息类型
+**owner host**：直接管理某个 STM32 子树并能实际发出 UART 请求的 ESP32 主机。
 
-**控制面**：
-负责节点注册、命名、拓扑维护、路由更新和心跳的集群管理语义。
-_避免使用_：mini9P 文件操作、attach 语义
+## STM32 平面
 
-**时钟同步**：
-主机与从机之间建立可比较时间基准的集群能力，用于跨节点事件排序、诊断和后续任务协同。
-_避免使用_：心跳超时、单机 uptime
+**link frame**：`pwos-shared/link` 定义的 v2 线缆帧。旧文档中的 mesh envelope 指其
+前身，不是现行模块名。
 
-**同步心跳**：
-兼具在线检测与时钟同步的周期性控制面交换。
-_避免使用_：普通心跳、单向 heartbeat
+**port manager**：管理物理 UART peer、HELLO 状态和端口健康，不维护全局路由。
 
-**bootstrap 地址**：
-未分配节点在注册阶段使用的保留地址，用于在获得正式节点地址前向主机发起注册。
-_避免使用_：正式节点地址、节点名
+**node control**：管理本机地址、lease、upstream、relay pending 和路由转发。
 
-**relay / 中继从机**：
-位于主机和下游从机之间、已经完成注册并拥有正式节点地址的从机节点。它可以帮助下游从机转发 bootstrap 控制帧，并按主机下发的从机转发表转发普通 mesh 帧。
-_避免使用_：主机、未注册从机、全局路由控制器
+**coordinator**：ESP32 上 STM32 平面的控制面权威，分配地址并计算路由。
 
-**child / 下游从机**：
-通过某个中继从机接入主机的从机节点；在 `LINK_STATE(src=relay, neighbor=child)` 中，`child` 表示 relay 的直连 mesh 邻居。
-_避免使用_：用户路径中的子目录、mini9P fid 子节点
+**upstream**：节点到当前 coordinator authority 的首跳端口。
 
-**全局拓扑图**：
-主机维护的集群连接图，记录节点之间已上报的链路方向关系。
-_避免使用_：从机转发表、cluster_vfs 路由表
+**route**：STM32 本地 `(dst, next_hop, port, metric, version)` 转发表项。
 
-**从机转发表**：
-从机保存的简化投递规则，用于把目标节点地址转发到下一跳或出端口。
-_避免使用_：全局拓扑图、用户路径路由表
+## 数据面
 
-**端口表**：
-从机 service 层维护的运行时 `mesh地址 → UART端口` 映射表。通过 `NEIGHBOR_PROBE_RESPONSE` 学习得到，用于 `send_frame(next_hop)` 时查具体 UART 端口。
-_避免使用_：静态 neighbor_addr 配置、节点地址本身
+**mini9P**：远端文件协议，对用户暴露 `/mcuN/...`。
 
-**addr_port 表项**：
-端口表中的单条记录，表示"已知某 mesh 地址可从哪个 UART 端口到达"。
+**MCU RPC**：`DATA_RPC` 承载的短调用、流式调用、通知和取消。
 
-**cluster manager**：
-主机侧 `cluster/` 模块中的节点管理与集群网络状态模块，负责节点注册、命名、拓扑图和路由派生。
-_避免使用_：mesh manager、cluster_vfs、mini9P client
+**Job**：`DATA_JOB` 承载的异步计算任务，可查询状态、读取结果、取消和 retry。
 
-**mesh transport**：
-提供给 `m9p_client` 的 transport 适配层，用于把 mini9P 帧封装进 mesh envelope 并交给 `cluster manager` 选择下一跳。
-_避免使用_：cluster manager、peer link、mini9P 文件协议
+**typed pending**：主机按 `(data_type, src_addr, tag)` 匹配响应的并发表。
 
-**VFS 挂载表**：
-`cluster_vfs` 维护的节点名到 mini9P client 与文件会话状态的映射。
-_避免使用_：全局拓扑图、从机转发表、节点事实表
+**cluster VFS**：主机侧 `/mcuN/...` 命名空间、mini9P session 和 fd 映射，不拥有
+UART DMA 或 STM32 全局拓扑。
 
-## 关系
+## 主机间平面
 
-- 一个**节点 UID**只属于一块物理 MCU 设备。
-- 一个**节点名**在同一时刻由主机分配给一个**节点 UID**。
-- 一个**节点地址**在 mesh envelope 中作为帧投递目标，并由主机映射到对应**节点 UID**。
-- 一个**路由目标**在当前设计中优先使用**节点地址**表达，而 `cluster_vfs` 将对应**节点名**暴露为 `/mcuN/...`。
-- 一块物理设备从不同链路重连时保持同一个**节点 UID**，并可按主机策略保留原**节点名**。
-- **节点地址**和**节点名**均由主机集中分配；从机上电时只依靠**节点 UID**参与注册。
-- **节点地址**不进入用户路径或业务 API，只在日志、诊断接口和路由调试信息中展示。
-- **bootstrap 地址**只用于注册阶段；主机下发正式**节点地址**后，从机不再用 bootstrap 地址发送普通控制帧或 mini9P payload。
-- **端口表**是 service 层运行时结构，不进入 mesh envelope 协议；`next_hop` 在 cluster/route_lookup 中仍是 mesh 地址，service发送时才查端口表解析到物理 UART。
-- **relay / 中继从机**必须先完成自身注册并获得正式**节点地址**，才能为 **child / 下游从机**转发 bootstrap `REGISTER`。
-- `LINK_STATE(src=relay, neighbor=child)` 表示“中继从机 relay 上报自己直连下游从机 child”，主机据此在**全局拓扑图**中记录 `relay -> child` 这条已上报方向边。
-- 主机不会因为收到 `relay -> child` 就自动补 `child -> relay`；反向路径必须来自 `child` 自己上报的 `LINK_STATE(src=child, neighbor=relay)`。
-- 主机给中继从机下发到下游从机的路由时，`ROUTE_UPDATE(dst=child, next_hop=child)` 中的 `next_hop` 仍是**节点地址**，不是 UART 端口。
-- 主机 route sync 从**全局拓扑图**即时计算各从机视角的 `dst -> next_hop`，生成并下发 `ROUTE_UPDATE`；该计算结果暂不额外存档为独立控制器路由档案。
-- **peer link** 只处理同一条物理链路上的 mini9P 请求/响应分发，不决定帧要转发到哪个节点。
-- **mesh envelope** 位于 mini9P 外层，是**控制面**和多跳转发的唯一入口。
-- mini9P 作为 **mesh envelope** 的 payload 承载文件访问语义，不新增注册、命名、拓扑或路由语义。
-- 中间节点只依据 **mesh envelope** 转发 mini9P payload，不解析 `Twalk`、`Tread` 等 mini9P 文件操作。
-- **时钟同步**是控制面的核心能力，第一版设计必须纳入；它不同于普通在线检测，需要单独协议语义和同步质量记录。
-- 第一版可使用**同步心跳**替代普通 heartbeat：一次成功的时钟同步响应同时更新节点在线状态、时钟偏移和往返延迟估计。
-- 主机维护**全局拓扑图**，并从中派生到各目标的下一跳路由。
-- 从机不维护**全局拓扑图**；从机只维护本地邻居状态和主机下发的**从机转发表**。
-- `cluster_vfs` 不维护**全局拓扑图**，只消费拓扑/路由模块给出的节点名到可达路径状态。
-- 主机侧节点注册、命名、拓扑和路由派生沿用既有 `cluster/` 架构命名，归入 **cluster manager**；不另设顶层 **mesh manager** 概念。
-- **mesh transport** 是 `m9p_client` 绑定的 transport 函数实现；它使用 **cluster manager** 的状态，但不取代 `cluster_vfs` 或 `m9p_client`。
-- **cluster manager** 维护权威节点状态、能力、在线状态、链路状态、全局拓扑图和路由派生结果，供调度器、诊断界面和 mesh transport 使用。
-- `cluster_vfs` 未来应从“维护下一跳路由表”迁移为维护 **VFS 挂载表**：只保存**节点名**、对应 `m9p_client`、mini9P attach 状态和本地 fd 到远端 fid 的文件会话状态。
-- `cluster_vfs` 不应继续拥有 `next_hop` 这类网络转发字段；下一跳端口和转发表归 **cluster manager** / 新链路层管理。
+**host RPC**：ESP32 主机间的 TCP/CBOR 协议，不封装进 STM32 link frame。
 
-## 示例对话
+**leader**：负责全局主机成员视图和 `mcuN` 命名的主机。
 
-> **开发者：**“原来挂载成 `/mcu2` 的板子从另一条 UART 路径重连后，它是新节点吗？”
-> **领域专家：**“不是。只要**节点 UID** 相同，它就是同一块设备；更新路由，并按主机策略保留或重新分配**节点名**。”
+**follower**：接受 leader 全局命名，同时继续管理自己 STM32 子树的主机。
 
-> **开发者：**“`peer_link` 能不能直接做动态注册和多跳路由？”
-> **领域专家：**“不应该。**peer link** 只解决单条 mini9P 链路上的请求/响应分发；动态注册和多跳转发属于 **mesh envelope** 和集群控制面。”
+**host epoch**：持久化并在启动时递增的主机代次，用于选主和排除旧实例。
 
-> **开发者：**“能不能新增 mini9P 类型来做注册和路由？”
-> **领域专家：**“不作为主方案。注册、命名、拓扑和路由属于**控制面**，统一走 **mesh envelope**；mini9P 继续只表达目标节点本地文件树访问。”
+## 使用规则
 
-> **开发者：**“用户能不能通过 `/node/7/...` 这种路径访问节点地址？”
-> **领域专家：**“不应该。**节点地址**是内部转发地址，可能被重新分配；用户路径只使用稳定的**节点名**，例如 `/mcu2/...`。”
-
-> **开发者：**“从机能不能自己生成一个节点地址？”
-> **领域专家：**“不能作为正式地址。正式**节点地址**和**节点名**都由主机分配；从机上电时只用**节点 UID**参与注册。”
-
-> **开发者：**“新节点还没有节点地址，怎么发注册帧？”
-> **领域专家：**“暂定使用 **bootstrap 地址**作为注册阶段的保留源地址，主机根据 payload 中的**节点 UID**完成分配和匹配。”
-
-> **开发者：**“心跳是不是就等于时钟同步？”
-> **领域专家：**“不是。心跳可用于在线判断；**时钟同步**是额外目标，用来让主机和从机建立可比较时间基准。”
-
-> **开发者：**“时钟同步能不能顺便做心跳？”
-> **领域专家：**“可以。第一版建议用**同步心跳**作为周期性保活消息，每次成功响应同时更新在线状态和时钟同步质量。”
-
-> **开发者：**“从机怎么知道把帧发到哪个 UART 端口？”
-> **领域专家：**“通过 **端口表**。从机在收到 `NEIGHBOR_PROBE_RESPONSE(src=neighbor)` 后，学习 `neighbor → ingress_port`；后续 `send_frame(next_hop)` 时查表得到实际 UART 端口。端口表是运行时学习的，不是静态配置的。”
-
-> **开发者：**“每个从机都要知道完整网络长什么样吗？”
-> **领域专家：**“不需要。完整网络由主机的**全局拓扑图**表达；从机只拿到自己转发所需的**从机转发表**。”
-
-> **开发者：**“这个模块叫 `mesh_manager` 还是沿用原来的 `cluster/`？”
-> **领域专家：**“沿用原架构命名。主机侧管理模块叫 **cluster manager** 或 `node_manager`；mesh 只用于描述 envelope 和 transport。”
-
-> **开发者：**“节点在线状态放在 `cluster_vfs` 还是 `cluster/`？”
-> **领域专家：**“权威节点状态放在 **cluster manager**；`cluster_vfs` 只维护文件访问视角的 **VFS 挂载表**和 mini9P 会话状态。”
-
-## 已标记歧义
-
-- “节点”曾同时表示物理设备、用户可见名字和路由投递目标；已决定分别使用**节点 UID**、**节点名**和**路由目标**。
-- “peer link”容易被误解成集群路由层；已决定它只表示 mini9P 单链路分发层，多跳转发和控制面使用 **mesh envelope** 表达。
-- “扩展 mini9P 协议”曾同时表示新增文件协议消息和增加外层网络信封；已决定动态注册与多跳路由不扩展 mini9P 文件语义，而使用 **mesh envelope**。
-- “节点地址”容易被误用为用户可见路径名；已决定它只用于 mesh envelope 投递和诊断显示，不进入 `/mcuN/...` 命名空间。
-- “未分配节点如何注册”暂定通过 **bootstrap 地址**解决；反向路径、重复注册和多未分配节点同时接入时的匹配细节仍需继续压实。
-- “心跳策略”曾被用来代替时钟同步；已澄清：**时钟同步**非常重要，第一版应作为控制面核心能力，并可通过**同步心跳**兼任在线检测。
-- “路由表/网”曾同时指主机的全局连接视图、从机转发规则和 `cluster_vfs` 的路径映射；已决定分别使用**全局拓扑图**、**从机转发表**和 `cluster_vfs` 路由表。
-- “mesh manager”曾被用来指主机侧节点管理、拓扑和路由模块；已决定沿用原架构的 **cluster manager** / `node_manager` 命名，避免与 **mesh envelope**、**mesh transport** 混淆。
-- `cluster/` 内部是否拆成 `cluster_manager`、`node_manager`、`topology`、`router`、`cluster_mesh_transport`、`scheduler` 等文件尚未决定；该问题属于后续实现分工与模块接口讨论。
-- 新的 mesh/cluster 链路层命名尚未决定；暂定候选包括 `cluster_link`、`cluster_mesh_link`、`cluster_link_transport`、`cluster_mesh_transport`。不要复用 `mini9p_peer_link` 命名，因为它已表示 mini9P 单跳 T/R 分发器。
-- `cluster_vfs` 当前存在 `target/next_hop/client` 形式的路由项；后续应迁移为 **VFS 挂载表**，将 `next_hop` 和路由状态移交给 **cluster manager** / 新链路层。
+- 用户路径使用 `mcuN`，协议和路由日志使用 mesh 地址，身份比较使用 UID。
+- link 层不解析 mini9P/RPC/Job。
+- STM32 relay 只依据 link 头和本地 route 转发数据帧。
+- 控制面和数据面不得直接修改对方拥有的状态。
+- “WiFi mesh link”是已删除的旧设计；当前 WiFi 只连接 ESP32-S3 到主机间 IP 平面。

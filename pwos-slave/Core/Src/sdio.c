@@ -21,7 +21,6 @@
 #include "sdio.h"
 
 /* USER CODE BEGIN 0 */
-static int g_sdio_ready;
 
 /* USER CODE END 0 */
 
@@ -33,32 +32,11 @@ void MX_SDIO_SD_Init(void)
 {
 
   /* USER CODE BEGIN SDIO_Init 0 */
-  g_sdio_ready = 0;
-#ifdef PWOS_ENABLE_MINI9P_SERIAL
-  hsd.Instance = SDIO;
-  hsd.Init.ClockEdge = SDIO_CLOCK_EDGE_RISING;
-  hsd.Init.ClockBypass = SDIO_CLOCK_BYPASS_DISABLE;
-  hsd.Init.ClockPowerSave = SDIO_CLOCK_POWER_SAVE_DISABLE;
-  hsd.Init.BusWide = SDIO_BUS_WIDE_1B;
-  hsd.Init.HardwareFlowControl = SDIO_HARDWARE_FLOW_CONTROL_DISABLE;
-  hsd.Init.ClockDiv = 4;
-  if (HAL_SD_Init(&hsd) != HAL_OK)
-  {
-    return;
-  }
-  if (HAL_SD_ConfigWideBusOperation(&hsd, SDIO_BUS_WIDE_4B) != HAL_OK)
-  {
-    return;
-  }
-  g_sdio_ready = 1;
-  return;
-#else
   /*
-   * 当前 M4 控制面不依赖 SD 卡。没有显式启用 mini9P 串行文件系统时，
-   * SDIO 作为可选外设处理，避免无卡或板级差异导致启动进入 Error_Handler。
+   * 当前固件不再挂载 SD 卡文件系统。保留 CubeMX 外设入口，但不初始化
+   * 未插卡的 SDIO，避免无卡启动进入 Error_Handler。
    */
   return;
-#endif
 
   /* USER CODE END SDIO_Init 0 */
 
@@ -81,7 +59,6 @@ void MX_SDIO_SD_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN SDIO_Init 2 */
-  g_sdio_ready = 1;
 
   /* USER CODE END SDIO_Init 2 */
 
@@ -161,10 +138,5 @@ void HAL_SD_MspDeInit(SD_HandleTypeDef* sdHandle)
 }
 
 /* USER CODE BEGIN 1 */
-
-int PWOS_SDIO_IsReady(void)
-{
-  return g_sdio_ready;
-}
 
 /* USER CODE END 1 */

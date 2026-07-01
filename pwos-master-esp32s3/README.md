@@ -1,53 +1,45 @@
-| Supported Targets | ESP32 | ESP32-C2 | ESP32-C3 | ESP32-C5 | ESP32-C6 | ESP32-C61 | ESP32-H2 | ESP32-H21 | ESP32-H4 | ESP32-P4 | ESP32-S2 | ESP32-S3 | Linux |
-| ----------------- | ----- | -------- | -------- | -------- | -------- | --------- | -------- | --------- | -------- | -------- | -------- | -------- | ----- |
+# PWOS ESP32-S3 主机
 
-# Hello World Example
+ESP32-S3 固件同时承担 STM32 coordinator、WiFi host RPC peer 和 LLM 推理节点。
 
-Starts a FreeRTOS task to print "Hello World".
+## 运行时
 
-(See the README.md file in the upper level 'examples' directory for more information about examples.)
+- UART1 默认 TX=17、RX=18、1 Mbaud，连接一个 STM32 子树。
+- WiFi STA 默认连接 `pwos-network`，密码 `pwos-network`。
+- mDNS 发布 `_pwos._tcp`，TCP/9909 运行 host RPC。
+- 复用 P4 的 coordinator、session、cluster VFS、slave RPC、Job 和 host RPC 模块。
+- 本地运行 `llm_engine`、`inference_runtime` 和 `dist_inference_service`。
+- 默认 host priority 200；P4 默认 300，但更高 epoch 仍优先。
 
-## How to use example
+## 目录
 
-Follow detailed instructions provided specifically for this example.
-
-Select the instructions depending on Espressif chip installed on your development board:
-
-- [ESP32 Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/stable/get-started/index.html)
-- [ESP32-S2 Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/latest/esp32s2/get-started/index.html)
-
-
-## Example folder contents
-
-The project **hello_world** contains one source file in C language [hello_world_main.c](main/hello_world_main.c). The file is located in folder [main](main).
-
-ESP-IDF projects are built using CMake. The project build configuration is contained in `CMakeLists.txt` files that provide set of directives and instructions describing the project's source files and targets (executable, library, or both).
-
-Below is short explanation of remaining files in the project folder.
-
-```
-├── CMakeLists.txt
-├── pytest_hello_world.py      Python script used for automated testing
-├── main
-│   ├── CMakeLists.txt
-│   └── hello_world_main.c
-└── README.md                  This is the file you are currently reading
+```text
+host_net/      WiFi STA、mDNS
+inference/     S3 本地 LLM 引擎和分布式推理入口
+main/          app_main、Kconfig、组件构建
+model/         SPIFFS 内置模型和 tokenizer
 ```
 
-For more information on structure and contents of ESP-IDF projects, please refer to Section [Build System](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-guides/build-system.html) of the ESP-IDF Programming Guide.
+共享的主机模块目前直接从 `../pwos-master-esp32p4` 编译。修改公共主机行为时必须同时
+构建 P4 和 S3，避免平台条件分支只在一侧通过。
 
-## Troubleshooting
+## 配置
 
-* Program upload failure
+```text
+idf.py menuconfig
+  -> 9P-Walkers ESP32-S3
+     -> WiFi SSID/password
+     -> STM32 UART port/TX/RX/baud
+```
 
-    * Hardware connection is not correct: run `idf.py -p PORT monitor`, and reboot your board to see if there are any output logs.
-    * The baud rate for downloading is too high: lower your baud rate in the `menuconfig` menu, and try again.
+## 构建和烧录
 
-## Technical support and feedback
+```bash
+source /home/hb/.espressif/v6.0/esp-idf/export.sh
+cd pwos-master-esp32s3
+idf.py build
+idf.py -p <PORT> flash monitor
+```
 
-Please use the following feedback channels:
-
-* For technical queries, go to the [esp32.com](https://esp32.com/) forum
-* For a feature request or bug report, create a [GitHub issue](https://github.com/espressif/esp-idf/issues)
-
-We will get back to you as soon as possible.
+启动日志应依次出现 coordinator、WiFi IP、host RPC 和 inference 状态。网络服务失败时
+不会停止 UART coordinator。

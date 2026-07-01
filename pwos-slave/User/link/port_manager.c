@@ -269,7 +269,6 @@ int pwos_port_manager_handle_rx(pwos_frame_block_t *block)
     pwos_port_runtime_t *port;
     pwos_port_peer_role_t role;
     uint8_t peer_port_id;
-    uint8_t peer_addr;  /* mesh 地址，从带 src 的帧学习 */
     uint8_t caps;
     uint32_t peer_uid[3];
     uint32_t peer_boot_id;
