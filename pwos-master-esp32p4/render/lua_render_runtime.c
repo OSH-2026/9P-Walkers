@@ -19,7 +19,7 @@
 #define PWOS_LUA_RENDER_TASK_STACK 16384u
 #define PWOS_LUA_RENDER_TASK_PRIORITY 4u
 #define PWOS_LUA_RENDER_DEADLINE_MS 3000u
-#define PWOS_LUA_DISPLAY_TILE_MAX 128u
+#define PWOS_LUA_DISPLAY_TILE_MAX 256u
 
 extern const uint8_t whitted_scheduler_lua_start[]
     asm("_binary_whitted_scheduler_lua_start");

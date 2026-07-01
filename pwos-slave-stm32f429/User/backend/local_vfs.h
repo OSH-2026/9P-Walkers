@@ -19,7 +19,7 @@ extern "C" {
 #endif
 
 /** 当 config.iounit 为零时，Ropen 中通告的默认 I/O 单元大小。 */
-#define LOCAL_VFS_DEFAULT_IOUNIT 128u
+#define LOCAL_VFS_DEFAULT_IOUNIT 256u
 
 typedef int (*local_vfs_read_fn)(
     void *ctx,

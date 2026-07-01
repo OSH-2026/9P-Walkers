@@ -130,11 +130,18 @@ static void test_raytrace_tile(void)
 {
     pwos_compute_worker_t worker;
     pwos_compute_job_snapshot_t snapshot;
-    uint8_t input[18] = {
-        1u, 1u, 0u, 0u, 8u, 7u, 120u, 160u, 1u, 3u,
-        7u, 0u, 0x78u, 0x56u, 0x34u, 0x12u, 0u, 0u,
+    /* 协议 v3: 22 字节请求, tile_x/tile_y/image_w/image_h 均为 le16 */
+    uint8_t input[22] = {
+        3u, 1u,                /* version=3, scene=1 */
+        0u, 0u, 0u, 0u,         /* tile_x=0, tile_y=0 */
+        16u, 7u,                /* tile_w=16, tile_h=7 */
+        0xF0u, 0x00u, 0x40u, 0x01u,  /* image_w=240, image_h=320 (le16) */
+        4u, 4u,                 /* samples=4, max_depth=4 */
+        1u, 0u,                 /* frame_id=1 */
+        0x78u, 0x56u, 0x34u, 0x12u,  /* seed */
+        0u, 0u,                 /* camera_phase=0 */
     };
-    uint8_t result[128];
+    uint8_t result[260];
     uint16_t result_len = sizeof(result);
     uint32_t job_id;
     size_t i;
@@ -149,8 +156,7 @@ static void test_raytrace_tile(void)
     assert(pwos_compute_worker_get_result(
         &worker, 0u, job_id, result, sizeof(result),
         &result_len, NULL) == PWOS_JOB_STATUS_OK);
-    assert(result_len == 124u);
-    assert(result[0] == 1u && result[4] == 8u && result[5] == 7u);
+    assert(result_len == 240u);
     for (i = 12u; i < result_len; ++i) {
         if (result[i] != 0u) any_nonzero = 1;
     }

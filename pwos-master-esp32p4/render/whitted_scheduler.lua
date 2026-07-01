@@ -1,9 +1,10 @@
 -- P4 只负责调度和搬运；每个 tile 的像素全部由 STM32 job worker 计算。
-local IMAGE_W <const> = 120
-local IMAGE_H <const> = 160
-local TILE_W <const> = 8
+-- 120x160 画布，2x 放大到 240x320 LCD。
+local IMAGE_W <const> = 240
+local IMAGE_H <const> = 320
+local TILE_W <const> = 16
 local TILE_H <const> = 7
-local SAMPLES <const> = 2
+local SAMPLES <const> = 4
 local MAX_DEPTH <const> = 4
 
 local function find_display(nodes)
@@ -31,9 +32,10 @@ local function build_tiles(frame_id, phase)
     return tiles
 end
 
+-- 协议 v3: BB I2 I2 BB I2 I2 BB I2 I4 I2 = 22 字节
 local function encode_tile(tile)
-    return string.pack("<BBBBBBBBBBI2I4I2",
-        1, 1, tile.x, tile.y, tile.width, tile.height,
+    return string.pack("<BBI2I2BBI2I2BBI2I4I2",
+        3, 1, tile.x, tile.y, tile.width, tile.height,
         IMAGE_W, IMAGE_H, SAMPLES, MAX_DEPTH,
         tile.frame, tile.seed, tile.phase)
 end
@@ -55,37 +57,31 @@ local function render_frame(nodes, display_node, frame_id, phase)
                 else
                     tile.attempts = tile.attempts + 1
                     queue[#queue + 1] = tile
-                    host.log(string.format("submit %s failed %s(%s)",
-                        node, tostring(reason), tostring(code)))
                 end
             end
         end
 
         for node, work in pairs(active) do
-            local pixels, state, progress = job.result(work.id)
+            local pixels, state = job.result(work.id)
             if pixels ~= nil then
-                local ok, reason, code = display.blit(display_node, pixels)
+                local ok = display.blit(display_node, pixels)
                 if ok then
                     completed = completed + 1
                 else
                     work.tile.attempts = work.tile.attempts + 1
                     queue[#queue + 1] = work.tile
-                    host.log(string.format("display write failed %s(%s)",
-                        tostring(reason), tostring(code)))
                 end
                 active[node] = nil
             elseif state ~= "not_ready" then
                 work.tile.attempts = work.tile.attempts + 1
                 queue[#queue + 1] = work.tile
                 active[node] = nil
-                host.log(string.format("result %s failed %s(%s)",
-                    node, tostring(state), tostring(progress)))
             end
         end
-        host.sleep(25)
+        host.sleep(20)
     end
-    host.log(string.format("frame=%d complete tiles=%d workers=%d display=%s",
-        frame_id, total, #nodes, display_node))
+    host.log(string.format("frame=%d tiles=%d workers=%d",
+        frame_id, total, #nodes))
 end
 
 local frame_id = 1
@@ -94,12 +90,11 @@ while true do
     local nodes = cluster.nodes()
     local display_node = find_display(nodes)
     if #nodes == 0 or display_node == nil then
-        host.log("waiting for compute nodes and F429 display")
         host.sleep(1500)
     else
         render_frame(nodes, display_node, frame_id, phase)
         frame_id = (frame_id + 1) & 0xffff
         if frame_id == 0 then frame_id = 1 end
-        phase = (phase + 4) % 360
+        phase = (phase + 2) % 360
     end
 end
