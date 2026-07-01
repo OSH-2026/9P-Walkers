@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="650" viewBox="0 0 1200 650"><defs><style>
+.bg{fill:#f7fafc}.title{font-family:sans-serif;font-size:34px;font-weight:700;fill:#123b61}.head{font-family:sans-serif;font-size:26px;font-weight:700;fill:#173650}.txt{font-family:sans-serif;font-size:20px;fill:#50687e}.tiny{font-family:monospace;font-size:18px;fill:#486176}.code{font-family:monospace;font-size:21px;fill:#dceaf4}.kw{fill:#78c7ff}.box{fill:#fff;stroke:#7897b1;stroke-width:3}.blue{fill:#e5f2fa;stroke:#187caf;stroke-width:3}.green{fill:#edf7ed;stroke:#4d8d5a;stroke-width:3}.amber{fill:#fff4df;stroke:#c88725;stroke-width:3}.line{stroke:#426b8c;stroke-width:4;fill:none}.dash{stroke:#6f879a;stroke-width:3;stroke-dasharray:10 8;fill:none}</style>
+<marker id="a" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0 0L9 3L0 6Z" fill="#426b8c"/></marker></defs><rect width="1200" height="650" rx="20" class="bg"/><text x="600" y="48" text-anchor="middle" class="title">Key dispatch pattern</text><rect x="115" y="90" width="970" height="455" rx="14" fill="#142b3d"/>
+   <circle cx="150" cy="125" r="10" fill="#e96b65"/><circle cx="180" cy="125" r="10" fill="#e7bd5a"/><circle cx="210" cy="125" r="10" fill="#65bd76"/>
+   <text x="155" y="185" text-anchor="start" class="code">switch (view-&gt;type) {</text>
+   <text x="190" y="225" text-anchor="start" class="code">case CTRL_NODE_REGISTER:</text>
+   <text x="235" y="260" text-anchor="start" class="code">handle_node_register(runtime, view);</text>
+   <text x="235" y="295" text-anchor="start" class="code">break;</text>
+   <text x="190" y="340" text-anchor="start" class="code">case CTRL_TIME_SYNC:</text>
+   <text x="235" y="375" text-anchor="start" class="code">handle_time_sync(runtime, view);</text>
+   <text x="235" y="410" text-anchor="start" class="code">break;</text>
+   <text x="190" y="455" text-anchor="start" class="code">case DATA_JOB:</text>
+   <text x="235" y="490" text-anchor="start" class="code">session_manager_deliver_data(...);</text>
+   <text x="155" y="525" text-anchor="start" class="code">}</text><text x="600" y="625" text-anchor="middle" class="txt">One decode point, explicit typed dispatch and bounded handlers.</text></svg>

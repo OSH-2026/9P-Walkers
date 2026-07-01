@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="520" viewBox="0 0 1200 520">
+  <defs>
+    <style>.h{font-family:sans-serif;font-size:25px;font-weight:700;fill:#123b61}.t{font-family:sans-serif;font-size:18px;font-weight:700;fill:#173650}.s{font-family:sans-serif;font-size:15px;fill:#52697e}.box{fill:#fff;stroke:#7695af;stroke-width:3}.host{fill:#e7f3fb;stroke:#187caf;stroke-width:3}.node{fill:#eef7ed;stroke:#4d8c59;stroke-width:3}.arr{stroke:#3e6687;stroke-width:4;fill:none}</style>
+    <marker id="a" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0 0L9 3L0 6Z" fill="#3e6687"/></marker>
+  </defs>
+  <rect width="1200" height="520" rx="18" fill="#f7fafc"/>
+  <text x="600" y="40" text-anchor="middle" class="h">Cross-machine wall-clock synchronization</text>
+  <rect x="42" y="82" width="210" height="88" rx="10" class="box"/><text x="147" y="120" text-anchor="middle" class="t">NTP Server</text><text x="147" y="148" text-anchor="middle" class="s">Unix wall-clock</text>
+  <rect x="390" y="72" width="250" height="108" rx="10" class="host"/><text x="515" y="115" text-anchor="middle" class="t">ESP32-P4</text><text x="515" y="145" text-anchor="middle" class="s">SNTP + time.exchange</text>
+  <rect x="850" y="72" width="250" height="108" rx="10" class="host"/><text x="975" y="115" text-anchor="middle" class="t">ESP32-S3</text><text x="975" y="145" text-anchor="middle" class="s">SNTP + time.exchange</text>
+  <path d="M252 126H390" class="arr" marker-end="url(#a)"/><path d="M640 110H850" class="arr" marker-end="url(#a)"/><path d="M850 148H640" class="arr" marker-end="url(#a)"/>
+  <text x="745" y="91" text-anchor="middle" class="s">t1 / t2</text><text x="745" y="174" text-anchor="middle" class="s">t3 / t4</text>
+  <rect x="390" y="308" width="250" height="108" rx="10" class="node"/><text x="515" y="350" text-anchor="middle" class="t">STM32 Node</text><text x="515" y="380" text-anchor="middle" class="s">mono tick + offset</text>
+  <rect x="850" y="308" width="250" height="108" rx="10" class="node"/><text x="975" y="350" text-anchor="middle" class="t">STM32 Node</text><text x="975" y="380" text-anchor="middle" class="s">CTRL_TIME_SYNC 0x17</text>
+  <path d="M515 180V308" class="arr" marker-end="url(#a)"/><path d="M975 180V308" class="arr" marker-end="url(#a)"/>
+  <rect x="45" y="286" width="275" height="150" rx="10" class="box"/>
+  <text x="182" y="326" text-anchor="middle" class="t">NTP-style estimate</text>
+  <text x="182" y="360" text-anchor="middle" class="s">offset = ((t2-t1)+(t3-t4))/2</text>
+  <text x="182" y="390" text-anchor="middle" class="s">delay = (t4-t1)-(t3-t2)</text>
+  <text x="600" y="480" text-anchor="middle" class="s">Deadlines and leases remain on monotonic clocks; wall-clock is only for cross-machine timestamps.</text>
+</svg>

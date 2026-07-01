@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="500" viewBox="0 0 1200 500">
+  <defs>
+    <style>.h{font-family:sans-serif;font-size:23px;font-weight:700;fill:#133c64}.t{font-family:sans-serif;font-size:19px;font-weight:700;fill:#193651}.s{font-family:sans-serif;font-size:15px;fill:#526a80}.ip{stroke:#2585b8;stroke-width:5}.uart{stroke:#4c6072;stroke-width:5}.node{fill:#fff;stroke:#718ca5;stroke-width:3}.host{fill:#e7f3fb;stroke:#1477aa;stroke-width:4}.lcd{fill:#eef7ed;stroke:#4b8b57;stroke-width:3}</style>
+    <marker id="a" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0 0L9 3L0 6Z" fill="#2585b8"/></marker>
+    <marker id="b" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0 0L9 3L0 6Z" fill="#4c6072"/></marker>
+  </defs>
+  <rect width="1200" height="500" rx="18" fill="#f7fafc"/>
+  <text x="600" y="42" text-anchor="middle" class="h">Two coordinated network planes</text>
+  <rect x="90" y="82" width="330" height="105" rx="12" class="host"/>
+  <text x="255" y="124" text-anchor="middle" class="t">ESP32-P4 · Leader</text><text x="255" y="154" text-anchor="middle" class="s">Ethernet · Host RPC · Lua</text>
+  <rect x="780" y="82" width="330" height="105" rx="12" class="host"/>
+  <text x="945" y="124" text-anchor="middle" class="t">ESP32-S3 · Peer</text><text x="945" y="154" text-anchor="middle" class="s">WiFi · Host RPC · LLM</text>
+  <line x1="420" y1="134" x2="780" y2="134" class="ip" marker-end="url(#a)"/>
+  <text x="600" y="112" text-anchor="middle" class="s">LAN · mDNS · TCP/9909 · CBOR</text>
+  <rect x="95" y="300" width="210" height="92" rx="10" class="node"/><text x="200" y="338" text-anchor="middle" class="t">STM32F407</text><text x="200" y="368" text-anchor="middle" class="s">mcu1 · compute</text>
+  <rect x="410" y="300" width="210" height="92" rx="10" class="node"/><text x="515" y="338" text-anchor="middle" class="t">STM32F429</text><text x="515" y="368" text-anchor="middle" class="s">mcu2 · LCD</text>
+  <rect x="770" y="300" width="210" height="92" rx="10" class="node"/><text x="875" y="338" text-anchor="middle" class="t">STM32F407</text><text x="875" y="368" text-anchor="middle" class="s">mcu3 · compute</text>
+  <line x1="235" y1="187" x2="200" y2="300" class="uart" marker-end="url(#b)"/><line x1="275" y1="187" x2="500" y2="300" class="uart" marker-end="url(#b)"/><line x1="945" y1="187" x2="875" y2="300" class="uart" marker-end="url(#b)"/>
+  <line x1="305" y1="346" x2="410" y2="346" class="uart"/><line x1="620" y1="346" x2="770" y2="346" class="uart"/>
+  <text x="600" y="450" text-anchor="middle" class="s">UART Link Frame v2 · multi-hop routing · authority-controlled mesh</text>
+</svg>

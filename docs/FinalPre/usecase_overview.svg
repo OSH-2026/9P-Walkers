@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="430" viewBox="0 0 1200 430">
+  <defs>
+    <style>
+      .title{font-family:sans-serif;font-size:27px;font-weight:700;fill:#123a63}.label{font-family:sans-serif;font-size:21px;font-weight:700;fill:#17324d}.sub{font-family:sans-serif;font-size:16px;fill:#50657a}
+      .line{stroke:#4e779f;stroke-width:4;fill:none}.box{fill:#fff;stroke:#8ba9c5;stroke-width:3}.accent{fill:#e8f2fa;stroke:#2474a8;stroke-width:3}
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L9,3 L0,6 Z" fill="#4e779f"/></marker>
+  </defs>
+  <rect width="1200" height="430" rx="18" fill="#f6f9fc"/>
+  <rect x="454" y="135" width="292" height="160" rx="12" class="accent"/>
+  <text x="600" y="185" text-anchor="middle" class="title">9P-Walkers</text>
+  <text x="600" y="224" text-anchor="middle" class="label">Unified /mcuN namespace</text>
+  <text x="600" y="258" text-anchor="middle" class="sub">mini9P · RPC · Job</text>
+  <path d="M454 185 H315" class="line" marker-end="url(#arrow)"/>
+  <path d="M746 185 H885" class="line" marker-end="url(#arrow)"/>
+  <path d="M490 295 L350 360" class="line" marker-end="url(#arrow)"/>
+  <path d="M710 295 L850 360" class="line" marker-end="url(#arrow)"/>
+  <rect x="55" y="105" width="260" height="130" rx="10" class="box"/>
+  <text x="185" y="155" text-anchor="middle" class="label">Edge Compute</text>
+  <text x="185" y="190" text-anchor="middle" class="sub">Hash · MatMul · Fractal</text>
+  <rect x="885" y="105" width="260" height="130" rx="10" class="box"/>
+  <text x="1015" y="155" text-anchor="middle" class="label">Remote Diagnosis</text>
+  <text x="1015" y="190" text-anchor="middle" class="sub">Health · Ports · Routes</text>
+  <rect x="145" y="315" width="260" height="90" rx="10" class="box"/>
+  <text x="275" y="354" text-anchor="middle" class="label">Ray Tracing</text>
+  <text x="275" y="382" text-anchor="middle" class="sub">Distributed RGB565 tiles</text>
+  <rect x="795" y="315" width="260" height="90" rx="10" class="box"/>
+  <text x="925" y="354" text-anchor="middle" class="label">Multi-host</text>
+  <text x="925" y="382" text-anchor="middle" class="sub">P4 Ethernet + S3 WiFi</text>
+</svg>
