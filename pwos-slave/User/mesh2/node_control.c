@@ -20,8 +20,6 @@
 #define PWOS_NODE_HOST_ADVERTISE_TIMEOUT_MS 5000u
 #define PWOS_NODE_CLUSTER_ID 0x50574F53u
 #define PWOS_NODE_HOST_ADVERTISE_CACHE_SIZE 8u
-#define PWOS_NODE_TIME_SYNC_INTERVAL_MS 10000u
-#define PWOS_NODE_TIME_SYNC_TIMEOUT_MS 60000u
 
 typedef struct {
     uint8_t valid;
@@ -69,42 +67,8 @@ static uint32_t g_authority_epoch;
 static uint16_t g_authority_priority;
 static uint8_t g_authority_ttl;
 static uint32_t g_authority_last_tick;
-static uint8_t g_time_valid;
-static uint8_t g_time_pending;
-static uint32_t g_time_sequence;
-static uint32_t g_last_time_sync_attempt_tick;
-static uint32_t g_last_time_sync_tick;
-static uint32_t g_time_delay_us;
-static int64_t g_time_offset_us;
-static uint64_t g_time_client_tx_us;
-static uint32_t g_mono_last_tick;
-static uint64_t g_mono_wrap_ticks;
 static pwos_host_advertise_seen_t
     g_host_advertise_seen[PWOS_NODE_HOST_ADVERTISE_CACHE_SIZE];
-
-static int route_or_drop(const pwos_link_frame_view_t *view);
-
-static uint64_t local_monotonic_us(void)
-{
-    uint32_t now;
-    uint64_t ticks;
-
-    taskENTER_CRITICAL();
-    now = (uint32_t)xTaskGetTickCount();
-    if (now < g_mono_last_tick) {
-        g_mono_wrap_ticks += (1ULL << 32);
-    }
-    g_mono_last_tick = now;
-    ticks = g_mono_wrap_ticks + now;
-    taskEXIT_CRITICAL();
-    return ticks * (uint64_t)portTICK_PERIOD_MS * 1000u;
-}
-
-static void invalidate_wall_time(void)
-{
-    g_time_valid = 0u;
-    g_time_pending = 0u;
-}
 
 static uint8_t uid_equal(const uint32_t a[3], const uint32_t b[3])
 {
@@ -591,33 +555,6 @@ static int send_lease_renew(void)
     return 0;
 }
 
-static int send_time_sync(void)
-{
-    pwos_mesh2_time_sync_t exchange;
-    uint8_t payload[PWOS_MESH2_TIME_SYNC_PAYLOAD_LEN];
-    size_t payload_len = 0u;
-
-    g_last_time_sync_attempt_tick = (uint32_t)xTaskGetTickCount();
-    memset(&exchange, 0, sizeof(exchange));
-    exchange.kind = PWOS_MESH2_TIME_SYNC_REQUEST;
-    exchange.sequence = ++g_time_sequence;
-    exchange.client_tx_mono_us = local_monotonic_us();
-    if (pwos_mesh2_encode_time_sync(
-            &exchange, payload, sizeof(payload), &payload_len) != PWOS_OK ||
-        send_encoded_control(
-            (uint8_t)PWOS_LINK_TYPE_CTRL_TIME_SYNC,
-            PWOS_LINK_ADDR_HOST,
-            g_upstream_port,
-            payload,
-            (uint16_t)payload_len) != 0) {
-        return -1;
-    }
-    g_time_client_tx_us = exchange.client_tx_mono_us;
-    g_time_pending = 1u;
-    ++g_stats.time_sync_tx;
-    return 0;
-}
-
 static void send_link_state_snapshot(void)
 {
     pwos_port_snapshot_t ports[PWOS_UART_DMA_MAX_PORTS];
@@ -675,8 +612,6 @@ static void apply_self_assign(const pwos_mesh2_addr_assign_t *assign, uint8_t in
     g_lease_epoch = assign->lease_epoch;
     g_lease_ms = assign->lease_ms == 0u ? PWOS_NODE_DEFAULT_LEASE_MS : assign->lease_ms;
     g_state = PWOS_NODE_ASSIGNED;
-    g_last_time_sync_attempt_tick = 0u;
-    invalidate_wall_time();
 
     clear_routes();
     pwos_port_manager_mark_upstream(ingress_port);
@@ -881,8 +816,6 @@ static int handle_host_advertise(
                 g_local_addr = PWOS_LINK_ADDR_UNASSIGNED;
                 g_upstream_port = PWOS_LINK_ADDR_UNASSIGNED;
                 g_lease_epoch = 0u;
-                g_last_time_sync_attempt_tick = 0u;
-                invalidate_wall_time();
                 clear_routes();
                 pwos_port_manager_set_mesh_assigned(
                     0u, PWOS_LINK_ADDR_UNASSIGNED);
@@ -899,60 +832,6 @@ static int handle_host_advertise(
     if (first_seen != 0) {
         flood_host_advertise(view, ingress_port);
     }
-    return 1;
-}
-
-static int handle_time_sync(
-    const pwos_link_frame_view_t *view,
-    uint8_t ingress_port)
-{
-    pwos_mesh2_time_sync_t exchange;
-    uint64_t t4_mono_us;
-    uint64_t transit_us;
-    uint64_t server_work_us;
-    uint64_t delay_us;
-    int64_t mono_to_wall_us;
-
-    if (view->dst == PWOS_LINK_ADDR_HOST) {
-        return route_or_drop(view);
-    }
-    if (!control_from_authority(ingress_port) ||
-        pwos_mesh2_decode_time_sync(
-            view->payload, view->payload_len, &exchange) != PWOS_OK ||
-        exchange.kind != PWOS_MESH2_TIME_SYNC_RESPONSE ||
-        (exchange.flags & PWOS_MESH2_TIME_SYNC_FLAG_WALL_VALID) == 0u ||
-        g_time_pending == 0u ||
-        exchange.sequence != g_time_sequence ||
-        exchange.client_tx_mono_us != g_time_client_tx_us ||
-        exchange.server_tx_unix_us < exchange.server_rx_unix_us) {
-        ++g_stats.time_sync_reject;
-        return 1;
-    }
-
-    t4_mono_us = local_monotonic_us();
-    if (t4_mono_us < exchange.client_tx_mono_us) {
-        ++g_stats.time_sync_reject;
-        return 1;
-    }
-    transit_us = t4_mono_us - exchange.client_tx_mono_us;
-    server_work_us = exchange.server_tx_unix_us -
-        exchange.server_rx_unix_us;
-    delay_us = transit_us > server_work_us ? transit_us - server_work_us : 0u;
-    /* NTP 四时间戳公式，结果是 wall = mono + offset。 */
-    mono_to_wall_us =
-        ((int64_t)exchange.server_rx_unix_us -
-            (int64_t)exchange.client_tx_mono_us) / 2 +
-        ((int64_t)exchange.server_tx_unix_us -
-            (int64_t)t4_mono_us) / 2;
-
-    taskENTER_CRITICAL();
-    g_time_offset_us = mono_to_wall_us;
-    g_time_delay_us = delay_us > UINT32_MAX ? UINT32_MAX : (uint32_t)delay_us;
-    g_last_time_sync_tick = (uint32_t)xTaskGetTickCount();
-    g_time_valid = 1u;
-    g_time_pending = 0u;
-    ++g_stats.time_sync_rx;
-    taskEXIT_CRITICAL();
     return 1;
 }
 
@@ -999,16 +878,6 @@ void pwos_node_control_init(void)
     g_authority_priority = 0u;
     g_authority_ttl = 0u;
     g_authority_last_tick = 0u;
-    g_time_valid = 0u;
-    g_time_pending = 0u;
-    g_time_sequence = 0u;
-    g_last_time_sync_attempt_tick = 0u;
-    g_last_time_sync_tick = 0u;
-    g_time_delay_us = 0u;
-    g_time_offset_us = 0;
-    g_time_client_tx_us = 0u;
-    g_mono_last_tick = 0u;
-    g_mono_wrap_ticks = 0u;
     memset(g_host_advertise_seen, 0, sizeof(g_host_advertise_seen));
     pwos_port_manager_set_mesh_assigned(0u, PWOS_LINK_ADDR_UNASSIGNED);
 }
@@ -1027,7 +896,6 @@ void pwos_node_control_tick(void)
         g_authority_valid = 0u;
         g_authority_port = PWOS_LINK_ADDR_UNASSIGNED;
         g_authority_ttl = 0u;
-        invalidate_wall_time();
         if (g_state == PWOS_NODE_ASSIGNED) {
             g_state = PWOS_NODE_OFFLINE;
             g_local_addr = PWOS_LINK_ADDR_UNASSIGNED;
@@ -1072,17 +940,6 @@ void pwos_node_control_tick(void)
         send_link_state_snapshot();
     }
 
-    if (g_last_time_sync_attempt_tick == 0u ||
-        (uint32_t)(now - g_last_time_sync_attempt_tick) >=
-            pdMS_TO_TICKS(PWOS_NODE_TIME_SYNC_INTERVAL_MS)) {
-        (void)send_time_sync();
-    }
-    if (g_time_valid != 0u &&
-        (uint32_t)(now - g_last_time_sync_tick) >=
-            pdMS_TO_TICKS(PWOS_NODE_TIME_SYNC_TIMEOUT_MS)) {
-        invalidate_wall_time();
-    }
-
     g_stats.state = g_state;
     g_stats.local_addr = g_local_addr;
     g_stats.upstream_port = g_upstream_port;
@@ -1100,10 +957,6 @@ void pwos_node_control_tick(void)
     g_stats.authority_epoch = g_authority_epoch;
     g_stats.authority_priority = g_authority_priority;
     g_stats.authority_ttl = g_authority_ttl;
-    g_stats.time_valid = g_time_valid;
-    g_stats.last_time_sync_tick = g_last_time_sync_tick;
-    g_stats.time_delay_us = g_time_delay_us;
-    g_stats.time_offset_us = g_time_offset_us;
 }
 
 int pwos_node_control_handle_rx(pwos_frame_block_t *block)
@@ -1142,8 +995,6 @@ int pwos_node_control_handle_rx(pwos_frame_block_t *block)
         return handle_route_update(&view, block->port_id);
     case PWOS_LINK_TYPE_CTRL_HOST_ADVERTISE:
         return handle_host_advertise(&view, block->port_id);
-    case PWOS_LINK_TYPE_CTRL_TIME_SYNC:
-        return handle_time_sync(&view, block->port_id);
     case PWOS_LINK_TYPE_CTRL_LINK_STATE:
     case PWOS_LINK_TYPE_CTRL_LEASE_RENEW:
         return route_or_drop(&view);
@@ -1172,21 +1023,6 @@ int pwos_node_control_route_lookup(uint8_t dst, uint8_t *out_port_id)
         return -1;
     }
     *out_port_id = route->port_id;
-    return 0;
-}
-
-int pwos_node_control_wall_time_us(uint64_t *out_unix_us)
-{
-    uint64_t mono_us;
-    int64_t wall_us;
-
-    if (out_unix_us == NULL || g_time_valid == 0u) return -1;
-    mono_us = local_monotonic_us();
-    taskENTER_CRITICAL();
-    wall_us = (int64_t)mono_us + g_time_offset_us;
-    taskEXIT_CRITICAL();
-    if (wall_us <= 0) return -1;
-    *out_unix_us = (uint64_t)wall_us;
     return 0;
 }
 
@@ -1228,18 +1064,6 @@ void pwos_node_control_get_snapshot(pwos_node_control_snapshot_t *out)
     g_stats.lease_ms = g_lease_ms;
     g_stats.last_register_tick = g_last_register_tick;
     g_stats.last_renew_tick = g_last_renew_tick;
-    g_stats.time_valid = g_time_valid;
-    g_stats.last_time_sync_tick = g_last_time_sync_tick;
-    g_stats.time_delay_us = g_time_delay_us;
-    g_stats.time_offset_us = g_time_offset_us;
-    g_stats.wall_time_us = 0u;
-    if (g_time_valid != 0u) {
-        int64_t wall_us = (int64_t)(
-            (g_mono_wrap_ticks + (uint32_t)xTaskGetTickCount()) *
-            (uint64_t)portTICK_PERIOD_MS * 1000u) + g_time_offset_us;
-
-        if (wall_us > 0) g_stats.wall_time_us = (uint64_t)wall_us;
-    }
     *out = g_stats;
     taskEXIT_CRITICAL();
 }

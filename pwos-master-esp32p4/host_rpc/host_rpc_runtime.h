@@ -22,10 +22,6 @@ typedef struct {
     uint16_t priority;
     uint16_t port;
     uint32_t last_seen_ms;
-    uint32_t last_time_sync_ms;
-    uint32_t time_delay_us;
-    int64_t time_offset_us;
-    uint8_t time_valid;
     char hostname[PWOS_HOST_RPC_HOSTNAME_CAP];
     char ip[16];
 } pwos_host_rpc_peer_snapshot_t;
@@ -54,20 +50,11 @@ typedef struct {
     uint32_t client_errors;
     uint32_t remote_reads;
     uint32_t remote_writes;
-    uint32_t time_sync_ok;
-    uint32_t time_sync_fail;
-    uint8_t wall_clock_valid;
-    uint32_t last_time_sync_ms;
-    uint32_t last_time_delay_us;
-    int64_t last_time_offset_us;
     int32_t last_error;
     char hostname[PWOS_HOST_RPC_HOSTNAME_CAP];
 } pwos_host_rpc_runtime_status_t;
 
 int pwos_host_rpc_runtime_start(void);
-
-/* 读取 Unix wall-clock。未完成 SNTP/对端校时时返回错误。 */
-int pwos_host_rpc_runtime_wall_time_us(uint64_t *out_unix_us);
 
 void pwos_host_rpc_runtime_get_status(
     pwos_host_rpc_runtime_status_t *out_status);

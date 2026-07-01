@@ -19,7 +19,6 @@ extern "C" {
 #define PWOS_MESH2_LINK_STATE_PAYLOAD_LEN 24u
 #define PWOS_MESH2_ROUTE_UPDATE_PAYLOAD_LEN 12u
 #define PWOS_MESH2_HOST_ADVERTISE_PAYLOAD_LEN 28u
-#define PWOS_MESH2_TIME_SYNC_PAYLOAD_LEN 32u
 
 #define PWOS_MESH2_NODE_CAP_RELAY 0x00000001u
 #define PWOS_MESH2_NODE_CAP_COORDINATOR 0x00000002u
@@ -34,10 +33,6 @@ extern "C" {
 #define PWOS_MESH2_HOST_ROLE_OBSERVER 0u
 #define PWOS_MESH2_HOST_ROLE_FOLLOWER 1u
 #define PWOS_MESH2_HOST_ROLE_LEADER 2u
-
-#define PWOS_MESH2_TIME_SYNC_REQUEST 1u
-#define PWOS_MESH2_TIME_SYNC_RESPONSE 2u
-#define PWOS_MESH2_TIME_SYNC_FLAG_WALL_VALID 0x01u
 
 typedef struct {
     uint32_t uid[3];
@@ -91,16 +86,6 @@ typedef struct {
     uint8_t role;
     uint8_t flags;
 } pwos_mesh2_host_advertise_t;
-
-/* 两报文 NTP 风格交换，节点使用本地单调时间，主机提供 Unix wall-clock。 */
-typedef struct {
-    uint8_t kind;
-    uint8_t flags;
-    uint32_t sequence;
-    uint64_t client_tx_mono_us;
-    uint64_t server_rx_unix_us;
-    uint64_t server_tx_unix_us;
-} pwos_mesh2_time_sync_t;
 
 pwos_status_t pwos_mesh2_encode_node_register(
     const pwos_mesh2_node_register_t *msg,
@@ -178,17 +163,6 @@ pwos_status_t pwos_mesh2_decode_host_advertise(
     const uint8_t *payload,
     size_t payload_len,
     pwos_mesh2_host_advertise_t *out_msg);
-
-pwos_status_t pwos_mesh2_encode_time_sync(
-    const pwos_mesh2_time_sync_t *msg,
-    uint8_t *payload,
-    size_t payload_cap,
-    size_t *out_len);
-
-pwos_status_t pwos_mesh2_decode_time_sync(
-    const uint8_t *payload,
-    size_t payload_len,
-    pwos_mesh2_time_sync_t *out_msg);
 
 #ifdef __cplusplus
 }

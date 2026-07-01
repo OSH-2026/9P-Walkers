@@ -221,39 +221,6 @@ static uint16_t dispatch_topology_sync(
         PWOS_HOST_RPC_STATUS_OK : PWOS_HOST_RPC_STATUS_INTERNAL;
 }
 
-static uint16_t dispatch_time_exchange(
-    pwos_host_rpc_service_t *service,
-    const pwos_host_rpc_frame_view_t *request,
-    uint16_t *out_payload_len)
-{
-    pwos_host_rpc_time_exchange_t exchange;
-    uint8_t wall_valid = 0u;
-
-    ++service->stats.time_exchange_calls;
-    if (service->config.wall_time_us == NULL ||
-        pwos_host_rpc_decode_time_exchange(
-            request->payload, request->payload_len, &exchange) != 0) {
-        return PWOS_HOST_RPC_STATUS_BAD_REQUEST;
-    }
-    exchange.server_rx_unix_us = service->config.wall_time_us(
-        service->config.ctx, &wall_valid);
-    exchange.flags = wall_valid != 0u ?
-        PWOS_HOST_RPC_TIME_FLAG_WALL_VALID : 0u;
-    exchange.server_tx_unix_us = service->config.wall_time_us(
-        service->config.ctx, &wall_valid);
-    if (wall_valid == 0u) {
-        exchange.flags = 0u;
-        exchange.server_rx_unix_us = 0u;
-        exchange.server_tx_unix_us = 0u;
-    }
-    return pwos_host_rpc_encode_time_exchange(
-        &exchange,
-        service->method_payload,
-        sizeof(service->method_payload),
-        out_payload_len) == 0 ?
-        PWOS_HOST_RPC_STATUS_OK : PWOS_HOST_RPC_STATUS_INTERNAL;
-}
-
 int pwos_host_rpc_service_init(
     pwos_host_rpc_service_t *service,
     const pwos_host_rpc_service_config_t *config)
@@ -315,11 +282,6 @@ int pwos_host_rpc_service_handle(
         response_service = "topology";
         response_method = "sync";
         status = dispatch_topology_sync(service, &request, &method_payload_len);
-    } else if (field_equals(request.service, request.service_len, "time") &&
-               field_equals(request.method, request.method_len, "exchange")) {
-        response_service = "time";
-        response_method = "exchange";
-        status = dispatch_time_exchange(service, &request, &method_payload_len);
     } else {
         ++service->stats.not_found;
     }

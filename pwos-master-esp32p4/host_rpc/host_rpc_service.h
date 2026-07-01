@@ -48,10 +48,6 @@ typedef int (*pwos_host_rpc_service_topology_sync_fn)(
     const pwos_host_rpc_topology_t *incoming,
     pwos_host_rpc_topology_t *out_current);
 
-typedef uint64_t (*pwos_host_rpc_service_wall_time_fn)(
-    void *ctx,
-    uint8_t *out_valid);
-
 typedef struct {
     void *ctx;
     pwos_host_rpc_service_read_fn read_node;
@@ -60,7 +56,6 @@ typedef struct {
     pwos_host_rpc_service_local_advertise_fn local_advertise;
     pwos_host_rpc_service_whoowns_fn whoowns;
     pwos_host_rpc_service_topology_sync_fn topology_sync;
-    pwos_host_rpc_service_wall_time_fn wall_time_us;
 } pwos_host_rpc_service_config_t;
 
 typedef struct {
@@ -74,7 +69,6 @@ typedef struct {
     uint32_t advertise_calls;
     uint32_t whoowns_calls;
     uint32_t topology_sync_calls;
-    uint32_t time_exchange_calls;
     uint32_t last_call_id;
     uint16_t last_status;
 } pwos_host_rpc_service_stats_t;

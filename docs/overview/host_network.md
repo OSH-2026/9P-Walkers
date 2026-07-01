@@ -27,12 +27,6 @@ Host RPC 使用 TCP 长度前缀和 bounded CBOR，提供：
 - topology owner 查询/同步
 - 跨主机节点 read/write
 - 分布式推理调用
-- `time.exchange` wall-clock 偏移/延迟测量
-
-P4 和 S3 都通过 `pool.ntp.org` 启动 SNTP。Host RPC discovery 每轮完成 advertise 后，
-使用四时间戳交换测量 peer 相对本机 wall-clock 的 `offset_us` 和链路 `delay_us`。
-若一台主机尚未获得有效 Unix 时间、另一台已经有效，前者会用 peer 的估计时间完成
-首次校时；后续仍由 SNTP 负责系统时钟校准。
 
 leader 分配全局 `mcuN` 名称。follower 保存全局名到 owner 本地名的映射；用户始终访问
 全局路径，不直接使用 owner 的局部短地址。
@@ -44,7 +38,6 @@ P4 WebShell：
 ```text
 hosts
 cat /host/sys/hosts
-cat /host/sys/time
 cat /host/sys/topology
 cat /host/sys/routes
 cat /host/sys/web
@@ -60,5 +53,3 @@ net status
 - 跨主机主要支持 read/write；远端目录 list/stat 尚未完整代理。
 - 固定容量适合控制和诊断流量，不适合大文件或视频流。
 - 网络分区时两侧可能短暂各自选主，恢复后依靠 epoch/priority/UID 收敛。
-- 当前同步没有硬件时间戳；offset 精度受 TCP/UART 路径不对称和任务调度抖动限制。
-- deadline、选举超时和 lease 使用单调时钟，不受 SNTP 或 `settimeofday` 跳变影响。

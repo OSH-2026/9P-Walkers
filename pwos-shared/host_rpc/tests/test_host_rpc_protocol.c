@@ -194,32 +194,6 @@ static void test_topology_payload(void)
     assert(memcmp(&topology, &decoded, sizeof(topology)) == 0);
 }
 
-static void test_time_exchange_payload(void)
-{
-    pwos_host_rpc_time_exchange_t in = {
-        .flags = PWOS_HOST_RPC_TIME_FLAG_WALL_VALID,
-        .sequence = 77u,
-        .client_tx_mono_us = UINT64_C(123456789),
-        .server_rx_unix_us = UINT64_C(1719792000123456),
-        .server_tx_unix_us = UINT64_C(1719792000124567),
-    };
-    pwos_host_rpc_time_exchange_t out;
-    uint8_t payload[PWOS_HOST_RPC_TIME_EXCHANGE_PAYLOAD_LEN];
-    uint16_t payload_len = 0u;
-
-    assert(pwos_host_rpc_encode_time_exchange(
-        &in, payload, sizeof(payload), &payload_len) == 0);
-    assert(payload_len == sizeof(payload));
-    assert(pwos_host_rpc_decode_time_exchange(payload, payload_len, &out) == 0);
-    assert(out.flags == in.flags);
-    assert(out.sequence == in.sequence);
-    assert(out.client_tx_mono_us == in.client_tx_mono_us);
-    assert(out.server_rx_unix_us == in.server_rx_unix_us);
-    assert(out.server_tx_unix_us == in.server_tx_unix_us);
-    payload[2] = 1u;
-    assert(pwos_host_rpc_decode_time_exchange(payload, payload_len, &out) != 0);
-}
-
 int main(void)
 {
     test_round_trip();
@@ -227,7 +201,6 @@ int main(void)
     test_leader_election_and_expiry();
     test_method_payloads();
     test_topology_payload();
-    test_time_exchange_payload();
     puts("pwos host rpc protocol tests passed");
     return 0;
 }

@@ -135,27 +135,6 @@ static void render_health(diag_writer_t *writer)
         (unsigned long)node.nonleader_ctrl_drop);
 }
 
-static void render_time(diag_writer_t *writer)
-{
-    pwos_node_control_snapshot_t node;
-    uint64_t wall_us = 0u;
-    int valid;
-
-    pwos_node_control_get_snapshot(&node);
-    valid = pwos_node_control_wall_time_us(&wall_us) == 0;
-    diag_printf(writer,
-        "valid=%u unix_us=%llu offset_us=%lld delay_us=%lu "
-        "last_sync_tick=%lu tx=%lu rx=%lu reject=%lu\n",
-        valid != 0 ? 1u : 0u,
-        (unsigned long long)(valid != 0 ? wall_us : 0u),
-        (long long)node.time_offset_us,
-        (unsigned long)node.time_delay_us,
-        (unsigned long)node.last_time_sync_tick,
-        (unsigned long)node.time_sync_tx,
-        (unsigned long)node.time_sync_rx,
-        (unsigned long)node.time_sync_reject);
-}
-
 static void render_tasks(diag_writer_t *writer)
 {
     pwos_task_status_t tasks[PWOS_TASK_COUNT];
@@ -594,8 +573,6 @@ static int service_vfs_read(
 
     if (strcmp(path, "/sys/health") == 0) {
         render_health(&writer);
-    } else if (strcmp(path, "/sys/time") == 0) {
-        render_time(&writer);
     } else if (strcmp(path, "/sys/tasks") == 0) {
         render_tasks(&writer);
     } else if (strcmp(path, "/sys/ports") == 0 ||

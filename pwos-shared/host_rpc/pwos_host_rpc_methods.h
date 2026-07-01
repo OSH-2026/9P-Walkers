@@ -12,9 +12,6 @@ extern "C" {
 #define PWOS_HOST_RPC_PATH_CAP 96u
 #define PWOS_HOST_RPC_HOSTNAME_CAP 32u
 #define PWOS_HOST_RPC_TOPOLOGY_MAX_NODES 12u
-#define PWOS_HOST_RPC_TIME_VERSION 1u
-#define PWOS_HOST_RPC_TIME_FLAG_WALL_VALID 0x01u
-#define PWOS_HOST_RPC_TIME_EXCHANGE_PAYLOAD_LEN 32u
 
 typedef struct {
     uint32_t uid[3];
@@ -55,14 +52,6 @@ typedef struct {
     uint8_t node_count;
     pwos_host_rpc_topology_node_t nodes[PWOS_HOST_RPC_TOPOLOGY_MAX_NODES];
 } pwos_host_rpc_topology_t;
-
-typedef struct {
-    uint8_t flags;
-    uint32_t sequence;
-    uint64_t client_tx_mono_us;
-    uint64_t server_rx_unix_us;
-    uint64_t server_tx_unix_us;
-} pwos_host_rpc_time_exchange_t;
 
 int pwos_host_rpc_encode_advertise(
     const pwos_host_rpc_advertise_t *advertise,
@@ -138,17 +127,6 @@ int pwos_host_rpc_decode_topology(
     const uint8_t *payload,
     uint16_t payload_len,
     pwos_host_rpc_topology_t *out_topology);
-
-int pwos_host_rpc_encode_time_exchange(
-    const pwos_host_rpc_time_exchange_t *exchange,
-    uint8_t *out,
-    size_t out_cap,
-    uint16_t *out_len);
-
-int pwos_host_rpc_decode_time_exchange(
-    const uint8_t *payload,
-    uint16_t payload_len,
-    pwos_host_rpc_time_exchange_t *out_exchange);
 
 #ifdef __cplusplus
 }

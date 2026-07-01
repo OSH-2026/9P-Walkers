@@ -17,8 +17,6 @@ typedef struct {
     uint8_t has_ip;
     uint8_t mdns_ready;
     uint8_t host_rpc_mdns_ready;
-    uint8_t sntp_started;
-    uint8_t wall_clock_valid;
     uint8_t mac[6];
     char hostname[PWOS_LAN_HOSTNAME_CAP];
     char ip[16];
@@ -29,8 +27,6 @@ typedef struct {
     uint32_t link_up_events;
     uint32_t link_down_events;
     uint32_t got_ip_events;
-    uint32_t sntp_sync_events;
-    uint64_t last_sync_unix_ms;
     int32_t last_error;
 } pwos_lan_runtime_status_t;
 

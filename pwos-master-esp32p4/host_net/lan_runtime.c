@@ -2,7 +2,6 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <sys/time.h>
 
 #include "esp_err.h"
 #include "esp_eth.h"
@@ -14,7 +13,6 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
-#include "esp_netif_sntp.h"
 #include "freertos/FreeRTOS.h"
 #include "mdns.h"
 
@@ -134,37 +132,6 @@ static void got_ip_event_handler(
 
     ESP_LOGI(TAG, "got ip " IPSTR ", open http://%s.local/",
         IP2STR(&event->ip_info.ip), hostname);
-}
-
-static void sntp_sync_callback(struct timeval *time_value)
-{
-    uint64_t unix_ms;
-
-    if (time_value == NULL) return;
-    unix_ms = (uint64_t)time_value->tv_sec * 1000u +
-        (uint64_t)time_value->tv_usec / 1000u;
-    portENTER_CRITICAL(&g_lan.lock);
-    g_lan.status.wall_clock_valid = time_value->tv_sec >= 1700000000 ? 1u : 0u;
-    g_lan.status.last_sync_unix_ms = unix_ms;
-    ++g_lan.status.sntp_sync_events;
-    portEXIT_CRITICAL(&g_lan.lock);
-    ESP_LOGI(TAG, "SNTP synchronized unix_ms=%llu",
-        (unsigned long long)unix_ms);
-}
-
-static esp_err_t setup_sntp(void)
-{
-    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
-    esp_err_t error;
-
-    config.sync_cb = sntp_sync_callback;
-    error = esp_netif_sntp_init(&config);
-    if (error == ESP_OK) {
-        portENTER_CRITICAL(&g_lan.lock);
-        g_lan.status.sntp_started = 1u;
-        portEXIT_CRITICAL(&g_lan.lock);
-    }
-    return error;
 }
 
 static esp_err_t setup_mdns(void)
@@ -313,11 +280,6 @@ int pwos_lan_runtime_start(void)
     if (error != ESP_OK) {
         set_last_error(error);
         ESP_LOGW(TAG, "mDNS unavailable: %s", esp_err_to_name(error));
-    }
-    error = setup_sntp();
-    if (error != ESP_OK) {
-        set_last_error(error);
-        ESP_LOGW(TAG, "SNTP unavailable: %s", esp_err_to_name(error));
     }
     ESP_LOGI(TAG, "LAN initialized, waiting for link and DHCP");
     return 0;

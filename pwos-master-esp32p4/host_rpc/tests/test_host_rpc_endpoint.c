@@ -14,7 +14,6 @@ typedef struct {
     uint8_t written[32];
     uint16_t written_len;
     uint32_t topology_generation;
-    uint64_t fake_wall_us;
 } test_env_t;
 
 static int fake_read(
@@ -114,15 +113,6 @@ static int fake_topology_sync(
     return 0;
 }
 
-static uint64_t fake_wall_time(void *ctx, uint8_t *out_valid)
-{
-    test_env_t *env = (test_env_t *)ctx;
-
-    *out_valid = 1u;
-    env->fake_wall_us += 100u;
-    return env->fake_wall_us;
-}
-
 static int loopback_exchange(
     void *ctx,
     const uint8_t *request,
@@ -154,8 +144,6 @@ static void init_env(test_env_t *env, pwos_host_rpc_peer_client_t *client)
     service_config.local_advertise = fake_local_advertise;
     service_config.whoowns = fake_whoowns;
     service_config.topology_sync = fake_topology_sync;
-    service_config.wall_time_us = fake_wall_time;
-    env->fake_wall_us = UINT64_C(1719792000000000);
     assert(pwos_host_rpc_service_init(&env->service, &service_config) == 0);
 
     memset(&client_config, 0, sizeof(client_config));
@@ -269,42 +257,11 @@ static void test_topology_sync(void)
     assert(response_topology.generation == 6u);
 }
 
-static void test_time_exchange(void)
-{
-    test_env_t env;
-    pwos_host_rpc_peer_client_t client;
-    pwos_host_rpc_time_exchange_t exchange = {
-        .sequence = 9u,
-        .client_tx_mono_us = UINT64_C(1234000),
-    };
-    uint8_t args[PWOS_HOST_RPC_TIME_EXCHANGE_PAYLOAD_LEN];
-    uint8_t response[PWOS_HOST_RPC_TIME_EXCHANGE_PAYLOAD_LEN];
-    uint16_t args_len = 0u;
-    uint16_t response_len = sizeof(response);
-    uint16_t status = 0u;
-
-    init_env(&env, &client);
-    assert(pwos_host_rpc_encode_time_exchange(
-        &exchange, args, sizeof(args), &args_len) == 0);
-    assert(pwos_host_rpc_peer_client_call(
-        &client, "time", "exchange", args, args_len, 300u,
-        response, &response_len, &status) == 0);
-    assert(status == PWOS_HOST_RPC_STATUS_OK);
-    assert(pwos_host_rpc_decode_time_exchange(
-        response, response_len, &exchange) == 0);
-    assert(exchange.flags == PWOS_HOST_RPC_TIME_FLAG_WALL_VALID);
-    assert(exchange.sequence == 9u);
-    assert(exchange.client_tx_mono_us == UINT64_C(1234000));
-    assert(exchange.server_rx_unix_us == UINT64_C(1719792000000100));
-    assert(exchange.server_tx_unix_us == UINT64_C(1719792000000200));
-}
-
 int main(void)
 {
     test_read_write();
     test_advertise_whoowns_and_unknown();
     test_topology_sync();
-    test_time_exchange();
     puts("pwos host rpc endpoint tests passed");
     return 0;
 }
