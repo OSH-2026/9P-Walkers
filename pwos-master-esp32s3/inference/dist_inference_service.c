@@ -40,27 +40,40 @@ int pwos_dist_inference_service_read(
 
     if (strcmp(path, PWOS_LLM_STATUS_PATH) == 0) {
         /* 返回推理状态 JSON */
+        uint16_t buf_cap = *in_out_len;
+        uint16_t written = 0u;
+        int ret;
+
         pwos_inference_runtime_get_snapshot(&snap);
-        int len = snprintf((char *)out, *in_out_len,
+        ret = snprintf((char *)out, buf_cap,
             "{\"state\":%d,\"request_id\":%lu,\"runs\":%lu,",
             snap.state,
             (unsigned long)snap.request_id,
             (unsigned long)snap.runs);
-        if (len < 0 || (uint16_t)len >= *in_out_len) {
+        if (ret < 0 || (uint16_t)ret >= buf_cap) {
             *in_out_len = 0;
             return -1;
         }
+        written = (uint16_t)ret;
+
         /* 继续追加剩余字段 */
-        len += snprintf((char *)out + len, *in_out_len - len,
+        ret = snprintf((char *)out + written, buf_cap - written,
             "\"generated\":%u,\"tok_s\":%.2f,\"psram_free\":%lu}",
             snap.generated_bytes,
             (double)snap.tokens_per_second,
             (unsigned long)snap.psram_free);
-        if (len < 0 || (uint16_t)len >= *in_out_len) {
+        if (ret < 0) {
             *in_out_len = 0;
             return -1;
         }
-        *in_out_len = (uint16_t)len;
+        written += (uint16_t)ret;
+        if (written >= buf_cap) {
+            /* 输出被截断，但前半段 JSON 仍可部分使用；
+             * 为简化错误处理，直接返回 -1。 */
+            *in_out_len = 0;
+            return -1;
+        }
+        *in_out_len = written;
         return 0;
     }
 

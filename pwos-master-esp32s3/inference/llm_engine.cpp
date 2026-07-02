@@ -1010,6 +1010,9 @@ int sample_topp(v4sf *probabilities, int n, v4sf topp, ProbIndex *probindex, v4s
     // have very low probabilities and are less likely to go "off the rails".
     // coin is a random number in [0, 1), usually from random_f32()
 
+    /* 防御：probindex 为空或 n 异常时回退到 argmax */
+    if (probindex == NULL || n <= 0) return 0;
+
     int n0 = 0;
     // quicksort indices in descending order of probabilities
     // values smaller than (1 - topp) / (n - 1) cannot be part of the result
@@ -1155,7 +1158,14 @@ void generate(
 
     // encode the (string) prompt into tokens sequence
     int num_prompt_tokens = 0;
-    int *prompt_tokens = safe_alloc<int>((strlen(prompt) + 3)); // +3 for '\0', ?BOS, ?EOS
+    /* prompt 最坏情况：每个字节成为一个 token + BOS + dummy_prefix + EOS */
+    size_t prompt_len = strlen(prompt);
+    size_t max_tokens = prompt_len + 3u;
+    if (max_tokens > 1024u) {
+        ESP_LOGE(TAG, "prompt 过长 (%zu 字节)，拒绝", prompt_len);
+        return;
+    }
+    int *prompt_tokens = safe_alloc<int>(max_tokens);
     encode(tokenizer, prompt, 1, 0, prompt_tokens, &num_prompt_tokens);
     if (num_prompt_tokens < 1)
     {

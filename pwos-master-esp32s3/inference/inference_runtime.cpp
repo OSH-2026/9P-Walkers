@@ -247,7 +247,17 @@ int pwos_inference_runtime_start(void)
         5u,
         &g_inference.worker_task,
         1);
-    if (created != pdPASS) return -1;
+    if (created != pdPASS) {
+        /* worker 未创建，清理已分配的资源后返回 */
+        vSemaphoreDelete(g_inference.mutex);
+        g_inference.mutex = NULL;
+        vQueueDelete(g_inference.queue);
+        g_inference.queue = NULL;
+        heap_caps_free(g_inference.output);
+        g_inference.output = NULL;
+        g_inference.snapshot.initialized = 0u;
+        return -1;
+    }
     created = xTaskCreate(
         inference_console,
         "llm_console",
@@ -255,7 +265,20 @@ int pwos_inference_runtime_start(void)
         NULL,
         3u,
         &g_inference.console_task);
-    return created == pdPASS ? 0 : -1;
+    if (created != pdPASS) {
+        /* console 创建失败，删除已运行的 worker 并清理 */
+        vTaskDelete(g_inference.worker_task);
+        g_inference.worker_task = NULL;
+        vSemaphoreDelete(g_inference.mutex);
+        g_inference.mutex = NULL;
+        vQueueDelete(g_inference.queue);
+        g_inference.queue = NULL;
+        heap_caps_free(g_inference.output);
+        g_inference.output = NULL;
+        g_inference.snapshot.initialized = 0u;
+        return -1;
+    }
+    return 0;
 }
 
 int pwos_inference_runtime_submit(
