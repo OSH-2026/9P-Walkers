@@ -30,10 +30,10 @@
 #include "session_manager.h"
 
 #define PWOS_COORDINATOR_TASK_NAME "pwos_coord"
-#define PWOS_COORDINATOR_TASK_STACK 4096
+#define PWOS_COORDINATOR_TASK_STACK 6144
 #define PWOS_COORDINATOR_TASK_PRIO 8
 #define PWOS_COORDINATOR_PROBE_TASK_NAME "pwos_m9p_probe"
-#define PWOS_COORDINATOR_PROBE_TASK_STACK 4096
+#define PWOS_COORDINATOR_PROBE_TASK_STACK 5120
 #define PWOS_COORDINATOR_PROBE_TASK_PRIO 6
 #define PWOS_COORDINATOR_TX_GUARD_US 2000u
 #define PWOS_COORDINATOR_UART_RX_BUF_SIZE 2048
@@ -608,6 +608,8 @@ static void handle_frame(
             break;
         }
         if (rpc_view.kind == PWOS_RPC_KIND_RESPONSE) {
+            /* RESPONSE: 传递完整链路帧（含 RPC 头），session 层可能需要
+             * 重新编码转发给原始调用方。 */
             rc = pwos_session_manager_deliver_data(
                 &runtime->sessions,
                 (uint8_t)PWOS_LINK_TYPE_DATA_RPC,
@@ -616,6 +618,7 @@ static void handle_frame(
                 view->payload,
                 view->payload_len);
         } else {
+            /* STREAM: 仅传递解码后的负载体，session 层负责拼接分块。 */
             rc = pwos_session_manager_deliver_data_part(
                 &runtime->sessions,
                 (uint8_t)PWOS_LINK_TYPE_DATA_RPC,
@@ -653,7 +656,7 @@ static void handle_frame(
             (uint8_t)PWOS_LINK_TYPE_DATA_JOB,
             view->src,
             job_view.request_id,
-            view->payload,
+            view->payload,       /* 含 JOB 帧头的完整帧，与 RPC RESPONSE 路径一致 */
             view->payload_len);
         if (rc == 1) {
             ++runtime->stats.job_rx;
@@ -748,10 +751,11 @@ static int run_cluster_health_probe(
     int rc;
     int written;
 
-    if (runtime == NULL || route == NULL) {
+    if (runtime == NULL || route == NULL || route->target[0] == '\0') {
         return -(int)M9P_ERR_EINVAL;
     }
 
+    /* 确保 route->target 以 null 终止（防御来自网络的损坏数据） */
     written = snprintf(path, sizeof(path), "/%s/sys/health", route->target);
     if (written <= 0 || (size_t)written >= sizeof(path)) {
         return -(int)M9P_ERR_EMSIZE;
@@ -885,21 +889,26 @@ static void session_manager_lock(void *ctx)
 {
     pwos_coordinator_runtime_t *runtime = (pwos_coordinator_runtime_t *)ctx;
 
-    (void)xSemaphoreTake(runtime->session_mutex, portMAX_DELAY);
+    if (runtime != NULL && runtime->session_mutex != NULL) {
+        (void)xSemaphoreTake(runtime->session_mutex, portMAX_DELAY);
+    }
 }
 
 static void session_manager_unlock(void *ctx)
 {
     pwos_coordinator_runtime_t *runtime = (pwos_coordinator_runtime_t *)ctx;
 
-    (void)xSemaphoreGive(runtime->session_mutex);
+    if (runtime != NULL && runtime->session_mutex != NULL) {
+        (void)xSemaphoreGive(runtime->session_mutex);
+    }
 }
 
 static void session_client_lock(void *ctx, uint8_t session_index)
 {
     pwos_coordinator_runtime_t *runtime = (pwos_coordinator_runtime_t *)ctx;
 
-    if (session_index < PWOS_SESSION_MANAGER_MAX_SESSIONS) {
+    if (runtime != NULL && session_index < PWOS_SESSION_MANAGER_MAX_SESSIONS &&
+        runtime->session_client_mutex[session_index] != NULL) {
         (void)xSemaphoreTake(runtime->session_client_mutex[session_index], portMAX_DELAY);
     }
 }
@@ -908,7 +917,8 @@ static void session_client_unlock(void *ctx, uint8_t session_index)
 {
     pwos_coordinator_runtime_t *runtime = (pwos_coordinator_runtime_t *)ctx;
 
-    if (session_index < PWOS_SESSION_MANAGER_MAX_SESSIONS) {
+    if (runtime != NULL && session_index < PWOS_SESSION_MANAGER_MAX_SESSIONS &&
+        runtime->session_client_mutex[session_index] != NULL) {
         (void)xSemaphoreGive(runtime->session_client_mutex[session_index]);
     }
 }
@@ -917,7 +927,8 @@ static void session_pending_reset(void *ctx, uint8_t pending_index)
 {
     pwos_coordinator_runtime_t *runtime = (pwos_coordinator_runtime_t *)ctx;
 
-    if (pending_index < PWOS_SESSION_MANAGER_MAX_PENDING) {
+    if (runtime != NULL && pending_index < PWOS_SESSION_MANAGER_MAX_PENDING &&
+        runtime->pending_event[pending_index] != NULL) {
         while (xSemaphoreTake(runtime->pending_event[pending_index], 0u) == pdTRUE) {
             /* 清掉上一次事务可能遗留的 signal。 */
         }
@@ -932,7 +943,8 @@ static int session_pending_wait(
     pwos_coordinator_runtime_t *runtime = (pwos_coordinator_runtime_t *)ctx;
     TickType_t timeout_ticks;
 
-    if (pending_index >= PWOS_SESSION_MANAGER_MAX_PENDING) {
+    if (runtime == NULL || pending_index >= PWOS_SESSION_MANAGER_MAX_PENDING ||
+        runtime->pending_event[pending_index] == NULL) {
         return -(int)M9P_ERR_EINVAL;
     }
     timeout_ticks = pdMS_TO_TICKS(timeout_ms);
@@ -947,7 +959,8 @@ static void session_pending_signal(void *ctx, uint8_t pending_index)
 {
     pwos_coordinator_runtime_t *runtime = (pwos_coordinator_runtime_t *)ctx;
 
-    if (pending_index < PWOS_SESSION_MANAGER_MAX_PENDING) {
+    if (runtime != NULL && pending_index < PWOS_SESSION_MANAGER_MAX_PENDING &&
+        runtime->pending_event[pending_index] != NULL) {
         (void)xSemaphoreGive(runtime->pending_event[pending_index]);
     }
 }
@@ -962,28 +975,36 @@ static void cluster_vfs_lock(void *ctx)
 {
     pwos_coordinator_runtime_t *runtime = (pwos_coordinator_runtime_t *)ctx;
 
-    (void)xSemaphoreTake(runtime->vfs_mutex, portMAX_DELAY);
+    if (runtime != NULL && runtime->vfs_mutex != NULL) {
+        (void)xSemaphoreTake(runtime->vfs_mutex, portMAX_DELAY);
+    }
 }
 
 static void cluster_vfs_unlock(void *ctx)
 {
     pwos_coordinator_runtime_t *runtime = (pwos_coordinator_runtime_t *)ctx;
 
-    (void)xSemaphoreGive(runtime->vfs_mutex);
+    if (runtime != NULL && runtime->vfs_mutex != NULL) {
+        (void)xSemaphoreGive(runtime->vfs_mutex);
+    }
 }
 
 static void job_manager_lock(void *ctx)
 {
     pwos_coordinator_runtime_t *runtime = (pwos_coordinator_runtime_t *)ctx;
 
-    (void)xSemaphoreTake(runtime->job_mutex, portMAX_DELAY);
+    if (runtime != NULL && runtime->job_mutex != NULL) {
+        (void)xSemaphoreTake(runtime->job_mutex, portMAX_DELAY);
+    }
 }
 
 static void job_manager_unlock(void *ctx)
 {
     pwos_coordinator_runtime_t *runtime = (pwos_coordinator_runtime_t *)ctx;
 
-    (void)xSemaphoreGive(runtime->job_mutex);
+    if (runtime != NULL && runtime->job_mutex != NULL) {
+        (void)xSemaphoreGive(runtime->job_mutex);
+    }
 }
 
 static int resolve_job_target(
@@ -1504,18 +1525,24 @@ static int find_rpc_route(
     if (target == NULL || out_route == NULL || target[0] == '\0') {
         return -(int)M9P_ERR_EINVAL;
     }
+
+    /* 持 VFS 锁遍历，防止 sync_cluster_vfs 并发修改路由表 */
+    cluster_vfs_lock(&g_runtime);
     for (i = 0u; i < PWOS_CLUSTER_VFS_MAX_ROUTES; ++i) {
         pwos_cluster_vfs_route_t route;
 
         if (pwos_cluster_vfs_get_route(&g_runtime.cluster_vfs, i, &route) != 0 ||
             route.state == PWOS_CLUSTER_VFS_ROUTE_EMPTY ||
             route.state == PWOS_CLUSTER_VFS_ROUTE_OFFLINE ||
+            route.target[0] == '\0' ||
             strcmp(route.target, target) != 0) {
             continue;
         }
         *out_route = route;
+        cluster_vfs_unlock(&g_runtime);
         return 0;
     }
+    cluster_vfs_unlock(&g_runtime);
     return PWOS_SESSION_ERR_NO_ROUTE;
 }
 
