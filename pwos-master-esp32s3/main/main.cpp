@@ -6,6 +6,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_task_wdt.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -17,6 +18,8 @@
 #include "sdkconfig.h"
 
 #define PWOS_BOOT_TIMEOUT_MS 30000u  /* 整体启动超时 */
+#define WDT_FEED_INTERVAL_MS 3000u   /* 看门狗喂狗间隔（须 < TWDT 超时 5s） */
+#define HEALTH_CHECK_CYCLES  10u     /* 每 10 次喂狗 = 30s 执行一次健康检查 */
 /*
  * app_main 栈大小由 sdkconfig 中 CONFIG_ESP_MAIN_TASK_STACK_SIZE 控制。
  * 当前 sdkconfig.defaults 已设为 8192（默认 3584 不够容纳 WiFi/协调器初始化）。
@@ -128,27 +131,40 @@ extern "C" void app_main(void)
         esp_restart();
     }
 
-    /* 6. 启动完成 */
+    /* 6. 启动完成，注册任务看门狗 */
     advance_phase(BOOT_PHASE_DONE);
     ESP_LOGI(TAG, "系统就绪 phase=%d elapsed=%lld ms",
              (int)g_boot_phase,
              (long long)((esp_timer_get_time() - g_boot_start_us) / 1000));
 
-    /* 7. 空闲循环 + 周期性自检 */
+    /* 将当前任务 (app_main) 注册到 TWDT，超时时间继承 sdkconfig 的 5 秒 */
+    esp_task_wdt_add(NULL);
+    ESP_LOGI(TAG, "TWDT 已订阅 app_main，喂狗间隔=%u ms", WDT_FEED_INTERVAL_MS);
+
+    /* 7. 空闲循环：喂狗 + 周期性自检 */
+    uint32_t cycle = 0u;
     for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(30000));  /* 每 30 秒自检一次 */
+        vTaskDelay(pdMS_TO_TICKS(WDT_FEED_INTERVAL_MS));
 
-        /* 心跳 + 简要健康信息 */
-        size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-        ESP_LOGD(TAG, "heartbeat psram_free=%.1f KB",
-                 (double)free_psram / 1024.0);
+        /* ── 喂狗（每次循环必做，确保 TWDT 不触发）── */
+        esp_task_wdt_reset();
 
-        /* 若 PSRAM 严重不足（< 128 KB），主动重启以防 OOM 连锁故障 */
-        if (free_psram < 128u * 1024u) {
-            ESP_LOGE(TAG, "PSRAM 严重不足 (%.1f KB)，主动重启",
+        /* ── 健康检查（每 HEALTH_CHECK_CYCLES 次 = 约 30 秒）── */
+        cycle++;
+        if (cycle >= HEALTH_CHECK_CYCLES) {
+            cycle = 0u;
+
+            size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+            ESP_LOGD(TAG, "heartbeat psram_free=%.1f KB",
                      (double)free_psram / 1024.0);
-            vTaskDelay(pdMS_TO_TICKS(3000));
-            esp_restart();
+
+            /* 若 PSRAM 严重不足（< 128 KB），主动重启以防 OOM 连锁故障 */
+            if (free_psram < 128u * 1024u) {
+                ESP_LOGE(TAG, "PSRAM 严重不足 (%.1f KB)，主动重启",
+                         (double)free_psram / 1024.0);
+                vTaskDelay(pdMS_TO_TICKS(3000));
+                esp_restart();
+            }
         }
     }
 }
