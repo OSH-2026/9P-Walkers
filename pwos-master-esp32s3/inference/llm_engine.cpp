@@ -1,1256 +1,923 @@
-/* Inference for Llama-2 Transformer model in pure C */
-/**
- * Original author of this:
- * https://github.com/karpathy/llama2.c 
- * 
- * Slight modifications added to make it ESP32 friendly
- */
+/* ========================================================================
+ * LLM 推理引擎 —— 基于 llama2.c 移植到 ESP32 平台
+ *
+ * 原始作者: https://github.com/karpathy/llama2.c
+ * 适配: ESP-IDF (FreeRTOS + PSRAM + 双核并行)
+ * ======================================================================== */
+
 #include "llm_engine.h"
+
+#include <ctype.h>
+#include <fcntl.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <ctype.h>
-#include <time.h>
-#include <math.h>
 #include <string.h>
-#include <fcntl.h>
-#include "esp_log.h"
+#include <time.h>
+
+#include "esp_attr.h"
 #include "esp_heap_caps.h"
+#include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
-#include "esp_attr.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
-#define MAP_FAILED NULL
-#define munmap(ptr, length) custom_munmap(ptr)
-#define close(fd) custom_close(fd)
 
-#define TASK_0_BIT (1 << 0)
-#define TASK_1_BIT (1 << 1)
-#define FORWARD_TASK_1 (1 << 2)
-#define FORWARD_TASK_2 (1 << 3)
-#define ALL_SYNC_BITS (TASK_0_BIT | TASK_1_BIT)
-#define ALL_FORWARD_TASKS (FORWARD_TASK_1 | FORWARD_TASK_2)
+/* ========================================================================
+ * 第一节: 配置常量
+ * ======================================================================== */
 
-/* 同步超时：若对端任务卡死，最多等待此时间后主动重启，
- * 避免永久死锁导致 Task Watchdog 触发不可预测的行为。 */
-#define MATMUL_SYNC_TIMEOUT_MS  2000u
-#define FORWARD_SYNC_TIMEOUT_MS 5000u
+/* ---- 双核同步位掩码 ---- */
+#define TASK_0_BIT      (1 << 0)
+#define TASK_1_BIT      (1 << 1)
+#define FORWARD_TASK_1  (1 << 2)
+#define FORWARD_TASK_2  (1 << 3)
+#define ALL_SYNC_BITS      (TASK_0_BIT | TASK_1_BIT)
+#define ALL_FORWARD_TASKS  (FORWARD_TASK_1 | FORWARD_TASK_2)
 
-/* 超过此阈值的分配不尝试回退到内部 SRAM（ESP32-S3 内部 SRAM 典型只有 512KB，
- * 大块分配回退几乎必定失败，且碎片化的回退分配会扰乱堆状态）。 */
-#define SAFE_ALLOC_INTERNAL_FALLBACK_LIMIT (32u * 1024u)
+/* ---- 同步超时 (防止死锁 → 主动重启) ---- */
+#define MATMUL_SYNC_TIMEOUT_MS   2000u
+#define FORWARD_SYNC_TIMEOUT_MS  5000u
 
+/* ---- 内存回退策略: 超过此阈值的分配不尝试内部 SRAM ---- */
+#define SAFE_ALLOC_INTERNAL_FALLBACK_LIMIT  (32u * 1024u)
+
+/* ---- 平台兼容 (原 llama2.c 使用 mmap) ---- */
+#define MAP_FAILED  NULL
+#define munmap(p, l)  custom_munmap(p)
+#define close(fd)     custom_close(fd)
+
+/* ========================================================================
+ * 第二节: 任务参数结构体
+ * ======================================================================== */
+
+typedef struct {
+    v4sf *xout, *x, *w;
+    int   start, end;      /* 本任务负责的行范围 [start, end) */
+    int   n, d;            /* 矩阵维度: w[d][n] × x[n] → xout[d] */
+    int   task_num;        /* 事件组同步位 */
+} MatMulTaskParams;
+
+typedef struct {
+    RunState          *s;
+    TransformerWeights *w;
+    Config            *p;
+    int pos, start, loff, end;
+    int dim, kv_dim, kv_mul, hidden_dim, head_size;
+    int task_num;
+} ForwardTaskParams;
+
+/* ========================================================================
+ * 第三节: 全局同步对象 & 任务句柄
+ * ======================================================================== */
+
+static const char *TAG = "LLM";
+
+static EventGroupHandle_t xEventGroup;
+static EventGroupHandle_t ForwardEventGroup;
+static SemaphoreHandle_t  semaDataReady;
+static SemaphoreHandle_t  semaForwardDataReady;
+
+static TaskHandle_t handle_forward_task;
+static TaskHandle_t matmul_task_2;
+
+static ForwardTaskParams *forward_params;
+static MatMulTaskParams  *matmul_params;
+
+/* ---- 任务函数声明 ---- */
+static void matmul_task(void *params);
+static void forward_task(void *params);
+
+/* ========================================================================
+ * 第四节: 内存管理
+ * ======================================================================== */
+
+/**
+ * 安全内存分配: PSRAM 优先，小块允许内部 SRAM 回退。
+ * 失败时打印详细诊断并 abort()。
+ */
 template <typename T>
-T* safe_alloc(size_t num_elements) {
-    size_t total_size = num_elements * sizeof(T);
-
-    /* 0. 分配前记录当前空闲内存，方便定位 OOM 阶段 */
-    size_t free_psram  = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+static T *safe_alloc(size_t num_elements)
+{
+    size_t total_size    = num_elements * sizeof(T);
+    size_t free_psram    = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+
+    /* 大块分配提前告警 */
     if (total_size > free_psram / 2u) {
-        ESP_LOGW("LLM", "大块分配 %.1f KB，当前 PSRAM 空闲 %.1f KB",
+        ESP_LOGW(TAG, "大块分配 %.1f KB, PSRAM 空闲 %.1f KB",
                  (double)total_size / 1024.0, (double)free_psram / 1024.0);
     }
 
-    /* 1. 优先在 PSRAM 中申请（自动清零） */
-    T* ptr = (T*)heap_caps_calloc(num_elements, sizeof(T), MALLOC_CAP_SPIRAM);
+    /* 优先 PSRAM */
+    T *ptr = (T *)heap_caps_calloc(num_elements, sizeof(T), MALLOC_CAP_SPIRAM);
 
-    /* 2. 小尺寸分配允许回退到内部 SRAM；大尺寸直接失败（避免耗尽内部 SRAM 导致
-     *    WiFi/LWIP 等关键组件异常）。 */
-    if (ptr == nullptr && total_size <= SAFE_ALLOC_INTERNAL_FALLBACK_LIMIT) {
-        ESP_LOGW("LLM", "PSRAM 不足，%.1f KB 回退到内部 SRAM",
+    /* 小块允许回退到内部 SRAM */
+    if (!ptr && total_size <= SAFE_ALLOC_INTERNAL_FALLBACK_LIMIT) {
+        ESP_LOGW(TAG, "PSRAM 不足, %.1f KB 回退到内部 SRAM",
                  (double)total_size / 1024.0);
-        ptr = (T*)heap_caps_calloc(num_elements, sizeof(T), MALLOC_CAP_INTERNAL);
+        ptr = (T *)heap_caps_calloc(num_elements, sizeof(T), MALLOC_CAP_INTERNAL);
     }
 
-    /* 3. 仍然失败 → 记录详细诊断信息后终止 */
-    if (ptr == nullptr) {
-        ESP_LOGE("LLM", "内存分配失败！申请=%.1f KB PSRAM空闲=%.1f KB 内部空闲=%.1f KB",
+    if (!ptr) {
+        ESP_LOGE(TAG, "内存分配失败! 申请=%.1f KB PSRAM空闲=%.1f KB 内部空闲=%.1f KB",
                  (double)total_size / 1024.0,
                  (double)free_psram / 1024.0,
                  (double)free_internal / 1024.0);
         abort();
     }
-
     return ptr;
 }
 
-typedef struct
+/* ---- 平台兼容: 用 free 替代 munmap ---- */
+static void custom_munmap(void *ptr) { free(ptr); }
+static int  custom_close(int fd)     { (void)fd; return 0; }
+
+/* ========================================================================
+ * 第五节: 模型加载 & 构建
+ * ======================================================================== */
+
+/**
+ * 分配 RunState 中的所有激活缓冲区。
+ * KV cache 是内存大户，单独打印大小便于诊断。
+ */
+static void malloc_run_state(RunState *s, const Config *p)
 {
-    v4sf *xout;
-    v4sf *x;
-    v4sf *w;
-    int start;
-    int end;
-    int n;
-    int d;
-    int task_num;
-} MatMulTaskParams;
-
-typedef struct
-{
-    RunState *s;
-    TransformerWeights *w;
-    Config *p;
-    int pos;
-    int start;
-    int loff;
-    int end;
-    int dim;
-    int kv_dim;
-    int kv_mul;
-    int hidden_dim;
-    int head_size;
-    int task_num;
-} ForwardTaskParams;
-
-EventGroupHandle_t xEventGroup;
-EventGroupHandle_t ForwardEventGroup;
-
-static const char *TAG = "LLM";
-TaskHandle_t handle_forward_task = NULL;
-TaskHandle_t matmul_task_2 = NULL;
-
-ForwardTaskParams *forward_params = NULL;
-MatMulTaskParams *matmul_params = NULL;
-
-SemaphoreHandle_t semaDataReady;
-SemaphoreHandle_t semaForwardDataReady;
-
-void matmul_task(void *params);
-void forward_task(void *params);
-
-void custom_munmap(void *ptr)
-{
-    free(ptr);
-}
-
-int custom_close(int fd)
-{
-    // Since there are no actual file descriptors to close, simply return 0 (success)
-    return 0;
-}
-
-void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
-          char *cli_user_prompt, char *cli_system_prompt, int steps);
-
-void malloc_run_state(RunState *s, Config *p)
-{
-    // we calloc instead of malloc to keep valgrind happy
     int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
-    size_t kv_cache_elems = (size_t)p->n_layers * (size_t)p->seq_len * (size_t)kv_dim;
-    size_t kv_cache_bytes = kv_cache_elems * sizeof(v4sf);
+    size_t kv_elems = (size_t)p->n_layers * (size_t)p->seq_len * (size_t)kv_dim;
+
     ESP_LOGI(TAG, "KV cache 大小: %.1f KB (layers=%d seq=%d kv_dim=%d)",
-             (double)kv_cache_bytes / 1024.0, p->n_layers, p->seq_len, kv_dim);
+             (double)(kv_elems * sizeof(v4sf)) / 1024.0,
+             p->n_layers, p->seq_len, kv_dim);
 
-    s->x = safe_alloc<v4sf>(p->dim);
-    s->xb = safe_alloc<v4sf>(p->dim);
-    s->xb2 = safe_alloc<v4sf>(p->dim);
-    s->hb = safe_alloc<v4sf>(p->hidden_dim);
-    s->hb2 = safe_alloc<v4sf>(p->hidden_dim);
-    s->q = safe_alloc<v4sf>(p->dim);
-    s->key_cache = safe_alloc<v4sf>(kv_cache_elems);
-    s->value_cache = safe_alloc<v4sf>(kv_cache_elems);
-    s->att = safe_alloc<v4sf>((size_t)p->n_heads * (size_t)p->seq_len);
-    s->logits = safe_alloc<v4sf>(p->vocab_size);
-    // ensure all mallocs went fine
-    if (!s->x || !s->xb || !s->xb2 || !s->hb || !s->hb2 || !s->q || !s->key_cache || !s->value_cache || !s->att || !s->logits)
-    {
-        fprintf(stderr, "malloc failed!\n");
-        exit(EXIT_FAILURE);
-    }
+    s->x           = safe_alloc<v4sf>(p->dim);
+    s->xb          = safe_alloc<v4sf>(p->dim);
+    s->xb2         = safe_alloc<v4sf>(p->dim);
+    s->hb          = safe_alloc<v4sf>(p->hidden_dim);
+    s->hb2         = safe_alloc<v4sf>(p->hidden_dim);
+    s->q           = safe_alloc<v4sf>(p->dim);
+    s->key_cache   = safe_alloc<v4sf>(kv_elems);
+    s->value_cache = safe_alloc<v4sf>(kv_elems);
+    s->att         = safe_alloc<v4sf>((size_t)p->n_heads * (size_t)p->seq_len);
+    s->logits      = safe_alloc<v4sf>(p->vocab_size);
 }
 
-void free_run_state(RunState *s)
-{
-    free(s->x);
-    free(s->xb);
-    free(s->xb2);
-    free(s->hb);
-    free(s->hb2);
-    free(s->q);
-    free(s->att);
-    free(s->logits);
-    free(s->key_cache);
-    free(s->value_cache);
-}
-
-void memory_map_weights(TransformerWeights *w, Config *p, v4sf *ptr, int shared_weights)
+/**
+ * 将连续内存块按模型结构映射到 TransformerWeights 各字段。
+ * 跳过文件中的 RoPE 频率数据 (ESP32 上实时计算)。
+ */
+static void memory_map_weights(TransformerWeights *w, const Config *p,
+                               v4sf *ptr, int shared_weights)
 {
     int head_size = p->dim / p->n_heads;
-    // make sure the multiplications below are done in 64bit to fit the parameter counts of 13B+ models
-    unsigned long long n_layers = p->n_layers;
-    w->token_embedding_table = ptr;
-    ptr += p->vocab_size * p->dim;
-    w->rms_att_weight = ptr;
-    ptr += n_layers * p->dim;
-    w->wq = ptr;
-    ptr += n_layers * p->dim * (p->n_heads * head_size);
-    w->wk = ptr;
-    ptr += n_layers * p->dim * (p->n_kv_heads * head_size);
-    w->wv = ptr;
-    ptr += n_layers * p->dim * (p->n_kv_heads * head_size);
-    w->wo = ptr;
-    ptr += n_layers * (p->n_heads * head_size) * p->dim;
-    w->rms_ffn_weight = ptr;
-    ptr += n_layers * p->dim;
-    w->w1 = ptr;
-    ptr += n_layers * p->dim * p->hidden_dim;
-    w->w2 = ptr;
-    ptr += n_layers * p->hidden_dim * p->dim;
-    w->w3 = ptr;
-    ptr += n_layers * p->dim * p->hidden_dim;
-    w->rms_final_weight = ptr;
-    ptr += p->dim;
-    ptr += p->seq_len * head_size / 2; // skip what used to be freq_cis_real (for RoPE)
-    ptr += p->seq_len * head_size / 2; // skip what used to be freq_cis_imag (for RoPE)
+    unsigned long long L = p->n_layers;  /* 64-bit 防止大模型溢出 */
+
+    w->token_embedding_table = ptr;  ptr += p->vocab_size * p->dim;
+    w->rms_att_weight        = ptr;  ptr += L * p->dim;
+    w->wq                    = ptr;  ptr += L * p->dim * (p->n_heads   * head_size);
+    w->wk                    = ptr;  ptr += L * p->dim * (p->n_kv_heads * head_size);
+    w->wv                    = ptr;  ptr += L * p->dim * (p->n_kv_heads * head_size);
+    w->wo                    = ptr;  ptr += L * (p->n_heads * head_size) * p->dim;
+    w->rms_ffn_weight        = ptr;  ptr += L * p->dim;
+    w->w1                    = ptr;  ptr += L * p->dim * p->hidden_dim;
+    w->w2                    = ptr;  ptr += L * p->hidden_dim * p->dim;
+    w->w3                    = ptr;  ptr += L * p->dim * p->hidden_dim;
+    w->rms_final_weight      = ptr;  ptr += p->dim;
+    /* 跳过 RoPE 频率表 (训练时预计算，推理时实时算) */
+    ptr += p->seq_len * head_size / 2;   /* freq_cis_real */
+    ptr += p->seq_len * head_size / 2;   /* freq_cis_imag */
     w->wcls = shared_weights ? w->token_embedding_table : ptr;
 }
 
-void read_checkpoint(char *checkpoint, Config *config, TransformerWeights *weights,
-                     int *fd, v4sf **data, size_t *file_size)
+/**
+ * 从 Flash 文件系统读取模型 checkpoint。
+ * Config → 权重数据 → 映射到 TransformerWeights。
+ */
+static void read_checkpoint(const char *checkpoint, Config *config,
+                            TransformerWeights *weights,
+                            int *fd, v4sf **data, size_t *file_size)
 {
     FILE *file = fopen(checkpoint, "rb");
-    if (!file)
-    {
-        ESP_LOGE(TAG, "Couldn't open file %s", checkpoint);
+    if (!file) {
+        ESP_LOGE(TAG, "无法打开模型文件 %s", checkpoint);
         exit(EXIT_FAILURE);
     }
-    // read in the config header
-    if (fread(config, sizeof(Config), 1, file) != 1)
-    {
+
+    /* 读取配置头 */
+    if (fread(config, sizeof(Config), 1, file) != 1) {
+        ESP_LOGE(TAG, "读取 Config 失败");
         exit(EXIT_FAILURE);
     }
-    // negative vocab size is hacky way of signaling unshared weights. bit yikes.
+
+    /* vocab_size 为负数 = 权重不共享 (llama2.c 约定) */
     int shared_weights = config->vocab_size > 0 ? 1 : 0;
     config->vocab_size = abs(config->vocab_size);
-    ESP_LOGI(TAG, "Vocab size if %d", config->vocab_size);
-    // figure out the file size
-    fseek(file, 0, SEEK_END); // move file pointer to end of file
-    *file_size = ftell(file); // get the file size, in bytes
-    fseek(file, 0, SEEK_SET); // move back to beginning for reading
-    ESP_LOGI(TAG, "File size: %zu bytes", *file_size);
-    ESP_LOGI(TAG, "Free ram available: %lu", esp_get_free_heap_size());
+    ESP_LOGI(TAG, "词表大小: %d", config->vocab_size);
+
+    /* 获取文件大小 */
+    fseek(file, 0, SEEK_END);
+    *file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    ESP_LOGI(TAG, "模型文件: %zu 字节, 空闲内存: %lu 字节",
+             *file_size, esp_get_free_heap_size());
+
+    /* 读入 PSRAM */
     *data = safe_alloc<v4sf>(*file_size / sizeof(v4sf));
-    if (*data == NULL)
-    {
-        ESP_LOGE(TAG, "Malloc operation failed");
-        exit(EXIT_FAILURE);
-    }
-    // Read the entire file into memory
-    size_t bytes_read = fread(*data, 1, *file_size, file);
-    if (bytes_read != *file_size)
-    {
-        ESP_LOGE(TAG, "Failed to read file into memory");
-        ESP_LOGE(TAG, "Bytes read %zu bytes", bytes_read);
+    if (fread(*data, 1, *file_size, file) != *file_size) {
+        ESP_LOGE(TAG, "读取模型数据失败");
         exit(EXIT_FAILURE);
     }
     fclose(file);
 
-    ESP_LOGI(TAG, "Successfully read LLM into memory");
-    ESP_LOGI(TAG, "Free ram available: %lu", esp_get_free_heap_size());
+    ESP_LOGI(TAG, "模型加载完成, 空闲内存: %lu", esp_get_free_heap_size());
+
+    /* 跳过 Config 头，映射权重 */
     v4sf *weights_ptr = *data + sizeof(Config) / sizeof(v4sf);
     memory_map_weights(weights, config, weights_ptr, shared_weights);
-    ESP_LOGI(TAG, "Successfully read checkpoint");
 }
 
+/**
+ * 构建 Transformer: 加载模型 → 分配 RunState → 创建双核并行任务。
+ */
 void build_transformer(Transformer *t, char *checkpoint_path)
 {
-    // read in the Config and the Weights from the checkpoint
-    read_checkpoint(checkpoint_path, &t->config, &t->weights, &t->fd, &t->data, &t->file_size);
-    // allocate the RunState buffers
+    read_checkpoint(checkpoint_path, &t->config, &t->weights,
+                    &t->fd, &t->data, &t->file_size);
     malloc_run_state(&t->state, &t->config);
-    ESP_LOGI(TAG, "Transformer successfully built");
+    ESP_LOGI(TAG, "Transformer 构建完成");
 
-    // FreeRTos Tasks
-    xEventGroup = xEventGroupCreate();
-    ForwardEventGroup = xEventGroupCreate();
-    semaDataReady = xSemaphoreCreateBinary();
+    /* 初始化同步对象 */
+    xEventGroup          = xEventGroupCreate();
+    ForwardEventGroup    = xEventGroupCreate();
+    semaDataReady        = xSemaphoreCreateBinary();
     semaForwardDataReady = xSemaphoreCreateBinary();
+
+    /* 信号量初始计数置 0 (Give 后立即 Take) */
     xSemaphoreGive(semaDataReady);
     xSemaphoreTake(semaDataReady, portMAX_DELAY);
     xSemaphoreGive(semaForwardDataReady);
     xSemaphoreTake(semaForwardDataReady, portMAX_DELAY);
 
-    matmul_params = safe_alloc<MatMulTaskParams>(1);
+    /* 分配任务参数 (全局，双核共享) */
+    matmul_params  = safe_alloc<MatMulTaskParams>(1);
     forward_params = safe_alloc<ForwardTaskParams>(1);
-    /* 栈空间从 4096 调大到 6144：matmul_task 和 forward_task 内部有循环局部变量、
-     * softmax 调用链以及 ESP_LOG，原 4KB 在编译器优化不足时可能栈溢出。 */
-    xTaskCreatePinnedToCore(matmul_task, "MatMul2", 6144, matmul_params, 19, &matmul_task_2, 0);
-    xTaskCreatePinnedToCore(forward_task, "ForwardTask", 6144, forward_params, 19, &handle_forward_task, 0);
-    ESP_LOGI(TAG, "Created FreeRTOS Tasks");
+
+    /* 创建 Core-0 辅助任务 (栈 6KB，优先级 19) */
+    xTaskCreatePinnedToCore(matmul_task,  "MatMul2",     6144,
+                            matmul_params, 19, &matmul_task_2, 0);
+    xTaskCreatePinnedToCore(forward_task, "ForwardTask", 6144,
+                            forward_params, 19, &handle_forward_task, 0);
+    ESP_LOGI(TAG, "FreeRTOS 辅助任务已创建");
+}
+
+/* ========================================================================
+ * 第六节: 资源释放
+ * ======================================================================== */
+
+static void free_run_state(RunState *s)
+{
+    free(s->x); free(s->xb); free(s->xb2);
+    free(s->hb); free(s->hb2); free(s->q);
+    free(s->att); free(s->logits);
+    free(s->key_cache); free(s->value_cache);
 }
 
 void free_transformer(Transformer *t)
 {
-    // 先删除 helper 任务，避免它们引用已释放的 semaphore/event group
-    if (matmul_task_2 != NULL) {
-        vTaskDelete(matmul_task_2);
-        matmul_task_2 = NULL;
-    }
-    if (handle_forward_task != NULL) {
-        vTaskDelete(handle_forward_task);
-        handle_forward_task = NULL;
-    }
-    // 释放同步对象
-    if (semaDataReady != NULL) {
-        vSemaphoreDelete(semaDataReady);
-        semaDataReady = NULL;
-    }
-    if (semaForwardDataReady != NULL) {
-        vSemaphoreDelete(semaForwardDataReady);
-        semaForwardDataReady = NULL;
-    }
-    if (xEventGroup != NULL) {
-        vEventGroupDelete(xEventGroup);
-        xEventGroup = NULL;
-    }
-    if (ForwardEventGroup != NULL) {
-        vEventGroupDelete(ForwardEventGroup);
-        ForwardEventGroup = NULL;
-    }
-    free(matmul_params);
-    matmul_params = NULL;
-    free(forward_params);
-    forward_params = NULL;
+    /* 先删任务，再删同步对象 (避免任务访问已释放的 semaphore) */
+    if (matmul_task_2)       { vTaskDelete(matmul_task_2);       matmul_task_2       = NULL; }
+    if (handle_forward_task) { vTaskDelete(handle_forward_task); handle_forward_task = NULL; }
 
-    // close the memory mapping
-    if (t->data != MAP_FAILED)
-    {
-        munmap(t->data, t->file_size);
-    }
-    if (t->fd != -1)
-    {
-        close(t->fd);
-    }
-    // free the RunState buffers
+    if (semaDataReady)        { vSemaphoreDelete(semaDataReady);        semaDataReady        = NULL; }
+    if (semaForwardDataReady) { vSemaphoreDelete(semaForwardDataReady); semaForwardDataReady = NULL; }
+    if (xEventGroup)          { vEventGroupDelete(xEventGroup);         xEventGroup          = NULL; }
+    if (ForwardEventGroup)    { vEventGroupDelete(ForwardEventGroup);   ForwardEventGroup    = NULL; }
+
+    free(matmul_params);  matmul_params  = NULL;
+    free(forward_params); forward_params = NULL;
+
+    if (t->data != MAP_FAILED) munmap(t->data, t->file_size);
+    if (t->fd   != -1)         close(t->fd);
     free_run_state(&t->state);
 }
 
-// ----------------------------------------------------------------------------
-// neural net blocks; the dynamics of the Transformer
+/* ========================================================================
+ * 第七节: 神经网络基础算子
+ * ======================================================================== */
 
-void rmsnorm(v4sf *o, v4sf *x, v4sf *weight, int size)
+/** RMS 归一化: o = weight * (x / sqrt(mean(x²) + ε)) */
+static void rmsnorm(v4sf *o, v4sf *x, const v4sf *weight, int size)
 {
-    // calculate sum of squares
     v4sf ss = 0.0f;
-    for (int j = 0; j < size; j++)
-    {
-        ss += x[j] * x[j];
-    }
-    ss /= size;
-    ss += 1e-5f;
-    ss = 1.0f / sqrtf(ss);
-    // normalize and scale
-    for (int j = 0; j < size; j++)
-    {
-        o[j] = weight[j] * (ss * x[j]);
-    }
+    for (int j = 0; j < size; j++) ss += x[j] * x[j];
+    ss = 1.0f / sqrtf(ss / size + 1e-5f);
+    for (int j = 0; j < size; j++) o[j] = weight[j] * (ss * x[j]);
 }
 
-void softmax(v4sf *x, int size)
+/** Softmax (就地): x[i] = exp(x[i] - max) / Σ exp */
+static void softmax(v4sf *x, int size)
 {
-    // find max value (for numerical stability)
     v4sf max_val = x[0];
     for (int i = 1; i < size; i++)
-    {
-        if (x[i] > max_val)
-        {
-            max_val = x[i];
-        }
-    }
-    // exp and sum
+        if (x[i] > max_val) max_val = x[i];
+
     v4sf sum = 0.0f;
-    for (int i = 0; i < size; i++)
-    {
+    for (int i = 0; i < size; i++) {
         x[i] = expf(x[i] - max_val);
         sum += x[i];
     }
-    // normalize
-    for (int i = 0; i < size; i++)
-    {
-        x[i] /= sum;
-    }
+    for (int i = 0; i < size; i++) x[i] /= sum;
 }
 
-void matmul_task(void *params)
+/* ========================================================================
+ * 第八节: 双核矩阵乘法 (Core-0 辅助任务 + 主任务各算一半)
+ * ======================================================================== */
+
+/** Core-0 上的矩阵乘法辅助任务 (无限循环，信号量驱动) */
+static void matmul_task(void *params)
 {
     MatMulTaskParams *p = (MatMulTaskParams *)params;
-    // ESP_LOGI(TAG, "Created Task %s", tName);
-    for (;;)
-    {
-        if (xSemaphoreTake(semaDataReady, portMAX_DELAY) == pdTRUE)
-        {
-            //   ESP_LOGI(TAG, "Started Task %s", tName);
-            for (int i = p->start; i < p->end; i++)
-            {
-                v4sf val = 0.0f;
-                // v4sf *row = &p->w[i * p->n]; // Pointer to the start of the current row in matrix w
-                // dsps_dotprod_f32_aes3(row, p->x, &val, p->n);
-                for (int j = 0; j < p->n; j++) {
-                    val += p->w[i * p->n + j] * p->x[j];
-                }
-                p->xout[i] = val;
-            }
-            //    ESP_LOGI(TAG, "Completed task %s", tName);
-            xSemaphoreGive(semaDataReady);
-            EventBits_t bits = xEventGroupSync(xEventGroup, p->task_num, ALL_SYNC_BITS,
-                                               pdMS_TO_TICKS(MATMUL_SYNC_TIMEOUT_MS));
-            if ((bits & ALL_SYNC_BITS) != ALL_SYNC_BITS) {
-                ESP_LOGE(TAG, "matmul_task sync 超时，重启系统");
-                esp_restart();
-            }
+    for (;;) {
+        if (xSemaphoreTake(semaDataReady, portMAX_DELAY) != pdTRUE) continue;
+
+        for (int i = p->start; i < p->end; i++) {
+            v4sf val = 0.0f;
+            for (int j = 0; j < p->n; j++)
+                val += p->w[i * p->n + j] * p->x[j];
+            p->xout[i] = val;
+        }
+
+        xSemaphoreGive(semaDataReady);
+        EventBits_t bits = xEventGroupSync(xEventGroup, p->task_num,
+                                           ALL_SYNC_BITS,
+                                           pdMS_TO_TICKS(MATMUL_SYNC_TIMEOUT_MS));
+        if ((bits & ALL_SYNC_BITS) != ALL_SYNC_BITS) {
+            ESP_LOGE(TAG, "matmul_task 同步超时，重启"); esp_restart();
         }
     }
 }
 
-void forward_task(void *params)
+/**
+ * 矩阵乘法 (双核并行): 主任务做前一半行，Core-0 做后一半行。
+ * @param xout 输出 [d]
+ * @param x    输入向量 [n]
+ * @param w    权重矩阵 [d][n]
+ */
+static void matmul(v4sf *xout, v4sf *x, v4sf *w, int n, int d)
 {
-    ForwardTaskParams *t_params = (ForwardTaskParams *)params;
-    // ESP_LOGI(TAG, "Created Task %s", tName);
-    for (;;)
-    {
-        if (xSemaphoreTake(semaForwardDataReady, portMAX_DELAY) == pdTRUE)
-        {
-            //   ESP_LOGI(TAG, "Started Task %s", tName);
-            int h;
-            // #pragma omp parallel for private(h)
-            for (h = t_params->start; h < t_params->end; h++)
-            {
-                // get the query vector for this head
-                v4sf *q = t_params->s->q + h * t_params->head_size;
-                // attention scores for this head
-                v4sf *att = t_params->s->att + h * t_params->p->seq_len;
-                // iterate over all timesteps, including the current one
-                for (int t = 0; t <= t_params->pos; t++)
-                {
-                    // get the key vector for this head and at this timestep
-                    v4sf *k = t_params->s->key_cache + t_params->loff + t * t_params->kv_dim + (h / t_params->kv_mul) * t_params->head_size;
-                    // calculate the attention score as the dot product of q and k
-                    v4sf score = 0.0f;
-                    for (int i = 0; i < t_params->head_size; i++)
-                    {
-                        score += q[i] * k[i];
-                    }
-                    score /= sqrtf(t_params->head_size);
-                    // save the score to the attention buffer
-                    att[t] = score;
-                }
-
-                // softmax the scores to get attention weights, from 0..pos inclusively
-                softmax(att, t_params->pos + 1);
-
-                // weighted sum of the values, store back into xb
-                v4sf *xb = t_params->s->xb + h * t_params->head_size;
-                memset(xb, 0, t_params->head_size * sizeof(v4sf));
-                for (int t = 0; t <= t_params->pos; t++)
-                {
-                    // get the value vector for this head and at this timestep
-                    v4sf *v = t_params->s->value_cache + t_params->loff + t * t_params->kv_dim + (h / t_params->kv_mul) * t_params->head_size;
-                    // get the attention weight for this timestep
-                    v4sf a = att[t];
-                    // accumulate the weighted value into xb
-                    for (int i = 0; i < t_params->head_size; i++)
-                    {
-                        xb[i] += a * v[i];
-                    }
-                }
-            }
-            //   ESP_LOGI(TAG, "Completed task %s", tName);
-            xSemaphoreGive(semaForwardDataReady);
-            EventBits_t fwd_bits = xEventGroupSync(ForwardEventGroup, t_params->task_num,
-                                                   ALL_FORWARD_TASKS,
-                                                   pdMS_TO_TICKS(FORWARD_SYNC_TIMEOUT_MS));
-            if ((fwd_bits & ALL_FORWARD_TASKS) != ALL_FORWARD_TASKS) {
-                ESP_LOGE(TAG, "forward_task sync 超时，重启系统");
-                esp_restart();
-            }
-        }
-    }
-}
-
-void matmul(v4sf *xout, v4sf *x, v4sf *w, int n, int d)
-{
-
-    // d is the number of rows
-    // n is the number of columns
-    // d X n
+    /* 写入参数 → 唤醒 Core-0 任务 */
     *matmul_params = (MatMulTaskParams){xout, x, w, d / 2, d, n, d, TASK_1_BIT};
     xSemaphoreGive(semaDataReady);
-    for (int i = 0; i < d / 2; i++)
-    {
+
+    /* 主任务: 计算前一半行 [0, d/2) */
+    for (int i = 0; i < d / 2; i++) {
         v4sf val = 0.0f;
-        for (int j = 0; j < n; j++) {
-            val += w[i * n + j] * x[j];
-        }
+        for (int j = 0; j < n; j++) val += w[i * n + j] * x[j];
         xout[i] = val;
     }
-    if (xSemaphoreTake(semaDataReady, pdMS_TO_TICKS(MATMUL_SYNC_TIMEOUT_MS)) == pdTRUE)
-    {
-        EventBits_t bits = xEventGroupSync(xEventGroup,
-                        TASK_0_BIT,
-                        ALL_SYNC_BITS,
-                        pdMS_TO_TICKS(MATMUL_SYNC_TIMEOUT_MS));
-        if ((bits & ALL_SYNC_BITS) != ALL_SYNC_BITS) {
-            ESP_LOGE(TAG, "matmul sync 超时：对端任务可能已死锁，重启系统");
-            esp_restart();
-        }
-        xEventGroupClearBits(xEventGroup, ALL_SYNC_BITS);
-    } else {
-        ESP_LOGE(TAG, "matmul 等待 helper 超时，重启系统");
-        esp_restart();
+
+    /* 等待 Core-0 完成后一半 */
+    if (xSemaphoreTake(semaDataReady, pdMS_TO_TICKS(MATMUL_SYNC_TIMEOUT_MS)) != pdTRUE) {
+        ESP_LOGE(TAG, "matmul 等待 helper 超时，重启"); esp_restart();
     }
-    //   ESP_LOGI(TAG, "Completed MatMul tasks");
+    EventBits_t bits = xEventGroupSync(xEventGroup, TASK_0_BIT, ALL_SYNC_BITS,
+                                       pdMS_TO_TICKS(MATMUL_SYNC_TIMEOUT_MS));
+    if ((bits & ALL_SYNC_BITS) != ALL_SYNC_BITS) {
+        ESP_LOGE(TAG, "matmul 同步超时，重启"); esp_restart();
+    }
+    xEventGroupClearBits(xEventGroup, ALL_SYNC_BITS);
 }
 
-v4sf *forward(Transformer *transformer, int token, int pos)
+/* ========================================================================
+ * 第九节: 注意力计算辅助任务 + Transformer 前向传播
+ * ======================================================================== */
+
+/** Core-0 上的注意力计算辅助任务 */
+static void forward_task(void *params)
 {
-    ESP_LOGD(TAG, "ram available: %lu", esp_get_free_heap_size());
+    ForwardTaskParams *p = (ForwardTaskParams *)params;
+    for (;;) {
+        if (xSemaphoreTake(semaForwardDataReady, portMAX_DELAY) != pdTRUE) continue;
 
-    // a few convenience variables
-    Config *p = &transformer->config;
+        for (int h = p->start; h < p->end; h++) {
+            v4sf *q   = p->s->q   + h * p->head_size;
+            v4sf *att = p->s->att + h * p->p->seq_len;
+
+            /* 计算 attention scores */
+            for (int t = 0; t <= p->pos; t++) {
+                v4sf *k = p->s->key_cache + p->loff
+                        + t * p->kv_dim + (h / p->kv_mul) * p->head_size;
+                v4sf score = 0.0f;
+                for (int i = 0; i < p->head_size; i++) score += q[i] * k[i];
+                att[t] = score / sqrtf((v4sf)p->head_size);
+            }
+
+            softmax(att, p->pos + 1);
+
+            /* 加权求和 values */
+            v4sf *xb = p->s->xb + h * p->head_size;
+            memset(xb, 0, p->head_size * sizeof(v4sf));
+            for (int t = 0; t <= p->pos; t++) {
+                v4sf *v = p->s->value_cache + p->loff
+                        + t * p->kv_dim + (h / p->kv_mul) * p->head_size;
+                v4sf a = att[t];
+                for (int i = 0; i < p->head_size; i++) xb[i] += a * v[i];
+            }
+        }
+
+        xSemaphoreGive(semaForwardDataReady);
+        EventBits_t bits = xEventGroupSync(ForwardEventGroup, p->task_num,
+                                           ALL_FORWARD_TASKS,
+                                           pdMS_TO_TICKS(FORWARD_SYNC_TIMEOUT_MS));
+        if ((bits & ALL_FORWARD_TASKS) != ALL_FORWARD_TASKS) {
+            ESP_LOGE(TAG, "forward_task 同步超时，重启"); esp_restart();
+        }
+    }
+}
+
+/**
+ * Transformer 单步前向传播。
+ * @return logits 数组指针 (RunState 内部，调用者不应释放)
+ */
+static v4sf *forward(Transformer *transformer, int token, int pos)
+{
+    Config            *p  = &transformer->config;
     TransformerWeights *w = &transformer->weights;
-    RunState *s = &transformer->state;
-    v4sf *x = s->x;
-    int dim = p->dim;
-    int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
-    int kv_mul = p->n_heads / p->n_kv_heads; // integer multiplier of the kv sharing in multiquery
+    RunState          *s  = &transformer->state;
+
+    int dim        = p->dim;
+    int kv_dim     = (p->dim * p->n_kv_heads) / p->n_heads;
+    int kv_mul     = p->n_heads / p->n_kv_heads;
     int hidden_dim = p->hidden_dim;
-    int head_size = dim / p->n_heads;
+    int head_size  = dim / p->n_heads;
 
-    // copy the token embedding into x
-    v4sf *content_row = w->token_embedding_table + token * dim;
-    ESP_LOGD(TAG, "Content row: %f", *content_row);
-    memcpy(x, content_row, dim * sizeof(*x));
+    /* ---- Token Embedding ---- */
+    memcpy(s->x, w->token_embedding_table + token * dim, dim * sizeof(v4sf));
 
-    // forward all the layers
-    for (unsigned long long l = 0; l < p->n_layers; l++)
-    {
-        ESP_LOGD(TAG, "X: %f, Weights %f", *x, *w->rms_att_weight);
-        // attention rmsnorm
-        rmsnorm(s->xb, x, w->rms_att_weight + l * dim, dim);
+    /* ---- 逐层前向 ---- */
+    for (unsigned long long l = 0; l < p->n_layers; l++) {
 
-        // key and value point to the kv cache
-        int loff = l * p->seq_len * kv_dim; // kv cache layer offset for convenience
-        s->k = s->key_cache + loff + pos * kv_dim;
+        /* Attention RMSNorm */
+        rmsnorm(s->xb, s->x, w->rms_att_weight + l * dim, dim);
+
+        /* KV cache 写入位置 */
+        int loff = l * p->seq_len * kv_dim;
+        s->k = s->key_cache   + loff + pos * kv_dim;
         s->v = s->value_cache + loff + pos * kv_dim;
 
-        // qkv matmuls for this position
-        matmul(s->q, s->xb, w->wq + l * dim * dim, dim, dim);
-        matmul(s->k, s->xb, w->wk + l * dim * kv_dim, dim, kv_dim);
-        matmul(s->v, s->xb, w->wv + l * dim * kv_dim, dim, kv_dim);
+        /* QKV 投影 */
+        matmul(s->q, s->xb, w->wq + l * dim * dim,     dim, dim);
+        matmul(s->k, s->xb, w->wk + l * dim * kv_dim,  dim, kv_dim);
+        matmul(s->v, s->xb, w->wv + l * dim * kv_dim,  dim, kv_dim);
 
-        // RoPE relative positional encoding: complex-valued rotate q and k in each head
-        for (int i = 0; i < dim; i += 2)
-        {
+        /* ---- RoPE 旋转位置编码 ---- */
+        for (int i = 0; i < dim; i += 2) {
             int head_dim = i % head_size;
-            v4sf freq = 1.0f / powf(10000.0f, head_dim / (v4sf)head_size);
-            v4sf val = pos * freq;
-            v4sf fcr = cosf(val);
-            v4sf fci = sinf(val);
-            int rotn = i < kv_dim ? 2 : 1; // how many vectors? 2 = q & k, 1 = q only
-            for (int v = 0; v < rotn; v++)
-            {
-                v4sf *vec = v == 0 ? s->q : s->k; // the vector to rotate (query or key)
-                v4sf v0 = vec[i];
-                v4sf v1 = vec[i + 1];
-                vec[i] = v0 * fcr - v1 * fci;
+            v4sf freq = 1.0f / powf(10000.0f, (v4sf)head_dim / (v4sf)head_size);
+            v4sf fcr  = cosf(pos * freq);
+            v4sf fci  = sinf(pos * freq);
+            int rotn  = (i < kv_dim) ? 2 : 1;  /* q 和 k 都需要旋转; v 不需要 */
+            for (int v = 0; v < rotn; v++) {
+                v4sf *vec = (v == 0) ? s->q : s->k;
+                v4sf v0 = vec[i], v1 = vec[i + 1];
+                vec[i]     = v0 * fcr - v1 * fci;
                 vec[i + 1] = v0 * fci + v1 * fcr;
             }
         }
-        // start task
+
+        /* ---- 双核并行 Multi-Head Attention ---- */
         *forward_params = (ForwardTaskParams){
-            .s = s,
-            .w = w,
-            .p = p,
-            .pos = pos,
-            .start = p->n_heads / 2,
-            .loff = loff,
-            .end = p->n_heads,
-            .dim = dim,
-            .kv_dim = kv_dim,
-            .kv_mul = kv_mul,
-            .hidden_dim = hidden_dim,
-            .head_size = head_size,
+            .s = s, .w = w, .p = p, .pos = pos,
+            .start = p->n_heads / 2, .loff = loff, .end = p->n_heads,
+            .dim = dim, .kv_dim = kv_dim, .kv_mul = kv_mul,
+            .hidden_dim = hidden_dim, .head_size = head_size,
             .task_num = FORWARD_TASK_1,
         };
         xSemaphoreGive(semaForwardDataReady);
 
-        // multihead attention. iterate over all heads
-        int h;
-        // #pragma omp parallel for private(h)
-        for (h = 0; h < (p->n_heads / 2); h++)
-        {
-            // get the query vector for this head
-            v4sf *q = s->q + h * head_size;
-            // attention scores for this head
+        /* 主任务: 计算前一半注意力头 */
+        for (int h = 0; h < p->n_heads / 2; h++) {
+            v4sf *q   = s->q   + h * head_size;
             v4sf *att = s->att + h * p->seq_len;
-            // iterate over all timesteps, including the current one
-            for (int t = 0; t <= pos; t++)
-            {
-                // get the key vector for this head and at this timestep
-                v4sf *k = s->key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
-                // calculate the attention score as the dot product of q and k
-                v4sf score = 0.0f;
-                for (int i = 0; i < head_size; i++)
-                {
-                    score += q[i] * k[i];
-                }
-                score /= sqrtf(head_size);
-                // save the score to the attention buffer
-                att[t] = score;
-            }
 
-            // softmax the scores to get attention weights, from 0..pos inclusively
+            for (int t = 0; t <= pos; t++) {
+                v4sf *k = s->key_cache + loff + t * kv_dim
+                        + (h / kv_mul) * head_size;
+                v4sf score = 0.0f;
+                for (int i = 0; i < head_size; i++) score += q[i] * k[i];
+                att[t] = score / sqrtf((v4sf)head_size);
+            }
             softmax(att, pos + 1);
 
-            // weighted sum of the values, store back into xb
             v4sf *xb = s->xb + h * head_size;
             memset(xb, 0, head_size * sizeof(v4sf));
-            for (int t = 0; t <= pos; t++)
-            {
-                // get the value vector for this head and at this timestep
-                v4sf *v = s->value_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
-                // get the attention weight for this timestep
+            for (int t = 0; t <= pos; t++) {
+                v4sf *v = s->value_cache + loff + t * kv_dim
+                        + (h / kv_mul) * head_size;
                 v4sf a = att[t];
-                // accumulate the weighted value into xb
-                for (int i = 0; i < head_size; i++)
-                {
-                    xb[i] += a * v[i];
-                }
+                for (int i = 0; i < head_size; i++) xb[i] += a * v[i];
             }
         }
-        if (xSemaphoreTake(semaForwardDataReady, pdMS_TO_TICKS(FORWARD_SYNC_TIMEOUT_MS)) == pdTRUE)
-        {
 
-            EventBits_t fwd_bits = xEventGroupSync(ForwardEventGroup,
-                            FORWARD_TASK_2,
-                            ALL_FORWARD_TASKS,
-                            pdMS_TO_TICKS(FORWARD_SYNC_TIMEOUT_MS));
-
-            if ((fwd_bits & ALL_FORWARD_TASKS) != ALL_FORWARD_TASKS) {
-                ESP_LOGE(TAG, "forward attention sync 超时，重启系统");
-                esp_restart();
-            }
-            xEventGroupClearBits(ForwardEventGroup, ALL_FORWARD_TASKS);
-        } else {
-            ESP_LOGE(TAG, "forward 等待 helper 超时，重启系统");
-            esp_restart();
+        /* 等待 Core-0 完成后一半注意力头 */
+        if (xSemaphoreTake(semaForwardDataReady,
+                           pdMS_TO_TICKS(FORWARD_SYNC_TIMEOUT_MS)) != pdTRUE) {
+            ESP_LOGE(TAG, "forward 等待 helper 超时，重启"); esp_restart();
         }
+        EventBits_t fwd_bits = xEventGroupSync(
+            ForwardEventGroup, FORWARD_TASK_2, ALL_FORWARD_TASKS,
+            pdMS_TO_TICKS(FORWARD_SYNC_TIMEOUT_MS));
+        if ((fwd_bits & ALL_FORWARD_TASKS) != ALL_FORWARD_TASKS) {
+            ESP_LOGE(TAG, "forward attention 同步超时，重启"); esp_restart();
+        }
+        xEventGroupClearBits(ForwardEventGroup, ALL_FORWARD_TASKS);
 
-        // final matmul to get the output of the attention
+        /* ---- Attention 输出投影 + 残差连接 ---- */
         matmul(s->xb2, s->xb, w->wo + l * dim * dim, dim, dim);
+        for (int i = 0; i < dim; i++) s->x[i] += s->xb2[i];
 
-        // residual connection back into x
-        for (int i = 0; i < dim; i++)
-        {
-            x[i] += s->xb2[i];
-        }
-
-        // ffn rmsnorm
-        rmsnorm(s->xb, x, w->rms_ffn_weight + l * dim, dim);
-
-        // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
-        // first calculate self.w1(x) and self.w3(x)
-        matmul(s->hb, s->xb, w->w1 + l * dim * hidden_dim, dim, hidden_dim);
+        /* ---- FFN (SwiGLU) ---- */
+        rmsnorm(s->xb, s->x, w->rms_ffn_weight + l * dim, dim);
+        matmul(s->hb,  s->xb, w->w1 + l * dim * hidden_dim, dim, hidden_dim);
         matmul(s->hb2, s->xb, w->w3 + l * dim * hidden_dim, dim, hidden_dim);
 
-        // SwiGLU non-linearity
-        for (int i = 0; i < hidden_dim; i++)
-        {
+        for (int i = 0; i < hidden_dim; i++) {
             v4sf val = s->hb[i];
-            // silu(x)=x*σ(x), where σ(x) is the logistic sigmoid
-            val *= (1.0f / (1.0f + expf(-val)));
-            // elementwise multiply with w3(x)
-            val *= s->hb2[i];
+            val *= 1.0f / (1.0f + expf(-val));  /* SiLU */
+            val *= s->hb2[i];                    /* × w3(x) */
             s->hb[i] = val;
         }
 
-        // final matmul to get the output of the ffn
         matmul(s->xb, s->hb, w->w2 + l * dim * hidden_dim, hidden_dim, dim);
-
-        // residual connection
-        for (int i = 0; i < dim; i++)
-        {
-            x[i] += s->xb[i];
-        }
+        for (int i = 0; i < dim; i++) s->x[i] += s->xb[i];
     }
 
-    // final rmsnorm
-    rmsnorm(x, x, w->rms_final_weight, dim);
-
-    // classifier into logits
-    matmul(s->logits, x, w->wcls, p->dim, p->vocab_size);
+    /* ---- 最终 RMSNorm + 分类头 ---- */
+    rmsnorm(s->x, s->x, w->rms_final_weight, dim);
+    matmul(s->logits, s->x, w->wcls, dim, p->vocab_size);
     return s->logits;
 }
 
-// ----------------------------------------------------------------------------
-// The Byte Pair Encoding (BPE) Tokenizer that translates strings <-> tokens
+/* ========================================================================
+ * 第十节: BPE 分词器
+ * ======================================================================== */
 
-int compare_tokens(const void *a, const void *b)
-{
-    return strcmp(((TokenIndex *)a)->str, ((TokenIndex *)b)->str);
+static int compare_tokens(const void *a, const void *b) {
+    return strcmp(((const TokenIndex *)a)->str, ((const TokenIndex *)b)->str);
 }
 
 void build_tokenizer(Tokenizer *t, char *tokenizer_path, int vocab_size)
 {
-    // i should have written the vocab_size into the tokenizer file... sigh
-    ESP_LOGI(TAG, "Vocab size is %d\n", vocab_size);
-    t->vocab_size = vocab_size;
-    // malloc space to hold the scores and the strings
-    t->vocab = safe_alloc<char *>(vocab_size);
+    ESP_LOGI(TAG, "词表大小: %d", vocab_size);
+    t->vocab_size   = vocab_size;
+    t->vocab        = safe_alloc<char *>(vocab_size);
     t->vocab_scores = safe_alloc<v4sf>(vocab_size);
-    t->sorted_vocab = NULL; // initialized lazily
-    for (int i = 0; i < 256; i++)
-    {
-        t->byte_pieces[i * 2] = (unsigned char)i;
+    t->sorted_vocab = NULL;  /* 延迟初始化 */
+
+    /* 初始化单字节映射表: byte_pieces[i*2] = byte, [i*2+1] = '\0' */
+    for (int i = 0; i < 256; i++) {
+        t->byte_pieces[i * 2]     = (unsigned char)i;
         t->byte_pieces[i * 2 + 1] = '\0';
     }
-    // read in the file
+
     FILE *file = fopen(tokenizer_path, "rb");
-    if (!file)
-    {
-        ESP_LOGE(TAG, "couldn't load %s", tokenizer_path);
-        exit(EXIT_FAILURE);
+    if (!file) { ESP_LOGE(TAG, "无法打开 %s", tokenizer_path); exit(EXIT_FAILURE); }
+
+    if (fread(&t->max_token_length, sizeof(int), 1, file) != 1) {
+        ESP_LOGE(TAG, "读取 max_token_length 失败"); exit(EXIT_FAILURE);
     }
-    ESP_LOGI(TAG, "Opened Tokenizer File");
-    if (fread(&t->max_token_length, sizeof(int), 1, file) != 1)
-    {
-        ESP_LOGE(TAG, "failed read");
-        exit(EXIT_FAILURE);
-    }
+
     int len;
-    for (int i = 0; i < vocab_size; i++)
-    {
-        if (fread(t->vocab_scores + i, sizeof(v4sf), 1, file) != 1)
-        {
-            ESP_LOGE(TAG, "failed read vocab scores");
-            exit(EXIT_FAILURE);
-        }
-        if (fread(&len, sizeof(int), 1, file) != 1)
-        {
-            ESP_LOGE(TAG, "failed read len");
-            exit(EXIT_FAILURE);
+    for (int i = 0; i < vocab_size; i++) {
+        if (fread(t->vocab_scores + i, sizeof(v4sf), 1, file) != 1 ||
+            fread(&len, sizeof(int), 1, file) != 1) {
+            ESP_LOGE(TAG, "读取词表条目 %d 失败", i); exit(EXIT_FAILURE);
         }
         t->vocab[i] = safe_alloc<char>(len + 1);
-        if (fread(t->vocab[i], len, 1, file) != 1)
-        {
-            ESP_LOGE(TAG, "failed read vocab");
-            exit(EXIT_FAILURE);
+        if (fread(t->vocab[i], len, 1, file) != 1) {
+            ESP_LOGE(TAG, "读取词条文本 %d 失败", i); exit(EXIT_FAILURE);
         }
-        t->vocab[i][len] = '\0'; // add the string terminating token
+        t->vocab[i][len] = '\0';
     }
     fclose(file);
-    ESP_LOGI(TAG, "Tokenizer successfully built");
+    ESP_LOGI(TAG, "分词器构建完成");
 }
 
 void free_tokenizer(Tokenizer *t)
 {
-    for (int i = 0; i < t->vocab_size; i++)
-    {
-        free(t->vocab[i]);
-    }
-    free(t->vocab);
-    free(t->vocab_scores);
-    free(t->sorted_vocab);
+    for (int i = 0; i < t->vocab_size; i++) free(t->vocab[i]);
+    free(t->vocab); free(t->vocab_scores); free(t->sorted_vocab);
 }
 
+/** 将 token 解码为字符串 (返回指针在 Tokenizer 内部，不用释放) */
 char *decode(Tokenizer *t, int prev_token, int token)
 {
     char *piece = t->vocab[token];
-    // following BOS (1) token, sentencepiece decoder strips any leading whitespace (see PR #89)
-    if (prev_token == 1 && piece[0] == ' ')
-    {
-        piece++;
-    }
-    // careful, some tokens designate raw bytes, and look like e.g. '<0x01>'
-    // parse this and convert and return the actual byte
+    /* BOS 后跳过前导空格 (SentencePiece 约定) */
+    if (prev_token == 1 && piece[0] == ' ') piece++;
+
+    /* 原始字节 token: <0xNN> → 单字节字符串 */
     unsigned char byte_val;
     if (sscanf(piece, "<0x%02hhX>", &byte_val) == 1)
-    {
         piece = (char *)t->byte_pieces + byte_val * 2;
-    }
+
     return piece;
 }
 
-void safe_printf(char *piece)
+/** 安全打印 token 字符串 (过滤不可打印控制字符) */
+static void safe_printf(const char *piece)
 {
-    // piece might be a raw byte token, and we only want to print printable chars or whitespace
-    // because some of the other bytes can be various control codes, backspace, etc.
-    if (piece == NULL)
-    {
-        return;
-    }
-    if (piece[0] == '\0')
-    {
-        return;
-    }
-    if (piece[1] == '\0')
-    {
-        unsigned char byte_val = piece[0];
-        if (!(isprint(byte_val) || isspace(byte_val)))
-        {
-            return; // bad byte, don't print it
-        }
+    if (!piece || !piece[0]) return;
+    if (piece[1] == '\0') {
+        unsigned char c = (unsigned char)piece[0];
+        if (!(isprint(c) || isspace(c))) return;
     }
     printf("%s", piece);
 }
 
-int str_lookup(const char *str, TokenIndex *sorted_vocab, int vocab_size)
+/** 在排序词表中二分查找字符串，返回 token id 或 -1 */
+static int str_lookup(const char *str, const TokenIndex *sorted_vocab, int vocab_size)
 {
-    // efficiently find the perfect match for str in vocab, return its index or -1 if not found
-    TokenIndex tok = {.str = str, .id = 0}; // acts as the key to search for
-    TokenIndex *res = (TokenIndex*)bsearch(&tok, sorted_vocab, vocab_size, sizeof(TokenIndex), compare_tokens);
-    return res != NULL ? res->id : -1;
+    TokenIndex key = { .str = str, .id = 0 };
+    TokenIndex *res = (TokenIndex *)bsearch(&key, sorted_vocab, vocab_size,
+                                            sizeof(TokenIndex), compare_tokens);
+    return res ? res->id : -1;
 }
 
-void encode(Tokenizer *t, char *text, int8_t bos, int8_t eos, int *tokens, int *n_tokens)
+/**
+ * BPE 编码: 将 UTF-8 文本转换为 token 序列。
+ * tokens[] 由调用者预分配 (上界: strlen(text) + 3)。
+ */
+void encode(Tokenizer *t, char *text, int8_t bos, int8_t eos,
+            int *tokens, int *n_tokens)
 {
-    // encode the string text (input) into an upper-bound preallocated tokens[] array
-    // bos != 0 means prepend the BOS token (=1), eos != 0 means append the EOS token (=2)
-    if (text == NULL)
-    {
-        ESP_LOGE(TAG, "cannot encode NULL text");
-        exit(EXIT_FAILURE);
-    }
+    if (!text) { ESP_LOGE(TAG, "encode: text 为 NULL"); exit(EXIT_FAILURE); }
 
-    if (t->sorted_vocab == NULL)
-    {
-        // lazily malloc and sort the vocabulary
+    /* 延迟初始化排序词表 */
+    if (!t->sorted_vocab) {
         t->sorted_vocab = safe_alloc<TokenIndex>(t->vocab_size);
-        for (int i = 0; i < t->vocab_size; i++)
-        {
+        for (int i = 0; i < t->vocab_size; i++) {
             t->sorted_vocab[i].str = t->vocab[i];
-            t->sorted_vocab[i].id = i;
+            t->sorted_vocab[i].id  = i;
         }
         qsort(t->sorted_vocab, t->vocab_size, sizeof(TokenIndex), compare_tokens);
     }
 
-    // create a temporary buffer that will store merge candidates of always two consecutive tokens
-    // *2 for concat, +1 for null terminator +2 for UTF8 (in case max_token_length is 1)
-    const size_t str_buf_size = (size_t)t->max_token_length * 2u + 1u + 2u;
+    /* BPE 合并缓冲区 */
+    const size_t str_buf_size = (size_t)t->max_token_length * 2u + 3u;
     char *str_buffer = safe_alloc<char>(str_buf_size);
-    size_t str_len = 0;
 
-    // start at 0 tokens
     *n_tokens = 0;
+    if (bos) tokens[(*n_tokens)++] = 1;               /* BOS */
+    if (text[0]) tokens[(*n_tokens)++] = str_lookup(" ", t->sorted_vocab, t->vocab_size);  /* dummy prefix */
 
-    // add optional BOS (=1) token, if desired
-    if (bos)
-        tokens[(*n_tokens)++] = 1;
+    /* ---- UTF-8 字节级编码 ---- */
+    size_t str_len = 0;
+    for (char *c = text; *c; c++) {
+        /* 前导字节 / ASCII → 重置缓冲区 */
+        if ((*c & 0xC0) != 0x80) str_len = 0;
 
-    // add_dummy_prefix is true by default
-    // so prepend a dummy prefix token to the input string, but only if text != ""
-    // TODO: pretty sure this isn't correct in the general case but I don't have the
-    // energy to read more of the sentencepiece code to figure out what it's doing
-    if (text[0] != '\0')
-    {
-        int dummy_prefix = str_lookup(" ", t->sorted_vocab, t->vocab_size);
-        tokens[(*n_tokens)++] = dummy_prefix;
-    }
+        str_buffer[str_len++] = *c;
+        str_buffer[str_len]   = '\0';
 
-    // Okay UTF-8 time. This will get messy. Here is the reference from Wikipedia:
-    // Code point ↔ UTF-8 conversion
-    // First code point	Last code point	Byte 1	Byte 2	Byte 3	Byte 4
-    // U+0000	U+007F	    0xxxxxxx
-    // U+0080	U+07FF	    110xxxxx	10xxxxxx
-    // U+0800	U+FFFF	    1110xxxx	10xxxxxx	10xxxxxx
-    // U+10000	U+10FFFF    11110xxx	10xxxxxx	10xxxxxx	10xxxxxx
+        /* 继续累积 UTF-8 后续字节 */
+        if ((*(c + 1) & 0xC0) == 0x80 && str_len < 4) continue;
 
-    // process the raw (UTF-8) byte sequence of the input string
-    for (char *c = text; *c != '\0'; c++)
-    {
-
-        // reset buffer if the current byte is ASCII or a leading byte
-        // 0xC0 is 11000000, so (*c & 0xC0) keeps the first 2 bits and zeros the rest
-        // 0x80 is 10000000
-        // in UTF-8, all continuation bytes start with "10" in first two bits
-        // so in English this is: "if this byte is not a continuation byte"
-        if ((*c & 0xC0) != 0x80)
-        {
-            // this byte must be either a leading byte (11...) or an ASCII char (0x...)
-            // => reset our location, as we're starting a new UTF-8 codepoint
-            str_len = 0;
-        }
-
-        // append the current byte to the buffer
-        str_buffer[str_len++] = *c; // ++ is post-increment, incremented after this line
-        str_buffer[str_len] = '\0';
-
-        // while the next character is a continuation byte, continue appending
-        // but if there are too many of them, just stop to avoid overruning str_buffer size.
-        if ((*(c + 1) & 0xC0) == 0x80 && str_len < 4)
-        {
-            continue;
-        }
-
-        // ok c+1 is not a continuation byte, so we've read in a full codepoint
         int id = str_lookup(str_buffer, t->sorted_vocab, t->vocab_size);
-
-        if (id != -1)
-        {
-            // we found this codepoint in vocab, add it as a token
+        if (id != -1) {
             tokens[(*n_tokens)++] = id;
-        }
-        else
-        {
-            // byte_fallback encoding: just encode each byte as a token
-            // +3 is here because the first 3 vocab elements are <unk>, <s>, </s>
-            // so the individual bytes only start at index 3
-            for (int i = 0; i < str_len; i++)
-            {
+        } else {
+            /* 回退: 逐字节编码 (+3 跳过 <unk>, <s>, </s>) */
+            for (size_t i = 0; i < str_len; i++)
                 tokens[(*n_tokens)++] = (unsigned char)str_buffer[i] + 3;
-            }
         }
-        str_len = 0; // protect against a sequence of stray UTF8 continuation bytes
+        str_len = 0;
     }
 
-    // merge the best consecutive pair each iteration, according the scores in vocab_scores
-    while (1)
-    {
-        v4sf best_score = -1e10;
-        int best_id = -1;
-        int best_idx = -1;
+    /* ---- BPE 合并循环 ---- */
+    for (;;) {
+        v4sf best_score = -1e10f;
+        int  best_id = -1, best_idx = -1;
 
-        for (int i = 0; i < (*n_tokens - 1); i++)
-        {
-            // check if we can merge the pair (tokens[i], tokens[i+1])
-            int written = snprintf(str_buffer, str_buf_size, "%s%s",
-                                   t->vocab[tokens[i]], t->vocab[tokens[i + 1]]);
-            if (written < 0 || (size_t)written >= str_buf_size) {
-                /* 合并后字符串超过缓冲区——tokenizer 文件可能损坏，
-                 * 跳过此合并，继续尝试其他 pair。 */
-                continue;
-            }
+        for (int i = 0; i < *n_tokens - 1; i++) {
+            int w = snprintf(str_buffer, str_buf_size, "%s%s",
+                             t->vocab[tokens[i]], t->vocab[tokens[i + 1]]);
+            if (w < 0 || (size_t)w >= str_buf_size) continue;  /* token 太长，跳过 */
+
             int id = str_lookup(str_buffer, t->sorted_vocab, t->vocab_size);
-            if (id != -1 && t->vocab_scores[id] > best_score)
-            {
-                // this merge pair exists in vocab! record its score and position
+            if (id != -1 && t->vocab_scores[id] > best_score) {
                 best_score = t->vocab_scores[id];
-                best_id = id;
-                best_idx = i;
+                best_id = id; best_idx = i;
             }
         }
+        if (best_idx == -1) break;
 
-        if (best_idx == -1)
-        {
-            break; // we couldn't find any more pairs to merge, so we're done
-        }
-
-        // merge the consecutive pair (best_idx, best_idx+1) into new token best_id
+        /* 合并 best_idx 和 best_idx+1 → best_id */
         tokens[best_idx] = best_id;
-        // delete token at position best_idx+1, shift the entire sequence back 1
-        for (int i = best_idx + 1; i < (*n_tokens - 1); i++)
-        {
+        for (int i = best_idx + 1; i < *n_tokens - 1; i++)
             tokens[i] = tokens[i + 1];
-        }
-        (*n_tokens)--; // token length decreased
+        (*n_tokens)--;
     }
 
-    // add optional EOS (=2) token, if desired
-    if (eos)
-        tokens[(*n_tokens)++] = 2;
-
+    if (eos) tokens[(*n_tokens)++] = 2;  /* EOS */
     free(str_buffer);
 }
 
-// ----------------------------------------------------------------------------
-// The Sampler, which takes logits and returns a sampled token
-// sampling can be done in a few ways: greedy argmax, sampling, top-p sampling
+/* ========================================================================
+ * 第十一节: 采样器
+ * ======================================================================== */
 
-int sample_argmax(v4sf *probabilities, int n)
-{
-    // return the index that has the highest probability
+static int sample_argmax(const v4sf *probs, int n) {
     int max_i = 0;
-    v4sf max_p = probabilities[0];
     for (int i = 1; i < n; i++)
-    {
-        if (probabilities[i] > max_p)
-        {
-            max_i = i;
-            max_p = probabilities[i];
-        }
-    }
+        if (probs[i] > probs[max_i]) max_i = i;
     return max_i;
 }
 
-int sample_mult(v4sf *probabilities, int n, v4sf coin)
-{
-    // sample index from probabilities (they must sum to 1!)
-    // coin is a random number in [0, 1), usually from random_f32()
+static int sample_mult(const v4sf *probs, int n, v4sf coin) {
     v4sf cdf = 0.0f;
-    for (int i = 0; i < n; i++)
-    {
-        cdf += probabilities[i];
-        if (coin < cdf)
-        {
-            return i;
-        }
+    for (int i = 0; i < n; i++) {
+        cdf += probs[i];
+        if (coin < cdf) return i;
     }
-    return n - 1; // in case of rounding errors
+    return n - 1;
 }
 
-int compare(const void *a, const void *b)
-{
-    ProbIndex *a_ = (ProbIndex *)a;
-    ProbIndex *b_ = (ProbIndex *)b;
-    if (a_->prob > b_->prob)
-        return -1;
-    if (a_->prob < b_->prob)
-        return 1;
-    return 0;
+static int compare_prob(const void *a, const void *b) {
+    float pa = ((const ProbIndex *)a)->prob;
+    float pb = ((const ProbIndex *)b)->prob;
+    return (pa > pb) ? -1 : (pa < pb) ? 1 : 0;
 }
 
-int sample_topp(v4sf *probabilities, int n, v4sf topp, ProbIndex *probindex, v4sf coin)
+/** Top-P (nucleus) 采样 */
+static int sample_topp(const v4sf *probs, int n, v4sf topp,
+                       ProbIndex *probindex, v4sf coin)
 {
-    // top-p sampling (or "nucleus sampling") samples from the smallest set of
-    // tokens that exceed probability topp. This way we never sample tokens that
-    // have very low probabilities and are less likely to go "off the rails".
-    // coin is a random number in [0, 1), usually from random_f32()
+    if (!probindex || n <= 0) return 0;
 
-    /* 防御：probindex 为空或 n 异常时回退到 argmax */
-    if (probindex == NULL || n <= 0) return 0;
-
-    int n0 = 0;
-    // quicksort indices in descending order of probabilities
-    // values smaller than (1 - topp) / (n - 1) cannot be part of the result
-    // so for efficiency we crop these out as candidates before sorting
+    /* 筛选概率 ≥ cutoff 的候选 */
     const v4sf cutoff = (1.0f - topp) / (n - 1);
-    for (int i = 0; i < n; i++)
-    {
-        if (probabilities[i] >= cutoff)
-        {
+    int n0 = 0;
+    for (int i = 0; i < n; i++) {
+        if (probs[i] >= cutoff) {
             probindex[n0].index = i;
-            probindex[n0].prob = probabilities[i];
+            probindex[n0].prob  = probs[i];
             n0++;
         }
     }
-    
-    if (n0 == 0) {
-        return 0; // Fallback in case probabilities contains only NaNs
+    if (n0 == 0) return 0;
+
+    /* 降序排列，累加到超过 topp */
+    qsort(probindex, n0, sizeof(ProbIndex), compare_prob);
+    v4sf cum = 0.0f;
+    int last = n0 - 1;
+    for (int i = 0; i < n0; i++) {
+        cum += probindex[i].prob;
+        if (cum > topp) { last = i; break; }
     }
 
-    qsort(probindex, n0, sizeof(ProbIndex), compare);
-
-    // truncate the list where cumulative probability exceeds topp
-    v4sf cumulative_prob = 0.0f;
-    int last_idx = n0 - 1; // in case of rounding errors consider all elements
-    for (int i = 0; i < n0; i++)
-    {
-        cumulative_prob += probindex[i].prob;
-        if (cumulative_prob > topp)
-        {
-            last_idx = i;
-            break; // we've exceeded topp by including last_idx
-        }
-    }
-
-    // sample from the truncated list
-    v4sf r = coin * cumulative_prob;
-    v4sf cdf = 0.0f;
-    for (int i = 0; i <= last_idx; i++)
-    {
+    /* 从截断集合中采样 */
+    v4sf r = coin * cum, cdf = 0.0f;
+    for (int i = 0; i <= last; i++) {
         cdf += probindex[i].prob;
-        if (r < cdf)
-        {
-            return probindex[i].index;
-        }
+        if (r < cdf) return probindex[i].index;
     }
-    return probindex[last_idx].index; // in case of rounding errors
+    return probindex[last].index;
 }
 
-void build_sampler(Sampler *sampler, int vocab_size, v4sf temperature, v4sf topp, unsigned long long rng_seed)
+void build_sampler(Sampler *sampler, int vocab_size, v4sf temperature,
+                   v4sf topp, unsigned long long rng_seed)
 {
-    sampler->vocab_size = vocab_size;
+    sampler->vocab_size  = vocab_size;
     sampler->temperature = temperature;
-    sampler->topp = topp;
-    sampler->rng_state = rng_seed;
-    // buffer only used with nucleus sampling; may not need but it's ~small
-    sampler->probindex = safe_alloc<ProbIndex>(sampler->vocab_size);
-    ESP_LOGI(TAG, "Sampler Successfully built");
+    sampler->topp        = topp;
+    sampler->rng_state   = rng_seed;
+    sampler->probindex   = safe_alloc<ProbIndex>(vocab_size);
+    ESP_LOGI(TAG, "采样器构建完成");
 }
 
-void free_sampler(Sampler *sampler)
-{
-    free(sampler->probindex);
-}
+void free_sampler(Sampler *sampler) { free(sampler->probindex); }
 
-unsigned int random_u32(unsigned long long *state)
-{
-    // xorshift rng: https://en.wikipedia.org/wiki/Xorshift#xorshift.2A
+/* ---- xorshift 随机数生成器 ---- */
+static unsigned int random_u32(unsigned long long *state) {
     *state ^= *state >> 12;
     *state ^= *state << 25;
     *state ^= *state >> 27;
-    return (*state * 0x2545F4914F6CDD1Dull) >> 32;
+    return (unsigned int)((*state * 0x2545F4914F6CDD1Dull) >> 32);
 }
-v4sf random_f32(unsigned long long *state)
-{ // random v4sf32 in [0,1)
-    return (random_u32(state) >> 8) / 16777216.0f;
+static v4sf random_f32(unsigned long long *state) {
+    return (v4sf)(random_u32(state) >> 8) / 16777216.0f;
 }
 
+/** 从 logits 中采样下一个 token */
 int sample(Sampler *sampler, v4sf *logits)
 {
-    // sample the token given the logits and some hyperparameters
-    int next;
     if (sampler->temperature == 0.0f)
-    {
-        // greedy argmax sampling: take the token with the highest probability
-        next = sample_argmax(logits, sampler->vocab_size);
-    }
+        return sample_argmax(logits, sampler->vocab_size);
+
+    /* 温度缩放 + Softmax */
+    for (int q = 0; q < sampler->vocab_size; q++)
+        logits[q] /= sampler->temperature;
+    softmax(logits, sampler->vocab_size);
+
+    v4sf coin = random_f32(&sampler->rng_state);
+    if (sampler->topp <= 0.0f || sampler->topp >= 1.0f)
+        return sample_mult(logits, sampler->vocab_size, coin);
     else
-    {
-        // apply the temperature to the logits
-        for (int q = 0; q < sampler->vocab_size; q++)
-        {
-            logits[q] /= sampler->temperature;
-        }
-        // apply softmax to the logits to get the probabilities for next token
-        softmax(logits, sampler->vocab_size);
-        // flip a (v4sf) coin (this is our source of entropy for sampling)
-        v4sf coin = random_f32(&sampler->rng_state);
-        // we sample from this distribution to get the next token
-        if (sampler->topp <= 0 || sampler->topp >= 1)
-        {
-            // simply sample from the predicted probability distribution
-            next = sample_mult(logits, sampler->vocab_size, coin);
-        }
-        else
-        {
-            // top-p (nucleus) sampling, clamping the least likely tokens to zero
-            next = sample_topp(logits, sampler->vocab_size, sampler->topp, sampler->probindex, coin);
-        }
-    }
-    return next;
+        return sample_topp(logits, sampler->vocab_size, sampler->topp,
+                           sampler->probindex, coin);
 }
 
-// ----------------------------------------------------------------------------
-// utilities: time
+/* ========================================================================
+ * 第十二节: 文本生成循环
+ * ======================================================================== */
 
-long time_in_ms()
+static long time_in_ms(void) { return (long)(esp_timer_get_time() / 1000); }
+
+void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
+              char *prompt, int steps,
+              generated_piece_cb cb_piece, generated_complete_cb cb_done,
+              void *cb_ctx)
 {
-    return (long)(esp_timer_get_time() / 1000);
-}
+    char empty[] = "";
+    if (!prompt) prompt = empty;
 
-// ----------------------------------------------------------------------------
-// generation loop
-
-void generate(
-    Transformer *transformer,
-    Tokenizer *tokenizer,
-    Sampler *sampler,
-    char *prompt,
-    int steps,
-    generated_piece_cb cb_piece,
-    generated_complete_cb cb_done,
-    void *cb_ctx)
-{
-    char empty_prompt[] = "";
-    if (prompt == NULL)
-    {
-        prompt = empty_prompt;
-    }
-    /* KV cache 仅为 seq_len 个位置分配，旧工程的 1024 会越界写内存。 */
-    if (steps <= 0 || steps > transformer->config.seq_len) {
+    /* steps 上限 = seq_len (超过 KV cache 容量会越界) */
+    if (steps <= 0 || steps > transformer->config.seq_len)
         steps = transformer->config.seq_len;
-    }
 
-    // encode the (string) prompt into tokens sequence
-    int num_prompt_tokens = 0;
-    /* prompt 最坏情况：每个字节成为一个 token + BOS + dummy_prefix + EOS */
+    /* ---- 编码 prompt ---- */
     size_t prompt_len = strlen(prompt);
     size_t max_tokens = prompt_len + 3u;
     if (max_tokens > 1024u) {
         ESP_LOGE(TAG, "prompt 过长 (%zu 字节)，拒绝", prompt_len);
         return;
     }
+    int num_tokens = 0;
     int *prompt_tokens = safe_alloc<int>(max_tokens);
-    encode(tokenizer, prompt, 1, 0, prompt_tokens, &num_prompt_tokens);
-    if (num_prompt_tokens < 1)
-    {
-        ESP_LOGE(TAG, "something is wrong, expected at least 1 prompt token");
-        exit(EXIT_FAILURE);
+    encode(tokenizer, prompt, 1, 0, prompt_tokens, &num_tokens);
+    if (num_tokens < 1) {
+        ESP_LOGE(TAG, "prompt 编码失败 (0 token)"); exit(EXIT_FAILURE);
     }
 
-    // start the main loop
-    long start = 0;               // used to time our code, only initialized after first iteration
-    int next;                     // will store the next token in the sequence
-    int token = prompt_tokens[0]; // kick off with the first token in the prompt
-    int pos = 0;                  // position in the sequence
-    while (pos < steps)
-    {
-        vTaskDelay(1);
+    /* ---- 自回归生成 ---- */
+    long start_ms = 0;
+    int  token = prompt_tokens[0];
+    int  pos   = 0;
 
-        // forward the transformer to get logits for the next token
+    while (pos < steps) {
+        vTaskDelay(1);  /* 喂狗 + 允许调度 */
+
         v4sf *logits = forward(transformer, token, pos);
+        int next;
 
-
-        // advance the state machine
-        if (pos < num_prompt_tokens - 1)
-        {
-            // if we are still processing the input prompt, force the next prompt token
-            next = prompt_tokens[pos + 1];
-        }
-        else
-        {
-            // otherwise sample the next token from the logits
-            next = sample(sampler, logits);
+        if (pos < num_tokens - 1) {
+            next = prompt_tokens[pos + 1];   /* prompt 阶段: 强制下一个 token */
+        } else {
+            next = sample(sampler, logits);  /* 生成阶段: 采样 */
         }
         pos++;
 
-        /* token 1 是 </s>（EOS）。stories260K 模型很小，容易过早输出 EOS。
-         * 回退 pos 重试同一位置——sampler 每次用不同随机种子，不会死循环。
-         * 但必须防止 pos 退到负数，否则 forward() 中 key_cache 索引越界导致
-         * 堆内存破坏 → 单片机重启。 */
-        if (next == 1)
-        {
-            if (pos > 0) {
-                pos--;
-                continue;
-            }
-            /* pos == 0 时无法回退，放弃本 token 换成安全的 token 0 (<unk>) */
-            next = 0;
+        /* EOS 回退保护: 模型过早输出 EOS 时重试，但不能退到负数 */
+        if (next == 1) {
+            if (pos > 0) { pos--; continue; }
+            next = 0;  /* pos==0 无法回退，fallback 到 <unk> */
         }
 
-        // print the token as string, decode it with the Tokenizer object
+        /* 输出 token */
         char *piece = decode(tokenizer, token, next);
-        if (cb_piece != NULL) cb_piece(cb_ctx, piece);
-        else safe_printf(piece);
+        if (cb_piece) cb_piece(cb_ctx, piece);
+        else          safe_printf(piece);
         fflush(stdout);
         token = next;
 
-        // init the timer here because the first iteration can be slower
-        if (start == 0)
-        {
-            start = time_in_ms();
-        }
+        if (!start_ms) start_ms = time_in_ms();
     }
     printf("\n");
 
-    // report achieved tok/s (pos-1 because the timer starts after first iteration)
-    if (pos > 1)
-    {
-        long end = time_in_ms();
-        float tks = (pos - 1) / (double)(end - start) * 1000;
+    /* 吞吐统计 */
+    if (pos > 1) {
+        long end_ms = time_in_ms();
+        float tks = (pos - 1) / (double)(end_ms - start_ms) * 1000.0f;
         fprintf(stderr, "achieved tok/s: %f\n", tks);
-        if (cb_done != NULL) cb_done(cb_ctx, tks);
+        if (cb_done) cb_done(cb_ctx, tks);
     }
 
     free(prompt_tokens);
-    ESP_LOGI(TAG, "Generate complete");
+    ESP_LOGI(TAG, "生成完成");
 }
+
+/* ========================================================================
+ * 第十三节: 工具函数
+ * ======================================================================== */
 
 void read_stdin(const char *guide, char *buffer, size_t bufsize)
 {
-    // read a line from stdin, up to but not including \n
     printf("%s", guide);
-    if (fgets(buffer, bufsize, stdin) != NULL)
-    {
+    if (fgets(buffer, (int)bufsize, stdin)) {
         size_t len = strlen(buffer);
-        if (len > 0 && buffer[len - 1] == '\n')
-        {
-            buffer[len - 1] = '\0'; // strip newline
-        }
+        if (len > 0 && buffer[len - 1] == '\n') buffer[len - 1] = '\0';
     }
 }
