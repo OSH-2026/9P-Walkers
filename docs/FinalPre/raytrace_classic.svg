@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="620" viewBox="0 0 900 620">
+  <defs>
+    <radialGradient id="whiteBall" gradientUnits="userSpaceOnUse" cx="310" cy="365" r="155"><stop offset="0" stop-color="#ffffff"/><stop offset="0.48" stop-color="#d9e2e8"/><stop offset="1" stop-color="#35404a"/></radialGradient>
+    <radialGradient id="mirrorBall" gradientUnits="userSpaceOnUse" cx="575" cy="398" r="125"><stop offset="0" stop-color="#ffffff"/><stop offset="0.22" stop-color="#9fc6dc"/><stop offset="0.55" stop-color="#536e7e"/><stop offset="1" stop-color="#10171d"/></radialGradient>
+    <radialGradient id="glassBall" gradientUnits="userSpaceOnUse" cx="458" cy="478" r="88"><stop offset="0" stop-color="#ffffff"/><stop offset="0.35" stop-color="#cceaf0"/><stop offset="0.72" stop-color="#648fa0"/><stop offset="1" stop-color="#17242b"/></radialGradient>
+    <linearGradient id="floor" gradientUnits="userSpaceOnUse" x1="450" y1="510" x2="450" y2="620"><stop stop-color="#d1d0c8"/><stop offset="1" stop-color="#5f6160"/></linearGradient>
+    <filter id="blur"><feGaussianBlur stdDeviation="14"/></filter>
+    <clipPath id="whiteClip"><circle cx="345" cy="405" r="118"/></clipPath>
+    <clipPath id="mirrorClip"><circle cx="610" cy="438" r="91"/></clipPath>
+  </defs>
+  <rect width="900" height="620" fill="#101418"/>
+  <polygon points="120,65 780,65 700,520 200,520" fill="#d9d8cf"/>
+  <polygon points="120,65 200,520 40,610 0,110" fill="#9d2829"/>
+  <polygon points="780,65 700,520 860,610 900,110" fill="#2e7450"/>
+  <polygon points="200,520 700,520 860,610 40,610" fill="url(#floor)"/>
+  <polygon points="120,65 780,65 900,110 0,110" fill="#b9b9af"/>
+  <rect x="342" y="73" width="216" height="22" fill="#fffbe6"/>
+  <ellipse cx="435" cy="494" rx="150" ry="38" fill="#111" opacity=".5" filter="url(#blur)"/>
+  <ellipse cx="680" cy="525" rx="125" ry="30" fill="#111" opacity=".55" filter="url(#blur)"/>
+  <circle cx="345" cy="405" r="118" fill="#bfc9cf" stroke="#eef3f5" stroke-width="5"/>
+  <ellipse cx="310" cy="365" rx="42" ry="31" fill="#ffffff" opacity=".78"/>
+  <ellipse cx="345" cy="485" rx="112" ry="62" fill="#65737c" opacity=".52" clip-path="url(#whiteClip)"/>
+  <circle cx="610" cy="438" r="91" fill="#4e6878" stroke="#b9d2df" stroke-width="5"/>
+  <ellipse cx="584" cy="408" rx="31" ry="23" fill="#e8f6fc" opacity=".8"/>
+  <ellipse cx="610" cy="495" rx="86" ry="48" fill="#18242b" opacity=".68" clip-path="url(#mirrorClip)"/>
+  <circle cx="480" cy="500" r="62" fill="#77a8b8" stroke="#d8f5ff" stroke-width="5" opacity=".9"/>
+  <circle cx="480" cy="500" r="45" fill="none" stroke="#d6f3f5" stroke-width="4" opacity=".75"/>
+  <ellipse cx="462" cy="482" rx="18" ry="13" fill="#ffffff" opacity=".76"/>
+  <ellipse cx="452" cy="85" rx="135" ry="18" fill="#fff" opacity=".55" filter="url(#blur)"/>
+</svg>

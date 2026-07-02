@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="620" viewBox="0 0 900 620">
+  <rect width="900" height="620" rx="24" fill="#13283b"/>
+  <rect x="45" y="45" width="810" height="455" rx="14" fill="#e9f2f8" stroke="#6f9abd" stroke-width="6"/>
+  <circle cx="450" cy="272" r="92" fill="#187caf"/>
+  <path d="M420 215 L420 329 L520 272 Z" fill="#fff"/>
+  <text x="450" y="555" text-anchor="middle" font-family="sans-serif" font-size="31" font-weight="700" fill="#fff">INSERT RAY-TRACING DEMO VIDEO</text>
+  <text x="450" y="592" text-anchor="middle" font-family="sans-serif" font-size="19" fill="#b9cfdf">Lua scheduling · distributed tiles · live LCD refresh</text>
+</svg>

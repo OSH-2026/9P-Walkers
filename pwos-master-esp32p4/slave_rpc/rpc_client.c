@@ -9,6 +9,7 @@ static int rpc_retag_adapter(
     size_t frame_len,
     uint16_t wire_tag)
 {
+    /* session_manager 统一分配 wire_tag，RPC 内部字段名叫 call_id。 */
     return pwos_rpc_retag(frame, frame_len, wire_tag);
 }
 
@@ -19,6 +20,10 @@ static uint32_t effective_deadline(uint32_t deadline_ms)
 
 static uint32_t effective_local_deadline(uint32_t remote_deadline)
 {
+    /*
+     * 远端 deadline 写进 RPC 帧，让 slave 知道业务截止时间；
+     * 本地多等 100ms grace，用于接收远端赶在 deadline 附近返回的响应。
+     */
     return remote_deadline > UINT32_MAX - PWOS_RPC_CLIENT_DEADLINE_GRACE_MS ?
         UINT32_MAX : remote_deadline + PWOS_RPC_CLIENT_DEADLINE_GRACE_MS;
 }
@@ -100,6 +105,10 @@ int pwos_rpc_client_call(
     }
     remote_deadline = effective_deadline(deadline_ms);
     local_deadline = effective_local_deadline(remote_deadline);
+    /*
+     * call_id 先填 0，真正发出前由 session_manager 通过 rpc_retag_adapter()
+     * 替换为唯一 wire_tag。
+     */
     if (pwos_rpc_encode(
             PWOS_RPC_KIND_REQUEST,
             0u,
@@ -134,6 +143,7 @@ int pwos_rpc_client_call(
     if (rc != 0) {
         client->stats.last_error = rc;
         if (rc == PWOS_SESSION_ERR_DEADLINE) {
+            /* 本地等超时后，尽力发送 CANCEL，远端收到后可中止仍在运行的调用。 */
             ++client->stats.deadline_errors;
             send_cancel(client, addr, boot_id, call_id);
         }
@@ -143,6 +153,7 @@ int pwos_rpc_client_call(
         (view.kind != PWOS_RPC_KIND_RESPONSE &&
          view.kind != PWOS_RPC_KIND_STREAM_END) ||
         view.call_id != call_id || view.payload_len > *in_out_response_len) {
+        /* 响应类型、call_id、长度任一不匹配，都按 malformed 处理。 */
         ++client->stats.malformed_responses;
         client->stats.last_error = -1;
         return -1;
@@ -192,6 +203,7 @@ int pwos_rpc_client_stream(
         return -1;
     }
     remote_deadline = effective_deadline(deadline_ms);
+    /* STREAM flag 告诉 slave 返回 STREAM_CHUNK* + STREAM_END，而不是单个 RESPONSE。 */
     if (pwos_rpc_encode(
             PWOS_RPC_KIND_REQUEST,
             PWOS_RPC_FLAG_STREAM,
@@ -209,6 +221,10 @@ int pwos_rpc_client_stream(
     }
 
     ++client->stats.stream_tx;
+    /*
+     * chunk 顺序和聚合不在 rpc_client 做，而是在 session_manager_deliver_data_part()
+     * 中按 status_or_part_index 校验连续性。
+     */
     rc = pwos_session_manager_request_stream_data(
         client->sessions,
         addr,
@@ -228,6 +244,7 @@ int pwos_rpc_client_stream(
     if (rc != 0) {
         client->stats.last_error = rc;
         if (rc == PWOS_SESSION_ERR_DEADLINE) {
+            /* 流式调用超时同样发送 CANCEL，call_id 即本次 stream 的 wire_tag。 */
             ++client->stats.deadline_errors;
             send_cancel(client, addr, boot_id, call_id);
         }
@@ -278,6 +295,9 @@ int pwos_rpc_client_notify(
             &frame_len) != 0) {
         return -1;
     }
+    /*
+     * notify 是 one-way：分配 call_id 并发送，但不占 pending、不等待响应。
+     */
     rc = pwos_session_manager_send_oneway_data(
         client->sessions,
         addr,

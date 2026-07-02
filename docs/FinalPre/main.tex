@@ -3,10 +3,10 @@
 \usepackage[bluetheme]{ustcbeamer}
 \input{ustctheme.tex}
 
-\title[9P-Walkers 中期汇报]{
+\title[9P-Walkers 项目答辩]{
   9P-Walkers\\
   基于 mini9P 的 MCU 集群分布式系统\\
-  中期汇报
+  项目答辩
 }
 \author[9P-Walkers]{
   报告人：霍斌\\
@@ -16,7 +16,7 @@
   中国科学技术大学\\
   OSH-2026 课程项目
 }
-\date{2026年4月27日}
+\date{2026年7月1日}
 
 \begin{document}
 
@@ -36,367 +36,1020 @@
 \setbeamertemplate{footline}[footlineon]
 }
 
-\section{What：我们到底要做什么}
+%==============================================================================
+\section{项目概述}
+%==============================================================================
 
 \begin{frame}
-  \frametitle{What-1：问题定义与项目边界}
-  \begin{block}{我们要解决的不是“单机 RTOS”，而是“多 MCU 的统一资源视图”}
-    \small
-    \begin{itemize}
-      \item 单个 MCU 上的调度、驱动和文件系统已经较成熟，但多 MCU 协同时往往接口分裂、控制入口分散。
-      \item 真正困难的不是某个设备怎么读写，而是\alert{多个节点上的设备、存储和计算任务如何被统一命名、统一访问、统一调度}。
-      \item 因此，本项目关注的是一个\alert{轻量级分布式系统原型}，而不是再做一个单板 OS。
-    \end{itemize}
-  \end{block}
-  \pause
-  \begin{alertblock}{项目边界}
-    \small
-    我们的目标不是复刻完整 Plan 9、Inferno 或 ROS 2，而是在 MCU 资源约束和课程周期内，验证“\alert{统一命名空间 + 轻量远程文件协议 + 主从协同}”这条路线能否跑通。
-  \end{alertblock}
-\end{frame}
-
-\begin{frame}
-  \frametitle{What-2：最终系统要交付什么闭环}
+  \frametitle{9P-Walkers 是什么}
   \begin{columns}[T]
-    \begin{column}{0.48\textwidth}
-      \begin{block}{用户最终看到的系统}
+    \begin{column}{0.55\textwidth}
+      \begin{block}{核心目标}
+        \small
+        在异构 MCU 集群上构建一个\alert{统一命名、自动组网、支持远程调用和分布式计算}的实验性分布式系统。
+      \end{block}
+      \begin{block}{系统组成}
         \small
         \begin{itemize}
-          \item \texttt{cat /mcu1/dev/temperature}
-          \item \texttt{echo 100 > /mcu2/dev/motor/speed}
-          \item \texttt{cat /mcu3/compute/jacobi/result}
+          \item \textbf{主机}：ESP32-P4（Ethernet）/ ESP32-S3（WiFi）
+          \item \textbf{节点}：STM32F407 / STM32F429
+          \item \textbf{互联}：UART 多跳有线网络 + 主机间局域网
+          \item \textbf{接口}：统一路径 \texttt{/mcuN/...}
         \end{itemize}
       \end{block}
-      \begin{block}{要交付的核心能力}
-        \small
-        \begin{itemize}
-          \item 统一路径访问
-          \item 跨节点设备读写
-          \item 固定计算任务触发与取回结果
-        \end{itemize}
-      \end{block}
-    \end{column}
-    \begin{column}{0.48\textwidth}
-      \begin{block}{系统形态}
-        \small
-        \begin{itemize}
-          \item Master 负责命名空间、Shell、Lua、后续 Web
-          \item Slave 负责设备访问、本地存储、计算执行
-          \item 节点间通过 mini9P 做远程文件访问
-        \end{itemize}
-      \end{block}
-      \begin{alertblock}{明确的非目标}
-        \small
-        \begin{itemize}
-          \item 不实现完整 9P2000
-          \item 不引入完整 ROS 2 图与消息系统
-          \item 不在当前阶段追求完全去中心式架构
-        \end{itemize}
-      \end{alertblock}
-    \end{column}
-  \end{columns}
-\end{frame}
-
-\section{Why：为什么这样设计是合理的}
-
-\begin{frame}
-  \frametitle{Why-1：为什么这个问题值得做}
-  \begin{columns}[T]
-    \begin{column}{0.48\textwidth}
-      \begin{block}{课程价值}
-        \small
-        \begin{itemize}
-          \item 资源抽象与统一命名空间
-          \item 本地文件系统与远程访问协议协同
-          \item 多节点通信与任务调度裁剪实现
-          \item 受限系统中的分层与边界控制
-        \end{itemize}
-      \end{block}
-    \end{column}
-    \begin{column}{0.48\textwidth}
-      \begin{block}{工程价值}
-        \small
-        \begin{itemize}
-          \item 机器人和嵌入式系统中，本来就存在“上层控制器 + 多个 MCU 执行节点”的常见形态。
-          \item 如果接口仍是专用串口命令，系统会随节点数增长迅速失控。
-          \item 因此，需要一个比“设备私有 RPC”更统一、更可扩展的资源视图。
-        \end{itemize}
-      \end{block}
-    \end{column}
-  \end{columns}
-\end{frame}
-
-\begin{frame}
-  \frametitle{Why-2：为什么采用“一切皆文件”而不是专用 RPC}
-  \begin{columns}[T]
-    \begin{column}{0.48\textwidth}
-      \begin{block}{调研结论：Plan 9 / Inferno 给出的启发}
-        \small
-        \begin{itemize}
-          \item 设备与服务都可以被稳定地抽象为文件。
-          \item 远程访问可以围绕少数通用操作展开，而不是为每类设备单独设计协议。
-          \item 用户应看到聚合后的命名空间，而不是散乱的控制接口。
-        \end{itemize}
-      \end{block}
-    \end{column}
-    \begin{column}{0.48\textwidth}
-      \begin{block}{工程后果}
-        \small
-        \begin{itemize}
-          \item Shell 直接可用，演示和调试都直观。
-          \item 外设文件、状态文件、计算任务文件可以共用一套访问语义。
-          \item 接口数量随节点增长更可控，不会演化成一堆专用命令集合。
-        \end{itemize}
-      \end{block}
-      \begin{alertblock}{结论}
-        \small
-        文件抽象不是“为了好看”，而是为了让\alert{设备控制、状态查询和任务执行}都落到统一接口上。
-      \end{alertblock}
-    \end{column}
-  \end{columns}
-\end{frame}
-
-\begin{frame}
-  \frametitle{Why-3：为什么不是 ROS、完整 9P 或完全去中心式}
-  \begin{block}{调研不是罗列名词，而是用于排除不合适的路线}
-    \small
-    \begin{itemize}
-      \item \textbf{ROS / micro-ROS：}适合作为上层分层和现实部署形态的参考，但它们擅长的是消息图与编排，不是“统一文件命名空间”。
-      \item \textbf{完整 9P2000：}语义值得借鉴，但对 MCU 的 RAM、Flash、无 MMU 环境来说过重；我们只保留当前闭环需要的操作集合。
-      \item \textbf{完全去中心式：}理论上更分布式，但会把发现、路由、一致性和故障恢复的复杂度过早引入系统。
-    \end{itemize}
-  \end{block}
-  \pause
-  \begin{alertblock}{因此当前选择是}
-    \small
-    逻辑上采用\alert{主控集中、从机确定执行}；协议上采用\alert{mini9P}；物理链路上先从\alert{UART 单链路闭环}出发，后续再考虑总线或环形演进。
-  \end{alertblock}
-\end{frame}
-
-\begin{frame}
-  \frametitle{Why-4：为什么判断这个方案在课程周期内可行}
-  \begin{columns}[T]
-    \begin{column}{0.31\textwidth}
-      \begin{block}{依据 1：代码底座已存在}
-        \small
-        \begin{itemize}
-          \item mini9P 协议规范已成文
-          \item 主控 client 已实现编解码和 API
-          \item 主控已能启动 Lua 和 shell
-        \end{itemize}
-      \end{block}
-    \end{column}
-    \begin{column}{0.31\textwidth}
-      \begin{block}{依据 2：从机基础已具备}
-        \small
-        \begin{itemize}
-          \item USART2 / SDIO 初始化已完成
-          \item littlefs 自检已能建目录、写读、校验
-          \item 能周期输出启动与状态报告
-        \end{itemize}
-      \end{block}
-    \end{column}
-    \begin{column}{0.31\textwidth}
-      \begin{block}{依据 3：验证路径清晰}
-        \small
-        \begin{itemize}
-          \item 先协议层自测
-          \item 再单节点主从闭环
-          \item 再统一命名空间
-          \item 最后扩展展示层
-        \end{itemize}
-      \end{block}
-    \end{column}
-  \end{columns}
-  \vspace{0.2cm}
-  \begin{alertblock}{可行性的核心不是“理想很美”，而是“现有基础足以支撑下一步闭环”}
-    \small
-    我们现在面对的主要问题是\alert{工程补完与联调}，而不是“这条路线是否根本不可做”。
-  \end{alertblock}
-\end{frame}
-
-\section{How：准备怎样把它做成}
-
-\begin{frame}
-  \frametitle{How-1：系统分层与职责划分}
-  \begin{columns}[T]
-    \begin{column}{0.46\textwidth}
-      \begin{block}{Master：控制平面}
-        \small
-        \begin{itemize}
-          \item Shell / Lua / 后续 Web 作为统一入口
-          \item cluster\_vfs 负责 \texttt{/mcuN/...} 命名空间聚合
-          \item mini9P client 负责远程访问协议收发
-          \item 调度逻辑和复杂状态主要留在主控侧
-        \end{itemize}
-      \end{block}
-    \end{column}
-    \begin{column}{0.08\textwidth}
-      \vspace{1.5cm}
-      \centerline{\Large $\Longleftrightarrow$}
-      \centerline{\small UART}
     \end{column}
     \begin{column}{0.42\textwidth}
-      \begin{block}{Slave：执行平面}
-        \small
-        \begin{itemize}
-          \item mini9P server 解析请求
-          \item 虚拟文件树路由到设备或计算节点
-          \item littlefs 提供本地持久化基底
-          \item 从机侧坚持静态、确定、可预测
-        \end{itemize}
-      \end{block}
+      \begin{figure}
+        \centering
+        % 实拍后将下方占位替换为：\includegraphics[width=0.9\textwidth]{system_overview_photo.jpg}
+        \fbox{\parbox[c][4.3cm][c]{0.86\textwidth}{\centering
+          \Large 实拍图片占位\\[0.25cm]
+          \small P4 + S3 + F407/F429 组网全景\\
+          建议文件名：\texttt{system\_overview\_photo.jpg}}}
+        \caption{ESP32 与 STM32 组网实物（待替换）}
+      \end{figure}
     \end{column}
   \end{columns}
 \end{frame}
 
 \begin{frame}
-  \frametitle{How-2：路径、协议与任务是如何落地的}
+  \frametitle{应用场景}
+  \begin{columns}[T]
+    \begin{column}{0.24\textwidth}
+      \begin{block}{\centering 边缘计算}
+        \centering
+        \small
+        把计算任务分发到多个 STM32 节点并行执行
+      \end{block}
+    \end{column}
+    \begin{column}{0.24\textwidth}
+      \begin{block}{\centering 远程诊断}
+        \centering
+        \small
+        通过统一路径读取任意节点的健康状态和运行指标
+      \end{block}
+    \end{column}
+    \begin{column}{0.24\textwidth}
+      \begin{block}{\centering 分布式渲染}
+        \centering
+        \small
+        把光线追踪 tile 任务分派到多个 MCU，结果汇总显示
+      \end{block}
+    \end{column}
+    \begin{column}{0.24\textwidth}
+      \begin{block}{\centering 多主机协同}
+        \centering
+        \small
+        多台 ESP32 在局域网内自动发现并共享全局节点视图
+      \end{block}
+    \end{column}
+  \end{columns}
+  \vspace{0.4cm}
+  \begin{figure}
+    \centering
+    \includegraphics[width=0.78\textwidth]{usecase_overview.pdf}
+    \caption{典型应用场景}
+  \end{figure}
+\end{frame}
+
+\begin{frame}
+  \frametitle{要解决的五个核心问题}
+  \begin{enumerate}
+    \item \textbf{统一命名与访问}：如何让上层用户像访问本地文件一样访问远端 MCU 资源？
+    \item \textbf{自动发现与多跳路由}：节点上电后如何自动加入网络、获取地址、找到路径？
+    \item \textbf{控制面与数据面隔离}：文件访问、远程调用和计算任务如何保证不阻塞链路维护？
+    \item \textbf{主机间协作}：多台 ESP32 如何形成一致的全局视图并协同管理各自子树？
+    \item \textbf{长计算不阻塞通信}：资源受限的 MCU 上如何安全地执行耗时计算任务？
+  \end{enumerate}
+  \vspace{0.3cm}
+  \begin{alertblock}{解决思路}
+    \centering
+    统一文件命名 + 自定义链路协议 + 分层任务调度 + 主控协调 + 增量计算执行
+  \end{alertblock}
+\end{frame}
+
+%==============================================================================
+\section{整体架构}
+%==============================================================================
+
+\begin{frame}
+  \frametitle{两个网络平面}
+  \begin{figure}
+    \centering
+    \includegraphics[width=0.82\textwidth]{dual_plane_mesh.pdf}
+    \caption{系统双平面架构}
+  \end{figure}
+  \begin{itemize}
+    \item \textbf{主机间 IP 平面}：ESP32-P4（Ethernet）与 ESP32-S3（WiFi）通过 mDNS + TCP/9909 + CBOR 互联。
+    \item \textbf{STM32 有线 mesh 平面}：节点通过 UART 多跳连接，主机负责地址分配和路由下发。
+    \item 两个平面只在 ESP32 主机汇合，跨主机访问由 owner 主机代理。
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{主机侧架构}
   \begin{columns}[T]
     \begin{column}{0.48\textwidth}
-      \begin{block}{路径模型}
+      \begin{block}{核心模块}
         \small
         \begin{itemize}
-          \item 主控对外暴露统一路径：\texttt{/mcu1/dev/temperature}
-          \item mini9P 只处理节点本地路径：\texttt{/dev/temperature}
-          \item 也就是说，\texttt{/mcuN} 这一层聚合由 Master 完成
-        \end{itemize}
-      \end{block}
-      \begin{block}{协议模型}
-        \small
-        \begin{itemize}
-          \item 保留 attach / walk / open / read / write / stat / clunk
-          \item 帧头 + 长度 + CRC 便于串口同步与恢复
-          \item 不把消息集合扩得超过当前闭环需求
+          \item \texttt{coordinator\_runtime}：UART RX 唯一消费者
+          \item \texttt{host\_coordinator}：地址、租约、拓扑、路由
+          \item \texttt{session\_manager}：并发 pending 管理
+          \item \texttt{cluster\_vfs}：\texttt{/mcuN/...} 命名空间
+          \item \texttt{slave\_rpc / job\_manager}：远程调用与任务
+          \item \texttt{host\_rpc}：主机间发现与协作
+          \item \texttt{web / shell / lua}：用户入口
         \end{itemize}
       \end{block}
     \end{column}
     \begin{column}{0.48\textwidth}
-      \begin{block}{任务模型}
+      \begin{figure}
+        \centering
+        \includegraphics[width=0.98\textwidth]{master_arch.pdf}
+        \caption{ESP32 主机内部模块}
+      \end{figure}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{节点侧架构}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{分层结构}
         \small
         \begin{itemize}
-          \item 长任务不走阻塞式 RPC
-          \item 向命令文件写参数，立即返回
-          \item 通过状态文件轮询执行进度
-          \item 通过结果文件读取最终输出
+          \item UART DMA / IDLE 中断
+          \item 端口管理：HELLO 发现、上游选择
+          \item 节点控制：地址、租约、路由、转发
+          \item 服务运行时：mini9P server、RPC、Job
+          \item 本地 VFS：\texttt{/sys/*}、\texttt{/compute/*}
+          \item 计算 worker：增量执行 kernel
         \end{itemize}
       \end{block}
-      \begin{alertblock}{原因}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{figure}
+        \centering
+        \includegraphics[width=0.98\textwidth]{slave_arch.pdf}
+        \caption{STM32 节点内部模块}
+      \end{figure}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{数据面类型}
+  \begin{table}
+    \centering
+    \small
+    \begin{tabular}{|c|c|c|c|}
+      \hline
+      \textbf{类型} & \textbf{用途} & \textbf{主机端} & \textbf{STM32 端} \\
+      \hline
+      mini9P & 文件/诊断 & cluster\_vfs + session\_manager & mini9P server + local\_vfs \\
+      \hline
+      RPC & 短调用/流 & slave\_rpc & rpc\_service \\
+      \hline
+      Job & 异步计算 & job\_manager & job\_service + compute\_worker \\
+      \hline
+      Bulk & 大数据预留 & 未实现 & 未实现 \\
+      \hline
+    \end{tabular}
+    \caption{三类数据面对应模块}
+  \end{table}
+  \begin{figure}
+    \centering
+    \includegraphics[width=0.72\textwidth]{dataplane.pdf}
+    \caption{数据面分类}
+  \end{figure}
+\end{frame}
+
+%==============================================================================
+\section{核心运行流程}
+%==============================================================================
+
+\begin{frame}
+  \frametitle{系统启动流程}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{ESP32-P4 主机}
         \small
-        这样可以避免在没有复杂会话控制和 \texttt{flush} 的前提下，把链路做成难以恢复的长事务。
+        \begin{enumerate}
+          \item \texttt{app\_main()} 打印芯片信息
+          \item 启动 \texttt{coordinator\_runtime}
+          \item 创建主循环任务和健康探测任务
+          \item 启动 LAN、host RPC、WebShell、Lua、推理
+        \end{enumerate}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{STM32F407 节点}
+        \small
+        \begin{enumerate}
+          \item \texttt{main()} 初始化 HAL 与外设
+          \item FreeRTOS 初始化
+          \item 创建队列和 8 个静态任务
+          \item 启动调度器
+        \end{enumerate}
+      \end{block}
+    \end{column}
+  \end{columns}
+  \vspace{0.3cm}
+  \begin{figure}
+    \centering
+    \includegraphics[width=0.70\textwidth]{boot_sequence.pdf}
+    \caption{主机与节点启动流程}
+  \end{figure}
+\end{frame}
+
+\begin{frame}
+  \frametitle{节点上线流程}
+  \begin{figure}
+    \centering
+    \includegraphics[width=0.82\textwidth]{node_join.pdf}
+    \caption{STM32 节点上线状态机}
+  \end{figure}
+  \begin{enumerate}
+    \item HELLO/ACK 发现邻居
+    \item 选择上游端口（直连主机或可达 relay）
+    \item 发送注册请求
+    \item 主机分配地址和租约
+    \item 周期续租
+    \item 上报链路状态，接收路由更新
+  \end{enumerate}
+\end{frame}
+
+\begin{frame}
+  \frametitle{数据面请求流程示例}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{\small \texttt{cat /mcu1/sys/health}}
+        \small
+        \begin{enumerate}
+          \item 解析路径 → 节点地址
+          \item 建立/复用 mini9P session
+          \item attach → walk → open → read
+          \item 节点 local\_vfs 生成健康文本
+          \item 响应沿原路返回
+        \end{enumerate}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{figure}
+        \centering
+        \includegraphics[width=0.98\textwidth]{request_sequence.pdf}
+        \caption{读取远端节点健康状态}
+      \end{figure}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Job 提交流程}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{流程}
+        \small
+        \begin{enumerate}
+          \item 用户提交：\texttt{job submit mcu1 hash hello}
+          \item job\_manager 分配 host\_job\_id
+          \item 发送任务到 STM32
+          \item job\_service 提交给 compute\_worker
+          \item compute\_task 增量执行
+          \item 用户查询状态和结果
+        \end{enumerate}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{figure}
+        \centering
+        \includegraphics[width=0.98\textwidth]{job_sequence.pdf}
+        \caption{异步计算任务提交}
+      \end{figure}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+%==============================================================================
+\section{核心模块详解}
+%==============================================================================
+
+\begin{frame}
+  \frametitle{链路帧与流式解析器}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{帧格式}
+        \small
+        19 字节头部 + 最多 512 字节 payload
+        \begin{itemize}
+          \item magic、版本、长度、地址、TTL
+          \item 双层 CRC：头 CRC + payload CRC
+          \item 小端序，与硬件无关
+        \end{itemize}
+      \end{block}
+      \begin{block}{流式解析器}
+        \small
+        \begin{itemize}
+          \item 从任意字节流中恢复完整帧
+          \item 支持噪声重同步和半帧保留
+          \item 固定缓冲区，无动态内存
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{figure}
+        \centering
+        \includegraphics[width=0.98\textwidth]{link_frame.pdf}
+        \caption{链路帧格式}
+      \end{figure}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{控制面协议}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{消息类型}
+        \small
+        \begin{itemize}
+          \item 节点注册与地址分配
+          \item 租约续期与确认
+          \item 链路状态上报
+          \item 路由更新下发
+          \item 主机权威通告
+          \item wall-clock 时间同步
+        \end{itemize}
+      \end{block}
+      \begin{block}{身份标识}
+        \small
+        \begin{itemize}
+          \item UID：硬件唯一标识
+          \item boot\_id：一次启动标识
+          \item 两者结合保证节点重启后旧状态可清理
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{figure}
+        \centering
+        \includegraphics[width=0.98\textwidth]{mesh2_control.pdf}
+        \caption{控制面消息}
+      \end{figure}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{mini9P 与统一命名空间}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{mini9P 协议}
+        \small
+        精简版 9P 文件协议：
+        \begin{itemize}
+          \item attach / walk / open / read
+          \item write / stat / clunk
+          \item 每个对象用 qid 标识
+        \end{itemize}
+      \end{block}
+      \begin{block}{cluster\_vfs}
+        \small
+        \begin{itemize}
+          \item 把 \texttt{/mcuN/sys/health} 映射为节点本地 \texttt{/sys/health}
+          \item 用 generation 检测节点身份变化
+          \item 防止 fd 指向错误节点
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{figure}
+        \centering
+        \includegraphics[width=0.98\textwidth]{path_mapping.pdf}
+        \caption{统一命名空间映射}
+      \end{figure}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{session\_manager：并发请求管理}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{核心机制}
+        \small
+        \begin{itemize}
+          \item 最多 32 个 session，每个节点一个
+          \item 最多 8 个 pending 槽位
+          \item 按 \texttt{(数据类型, 源地址, 标签)} 匹配响应
+          \item 支持普通响应和流式分片
+        \end{itemize}
+      \end{block}
+      \begin{block}{并发策略}
+        \small
+        \begin{itemize}
+          \item 每个节点独立 client 锁
+          \item 不同节点可真正并发
+          \item boot\_id 变化时清理旧 pending
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{figure}
+        \centering
+        \includegraphics[width=0.98\textwidth]{pending.pdf}
+        \caption{typed pending 匹配}
+      \end{figure}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{host\_coordinator：地址与路由}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{职责}
+        \small
+        \begin{itemize}
+          \item 维护最多 32 个节点
+          \item 线性扫描分配地址（1\textasciitilde253）
+          \item 处理租约续期
+          \item 根据链路状态计算路由
+        \end{itemize}
+      \end{block}
+      \begin{block}{路由计算}
+        \small
+        收到链路状态后同时生成：
+        \begin{itemize}
+          \item 正向路由：告诉 local 怎么到 peer
+          \item 反向路由：告诉 peer 怎么到 local
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{figure}
+        \centering
+        \includegraphics[width=0.98\textwidth]{routing.pdf}
+        \caption{路由下发}
+      \end{figure}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{STM32 端口管理与节点控制}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{port\_manager}
+        \small
+        \begin{itemize}
+          \item 维护物理 UART 端口状态机
+          \item HELLO/ACK 发现邻居
+          \item 选择上游：主机直连 > relay
+        \end{itemize}
+      \end{block}
+      \begin{block}{node\_control}
+        \small
+        \begin{itemize}
+          \item 本机地址、上游、路由表
+          \item 非本地目的帧：查表 → TTL-1 → 转发
+          \item 多主机时选择权威主机，避免抖动
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{figure}
+        \centering
+        \includegraphics[width=0.98\textwidth]{node_control.pdf}
+        \caption{STM32 控制面}
+      \end{figure}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{服务运行时与计算 worker}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{service\_runtime}
+        \small
+        \begin{itemize}
+          \item 本机数据面唯一入口
+          \item 串行处理 mini9P / RPC / Job
+          \item 不执行长计算
+        \end{itemize}
+      \end{block}
+      \begin{block}{compute\_worker}
+        \small
+        \begin{itemize}
+          \item 低优先级 compute\_task 增量执行
+          \item 支持 hash、向量加、矩阵乘、Mandelbrot、光线追踪 tile
+          \item 每步后主动让出 CPU
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{figure}
+        \centering
+        \includegraphics[width=0.98\textwidth]{compute_worker.pdf}
+        \caption{增量计算调度}
+      \end{figure}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{主机间协作}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{发现与选举}
+        \small
+        \begin{itemize}
+          \item mDNS 发布 \texttt{\_pwos.\_tcp} 服务
+          \item TCP/9909 + CBOR RPC
+          \item leader 按 \texttt{(epoch, priority, host\_uid)} 选举
+        \end{itemize}
+      \end{block}
+      \begin{block}{协作能力}
+        \small
+        \begin{itemize}
+          \item 全局节点命名同步
+          \item 跨主机 read/write
+          \item 分布式推理服务接口
+          \item SNTP + \texttt{time.exchange} 时间校准
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{figure}
+        \centering
+        \includegraphics[width=0.98\textwidth]{host_rpc.pdf}
+        \caption{主机间发现与协作}
+      \end{figure}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{跨机 wall-clock 时间同步}
+  \begin{columns}[T]
+    \begin{column}{0.59\textwidth}
+      \centering
+      \includegraphics[width=0.98\textwidth]{time_sync_flow.pdf}
+    \end{column}
+    \begin{column}{0.38\textwidth}
+      \begin{block}{两级同步}
+        \small
+        \begin{itemize}
+          \item P4/S3 先由 SNTP 获得 Unix 时间
+          \item 主机间用 \texttt{time.exchange} 测 offset/delay
+          \item STM32 用控制帧 \texttt{0x17} 向 authority 校时
+        \end{itemize}
+      \end{block}
+      \begin{block}{时钟隔离}
+        \small
+        节点保存 \texttt{wall = mono + offset}，不修改 FreeRTOS tick；lease、deadline 和重试始终使用单调时钟。
+      \end{block}
+      \begin{alertblock}{现场验证}
+        \small
+        \texttt{cat /host/sys/time}\\
+        \texttt{cat /mcuN/sys/time}
       \end{alertblock}
     \end{column}
   \end{columns}
 \end{frame}
 
-\begin{frame}
-  \frametitle{How-3：分阶段推进，而不是一次把系统做满}
-  \small
-  \begin{tabular}{p{0.19\textwidth}p{0.25\textwidth}p{0.23\textwidth}p{0.23\textwidth}}
-    \hline
-    阶段 & 目标 & 当前状态 & 验收标准 \\
-    \hline
-    协议基线 & 协议规范、编解码、client API & 已完成大半 & 请求与响应语义稳定 \\
-    单节点闭环 & UART + server + 最小文件树 & 当前重点 & 主控可 attach/stat/read/write 从机 \\
-    统一命名空间 & \texttt{/mcuN/...} 聚合访问 & 待接入 & Shell 能按统一路径访问资源 \\
-    展示层扩展 & 计算 demo、Lua、Web & 后续增强 & 完成课程展示闭环 \\
-    \hline
-  \end{tabular}
-  \vspace{0.25cm}
-  \begin{alertblock}{分阶段的意义}
-    \small
-    每一阶段都要有独立可验证的结果，这样即使后续增强项未全部完成，核心闭环也能成立。
-  \end{alertblock}
-\end{frame}
+%==============================================================================
+\section{关键算法}
+%==============================================================================
 
 \begin{frame}
-  \frametitle{How-4：当前进展与剩余缺口}
+  \frametitle{流式帧解析状态机}
   \begin{columns}[T]
     \begin{column}{0.48\textwidth}
-      \begin{block}{已完成的底座}
+      \begin{block}{核心步骤}
+        \small
+        \begin{enumerate}
+          \item 寻找 magic 前缀
+          \item 收齐头部并校验 CRC
+          \item 读取 payload 长度
+          \item 收齐 payload 后最终解码
+          \item 错误时保留尾部 magic 快速恢复
+        \end{enumerate}
+      \end{block}
+      \begin{block}{特点}
         \small
         \begin{itemize}
-          \item 主控侧已完成 mini9P 帧编解码与 client 接口
-          \item 主控入口已能启动 Lua、boot demo shell 与 REPL
-          \item Shell 已支持 \texttt{help}、\texttt{heap}、\texttt{lua}、\texttt{m9p}、\texttt{reboot}
-          \item 从机已完成启动、自检、littlefs 基础验证与状态上报
+          \item 时间复杂度 O(n)
+          \item 固定缓冲区，无动态内存
+          \item 对噪声鲁棒
         \end{itemize}
       \end{block}
     \end{column}
     \begin{column}{0.48\textwidth}
-      \begin{block}{尚待补齐的关键点}
-        \small
-        \begin{itemize}
-          \item 真实 UART transport 还未接到主控 client
-          \item 从机 mini9P server 仍是骨架，尚未完成请求分发
-          \item cluster\_vfs 与统一路径映射尚未真正落地
-          \item 设备文件树和计算文件接口还未进入端到端联调
-        \end{itemize}
-      \end{block}
+      \begin{figure}
+        \centering
+        \includegraphics[width=0.98\textwidth]{parser_fsm.pdf}
+        \caption{流式帧解析状态机}
+      \end{figure}
     \end{column}
   \end{columns}
 \end{frame}
 
 \begin{frame}
-  \frametitle{How-5：主要风险与应对策略}
+  \frametitle{地址分配与租约}
   \begin{columns}[T]
     \begin{column}{0.48\textwidth}
-      \begin{block}{风险}
+      \begin{block}{地址分配}
         \small
         \begin{itemize}
-          \item 方案过度膨胀，偏离最小闭环
-          \item 协议可靠性与联调问题拖慢节奏
-          \item 多节点场景过早引入，导致定位困难
-          \item 从机资源受限，复杂逻辑压垮系统
+          \item 从 next\_addr 开始线性扫描
+          \item 跳过 0x00 和 0xFF
+          \item 最多 254 次尝试
+        \end{itemize}
+      \end{block}
+      \begin{block}{租约机制}
+        \small
+        \begin{itemize}
+          \item 默认租约 30 秒
+          \item 节点在租约过半时续期
+          \item coordinator 验证 UID + boot\_id
         \end{itemize}
       \end{block}
     \end{column}
     \begin{column}{0.48\textwidth}
-      \begin{block}{应对}
+      \begin{figure}
+        \centering
+        \includegraphics[width=0.98\textwidth]{lease.pdf}
+        \caption{地址分配与租约}
+      \end{figure}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{路由计算}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{输入}
+        \small
+        节点上报的链路状态：本地地址、端口、对端地址、metric 等。
+      \end{block}
+      \begin{block}{输出}
+        \small
+        两条路由更新：
+        \begin{itemize}
+          \item 正向：告诉 local 怎么到 peer
+          \item 反向：告诉 peer 怎么到 local
+        \end{itemize}
+      \end{block}
+      \begin{block}{节点更新}
+        \small
+        节点按 route\_version 更新本地表，旧版本忽略。
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{figure}
+        \centering
+        \includegraphics[width=0.98\textwidth]{route_calc.pdf}
+        \caption{路由计算}
+      \end{figure}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{typed pending 匹配}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{问题}
+        \small
+        主机同时向一个节点发送文件、调用、任务请求，如何正确匹配响应？
+      \end{block}
+      \begin{block}{匹配键}
         \small
         \begin{itemize}
-          \item 坚持先单节点、再统一路径、最后扩展示层
-          \item 先补 transport、server、最小文件树，不扩消息集合
-          \item 多节点在单节点稳定后再引入
-          \item 把复杂状态留在 Master，从机侧坚持静态缓冲区与固定表项
+          \item 数据类型
+          \item 源地址
+          \item 标签（wire\_tag）
+        \end{itemize}
+      \end{block}
+      \begin{block}{流式响应}
+        \small
+        按 chunk 序号顺序追加，不连续则报错，STREAM\_END 才唤醒。
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{figure}
+        \centering
+        \includegraphics[width=0.98\textwidth]{pending_match.pdf}
+        \caption{typed pending 匹配}
+      \end{figure}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{增量计算调度}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{问题}
+        \small
+        MCU 计算能力弱，长计算不能阻塞通信和控制面。
+      \end{block}
+      \begin{block}{方案}
+        \small
+        \begin{itemize}
+          \item 低优先级 compute\_task
+          \item 每次只执行一个 work unit
+          \item 完成后主动让出 CPU
+          \item 支持进度查询
         \end{itemize}
       \end{block}
     \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{figure}
+        \centering
+        \includegraphics[width=0.98\textwidth]{incremental_compute.pdf}
+        \caption{增量计算调度}
+      \end{figure}
+    \end{column}
   \end{columns}
-  \vspace{0.2cm}
-  \begin{alertblock}{答辩时最关键的一句话}
+\end{frame}
+
+%==============================================================================
+\section{代码实现与数据流}
+%==============================================================================
+
+\begin{frame}
+  \frametitle{关键代码片段}
+  \begin{block}{片段 1：coordinator 主循环帧分发}
     \small
-    我们并不是在追求一个“什么都做”的系统，而是在\alert{受限资源 + 有限时间}下，证明这条架构路线的最小闭环是可实现、可验证、可扩展的。
-  \end{alertblock}
+    \texttt{handle\_frame()} 根据帧类型分发：HELLO 回复 ACK，注册/租约/链路状态进入对应 handler，数据面交给 session\_manager 匹配 pending。
+  \end{block}
+  \pause
+  \begin{block}{片段 2：地址分配线性扫描}
+    \small
+    \texttt{alloc\_addr()} 从 \texttt{next\_addr} 开始扫描 1\textasciitilde253，跳过已用地址，最多 254 次尝试。
+  \end{block}
+  \pause
+  \begin{block}{片段 3：pending 匹配}
+    \small
+    \texttt{session\_manager\_deliver\_data()} 遍历 pending 表，严格匹配数据类型、源地址、标签，并校验 boot\_id 是否一致。
+  \end{block}
+  \begin{figure}
+    \centering
+    \includegraphics[width=0.52\textwidth]{code_snippet.pdf}
+    \caption{关键代码片段}
+  \end{figure}
 \end{frame}
 
 \begin{frame}
-  \frametitle{How-6：下一阶段要拿出的硬证据}
-  \begin{block}{第一组证据：主从真实通信闭环}
-    \small
-    主控通过真实 UART 链路，对单个从机完成 attach、stat、read、write 的端到端访问。
-  \end{block}
-  \pause
-  \begin{block}{第二组证据：统一路径闭环}
-    \small
-    用户在 Shell 中通过 \texttt{/mcu1/...} 路径读写远端资源，而不是调用专用命令。
-  \end{block}
-  \pause
-  \begin{block}{第三组证据：展示闭环}
-    \small
-    至少拿出一个设备文件 demo 和一个计算文件 demo，证明“文件抽象 + 远程访问 + 主从协同”不是停留在设计图上。
-  \end{block}
-\end{frame}
-
-\section{总结}
-
-\begin{frame}
-  \frametitle{总结：what、why、how 的收束}
+  \frametitle{完整数据流}
+  \begin{figure}
+    \centering
+    \includegraphics[width=0.88\textwidth]{dataflow.pdf}
+    \caption{完整数据流与调用链}
+  \end{figure}
   \begin{itemize}
-    \item \textbf{What：}我们要做的是一个面向 MCU 集群的轻量级分布式系统原型，核心是统一命名空间下的跨节点资源访问。
-    \item \textbf{Why：}调研表明，Plan 9 / Inferno 解释了为什么资源应统一为文件，ROS / micro-ROS 和现实机器人系统说明了主控协同多 MCU 节点的工程合理性；可行性分析则证明当前仓库基础足以支撑下一阶段闭环。
-    \item \textbf{How：}我们采用主控集中、从机确定执行、mini9P 极简协议、分阶段验收的路线，先把单节点闭环打通，再扩展到统一路径和展示层。
+    \item 主机侧：路径解析 → session → UART 发送
+    \item 节点侧：UART ISR → 任务队列 → node\_control → service\_runtime → 响应返回
   \end{itemize}
+\end{frame}
+
+%==============================================================================
+\section{工程亮点与实验验证}
+%==============================================================================
+
+\begin{frame}
+  \frametitle{工程设计亮点}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{架构层面}
+        \small
+        \begin{itemize}
+          \item 控制面与数据面严格分离
+          \item 主机集中协调，节点只维护本地状态
+          \item 多主机 leader 选举与全局命名
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{实现层面}
+        \small
+        \begin{itemize}
+          \item STM32 端零动态内存
+          \item 固定任务、固定帧池、固定 job 槽位
+          \item typed pending 精确匹配
+          \item generation 机制保证一致性
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+  \vspace{0.3cm}
+  \begin{block}{可测试性}
+    \small
+    共享协议模块均提供 PC 单元测试；session\_manager 同步回调可注入，便于测试并发场景。
+  \end{block}
+\end{frame}
+
+\begin{frame}
+  \frametitle{实验验证}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{单主机闭环}
+        \small
+        \begin{itemize}
+          \item \texttt{cat /mcu1/sys/health}
+          \item \texttt{rpc mcu1 system.ping hello}
+          \item \texttt{job submit mcu1 matmul}
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{多主机闭环}
+        \small
+        \begin{itemize}
+        \frametitle{主机侧架构}  \item P4 与 S3 接入同一 LAN
+          \item 双方看到相同 leader
+          \item 跨 owner 读取 \texttt{/mcuN/sys/health}
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+  \vspace{0.3cm}
+  \begin{figure}
+    \centering
+    \fbox{\parbox{0.85\textwidth}{\centering\vspace{1cm}实验截图/串口日志/WebShell 截图\\（请替换为 experiment.png）\vspace{1cm}}}
+    \caption{实验验证截图}
+  \end{figure}
+\end{frame}
+
+\begin{frame}
+  \frametitle{性能与可扩展性}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{性能特点}
+        \small
+        \begin{itemize}
+          \item 帧解析：O(n)，固定缓冲区
+          \item 地址分配：最多 254 次扫描
+          \item 路由查找：小表线性扫描
+          \item 计算任务：增量执行，不阻塞通信
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{可扩展方向}
+        \small
+        \begin{itemize}
+          \item 扩展地址空间
+          \item 引入加权路由 metric
+          \item 实现大数据分片传输
+          \item 增加主机间安全机制
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+  \vspace{0.3cm}
+  \begin{figure}
+    \centering
+    \includegraphics[width=0.54\textwidth]{performance.pdf}
+    \caption{有界资源与复杂度（非实测吞吐量）}
+  \end{figure}
+\end{frame}
+
+%==============================================================================
+\section{实机演示}
+%==============================================================================
+
+\begin{frame}
+  \frametitle{实机演示：计算任务闭环}
+  \begin{columns}[T]
+    \begin{column}{0.40\textwidth}
+      \begin{block}{STM32 Job kernel}
+        \small
+        \begin{itemize}
+          \item FNV-1a Hash
+          \item 向量加法
+          \item 最大 $8\times8$ 矩阵乘法
+          \item Mandelbrot 分形
+        \end{itemize}
+      \end{block}
+      \begin{block}{ESP32 推理}
+        \small
+        P4/S3 本地 LLM 推理，并通过 Host RPC 暴露提交、状态和结果接口。
+      \end{block}
+      \begin{alertblock}{演示检查点}
+        \small
+        submit $\rightarrow$ queued/running $\rightarrow$ result；同时 health、ping 和路由保持正常。
+      \end{alertblock}
+    \end{column}
+    \begin{column}{0.57\textwidth}
+      \begin{figure}
+        \centering
+        % 实拍后替换为：\includegraphics[width=0.96\textwidth]{compute_demo_photo.jpg}
+        \fbox{\parbox[c][5.35cm][c]{0.92\textwidth}{\centering
+          \Large 实拍图片占位\\[0.3cm]
+          \small WebShell 命令、任务状态与节点实物同框\\[0.15cm]
+          包含 Hash / MatMul / Mandelbrot / LLM 推理结果\\[0.25cm]
+          建议文件名：\texttt{compute\_demo\_photo.jpg}}}
+        \caption{多类计算任务实机演示（待替换）}
+      \end{figure}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{实机演示：分布式光线追踪}
+  \begin{columns}[T]
+    \begin{column}{0.31\textwidth}
+      \centering
+      \includegraphics[width=0.96\textwidth]{raytrace_classic.pdf}
+      \vspace{0.12cm}
+
+      \textbf{1. 经典目标画面}\\
+      \scriptsize Cornell box、漫反射/镜面/玻璃球
+    \end{column}
+    \begin{column}{0.31\textwidth}
+      \centering
+      % 实拍后替换为：\includegraphics[width=0.96\textwidth]{raytrace_lcd_photo.jpg}
+      \fbox{\parbox[c][3.42cm][c]{0.88\textwidth}{\centering
+        \large 实拍效果图占位\\[0.2cm]
+        \scriptsize STM32F429 240$\times$320 LCD\\
+        建议文件名：\\
+        \texttt{raytrace\_lcd\_photo.jpg}}}
+      \vspace{0.12cm}
+
+      \textbf{2. F429 显示结果}\\
+      \scriptsize RGB565 tile 持续合成更新
+    \end{column}
+    \begin{column}{0.31\textwidth}
+      \centering
+      % 剪出 PPT 视频后，以视频对象覆盖下方 PDF 占位即可。
+      \includegraphics[width=0.96\textwidth]{raytrace_video_placeholder.pdf}
+      \vspace{0.12cm}
+
+      \textbf{3. 视频演示}\\
+      \scriptsize Lua 分派、并行计算与逐 tile 刷新
+    \end{column}
+  \end{columns}
+  \vspace{0.25cm}
+  \begin{alertblock}{完整链路}
+    \centering\small
+    P4 Lua scheduler $\rightarrow$ 多节点 \texttt{raytrace\_tile} Job $\rightarrow$ 汇总 RGB565 $\rightarrow$ F429 LCD
+  \end{alertblock}
+\end{frame}
+
+%==============================================================================
+\section{不足与改进}
+%==============================================================================
+
+\begin{frame}
+  \frametitle{当前不足与改进方向}
+  \begin{table}
+    \centering
+    \small
+    \begin{tabular}{|p{0.4\textwidth}|p{0.5\textwidth}|}
+      \hline
+      \textbf{当前不足} & \textbf{改进方向} \\
+      \hline
+      地址空间 8 位，最多 253 节点 & 扩展为 16 位或分层地址 \\
+      \hline
+      路由 metric 仅基于跳数 & 引入带宽、负载、延迟加权 \\
+      \hline
+      大数据传输未实现 & 实现分片传输协议 \\
+      \hline
+      主机间无安全机制 & 增加预共享密钥或证书 \\
+      \hline
+      Job 调度无优先级 & 增加优先级队列与抢占点 \\
+      \hline
+      推理受主机内存与网络带宽约束 & 优化模型切分、量化与跨主机流水线 \\
+      \hline
+    \end{tabular}
+    \caption{不足与改进方向}
+  \end{table}
+\end{frame}
+
+%==============================================================================
+\section{总结}
+%==============================================================================
+
+\begin{frame}
+  \frametitle{总结}
+  \begin{itemize}
+    \item \textbf{What：}9P-Walkers 是一个面向异构 MCU 集群的实验性分布式系统，核心是统一命名空间下的跨节点资源访问。
+    \item \textbf{How：}采用 ESP32 主机 + STM32 节点、自定义链路协议、mini9P 文件抽象、分层任务调度和多主机协作。
+    \item \textbf{成果：}实现了节点自动发现、地址租约、路由下发、远程文件/调用/任务、多主机全局命名和上板验证。
+    \item \textbf{价值：}为资源受限设备上的集群计算、远程诊断和任务调度提供了一套可扩展、可测试的实现基础。
+  \end{itemize}
+  \vspace{0.3cm}
+  \begin{alertblock}{答辩核心结论}
+    \centering
+    在受限资源与有限时间下，\alert{统一命名 + 自动组网 + 远程调用 + 分布式计算} 的最小闭环已实现、可验证、可扩展。
+  \end{alertblock}
 \end{frame}
 
 \begin{frame}
@@ -404,129 +1057,6 @@
   \centerline{\Large 谢谢！}
   \vspace{0.4cm}
   \centerline{\normalsize 欢迎老师和同学提出问题}
-\end{frame}
-
-\end{document}
-%目录页
-%--------------------
-%beamer 101
-\begin{frame}%
-	\frametitle{大纲}%
-	\tableofcontents[hideallsubsections]%仅显示节
-	%\tableofcontents%显示所节和子节
-\end{frame}%
-%--------------------
-%节目录页
-%--------------------
-\AtBeginSection[]{
-\setbeamertemplate{footline}[footlineoff]%取消页脚
-  \begin{frame}%
-    \frametitle{大纲}
-	%\tableofcontents[currentsection,subsectionstyle=show/hide/hide]%高亮当前节，不显示子节
-    \tableofcontents[currentsection,subsectionstyle=show/show/hide]%show,shaded,hide
-  \end{frame}
-\setbeamertemplate{footline}[footlineon]%添加页脚
-}
-%--------------------
-%子节目录页
-%--------------------
-\AtBeginSubsection[]{
-\setbeamertemplate{footline}[footlineoff]%取消页脚
-  \begin{frame}%
-    \frametitle{大纲}
-	%\tableofcontents[currentsection,subsectionstyle=show/hide/hide]%高亮当前节，不显示子节
-    \tableofcontents[currentsection,subsectionstyle=show/shaded/hide]%show,shaded,hide
-  \end{frame}
-\setbeamertemplate{footline}[footlineon]%添加页脚
-}
-
-\section{研究背景}
-\begin{frame}
-  \frametitle{研究背景}
-  研究背景：
-  \begin{itemize}
-    \item 一
-    \item 二
-    \item 三
-  \end{itemize}
-
-\end{frame}
-
-
-\section{理论模型}
-\subsection{模型1}
-\begin{frame}
-  \frametitle{理论模型1}
-  考虑开放系统主方程
-  \begin{equation*}
-    \frac{d\rho}{d t}=-i \left[H,\rho\right]+\kappa\left(2a\rho a^{\dagger}-a^{\dagger}a\rho-\rho a^{\dagger}a\right)
-  \end{equation*}
-  \pause
-  由此得到……
-
-\end{frame}
-\subsection{模型2}
-\begin{frame}
-  \frametitle{理论模型2}
-  近似条件
-  \begin{equation*}
-    \rho\left(t\right)\approx\rho_{\rm S}\left(t\right)\otimes\rho_{\rm B}
-  \end{equation*}
-  \pause
-  于是……
-  \begin{equation*}
-    \frac{d\rho}{d t}=\cdots
-  \end{equation*}
-  
-\end{frame}
-
-
-\section{研究方法}
-
-\begin{frame}
-  \frametitle{研究方法}
-  \begin{block}{方法一}
-    \begin{itemize}
-      \item abc
-      \item def
-    \end{itemize}
-  \end{block}
-  \pause
-  \begin{block}{方法二}
-    \begin{itemize}
-      \item abc
-      \item def
-    \end{itemize}
-  \end{block}
-\end{frame}
-
-
-\section{总结展望}
-
-\begin{frame}
-  \frametitle{总结展望}
-  \begin{columns}
-    \begin{column}{0.50\textwidth}
-      \begin{figure}
-        \includegraphics[width=0.8\textwidth]{figures/ustc_logo.pdf}
-        \caption{标题}
-      \end{figure}
-    \end{column}
-    \begin{column}{0.50\textwidth}
-      \begin{block}{结论}
-        \begin{itemize}
-          \item 结论 1
-          \item 结论 2
-          \item 结论 3
-        \end{itemize}
-      \end{block}
-    \end{column}
-  \end{columns}
-\end{frame}
-
-\begin{frame}
-  \frametitle{致谢}
-  \centerline{\Large 谢谢!}
 \end{frame}
 
 \end{document}

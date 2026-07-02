@@ -4,7 +4,9 @@
 #include <string.h>
 
 typedef struct {
+    /* routes[] 下标，用来重新找到 route。 */
     size_t index;
+    /* 打开/解析当时的地址、boot_id、generation 快照。 */
     uint8_t addr;
     uint32_t boot_id;
     uint32_t generation;
@@ -60,6 +62,7 @@ static void reset_route(pwos_cluster_vfs_route_t *route)
 
 static uint32_t next_generation(uint32_t *value)
 {
+    /* generation=0 作为未初始化/空值保留，回绕后跳过。 */
     ++(*value);
     if (*value == 0u) {
         ++(*value);
@@ -88,6 +91,10 @@ static uint8_t route_ref_matches_locked(
         return 0u;
     }
     route = &vfs->routes[ref->index];
+    /*
+     * fd 或 I/O 过程只相信快照中保存的 addr/boot/generation。
+     * 任一字段变化都说明节点身份可能变化，必须返回 stale/no route。
+     */
     return route_is_online(route) != 0u &&
         route->addr == ref->addr &&
         route->boot_id == ref->boot_id &&
@@ -233,6 +240,7 @@ static int allocate_target_name(
         return -(int)M9P_ERR_EINVAL;
     }
 
+    /* 按最小未使用 mcuN 分配，UID 不变时后续 sync 会复用旧 route.target。 */
     for (candidate = 1u; candidate < 1000u; ++candidate) {
         char name[PWOS_CLUSTER_VFS_MAX_NAME];
         size_t i;
@@ -317,6 +325,9 @@ static int sync_one_node(
         ++vfs->stats.detached;
     }
 
+    /*
+     * 优先用 UID 找 route，确保同一个物理节点重启/换地址后仍叫原来的 /mcuN。
+     */
     route = find_route_by_uid_mut(vfs, node->uid);
     if (route == NULL) {
         route = alloc_route(vfs);
@@ -343,6 +354,10 @@ static int sync_one_node(
             route->boot_id != node->boot_id ||
             route->state == PWOS_CLUSTER_VFS_ROUTE_OFFLINE;
         if (mapping_changed != 0u) {
+            /*
+             * 地址变化、boot 变化或离线恢复都会让旧 fd 失效；
+             * generation 递增后，read/write/close 的快照检查会拦截旧句柄。
+             */
             route_index = route_index_of(vfs, route);
             invalidate_files_for_route(vfs, route_index);
             if (route->addr != node->addr &&
@@ -362,6 +377,7 @@ static int sync_one_node(
         }
     }
 
+    /* 让 session_manager 同步 addr/boot，必要时取消旧 pending 并重置 client。 */
     return pwos_session_manager_update_node(vfs->sessions, route->addr, route->boot_id);
 }
 
@@ -382,11 +398,13 @@ static int ensure_attached(
         return PWOS_SESSION_ERR_NO_ROUTE;
     }
     if (vfs->routes[ref->index].state == PWOS_CLUSTER_VFS_ROUTE_ATTACHED) {
+        /* 已 attach 的 route 不重复发 TATTACH。 */
         vfs_unlock(vfs);
         return 0;
     }
     vfs_unlock(vfs);
 
+    /* 不持 VFS 元数据锁执行链路 I/O，避免阻塞 list/sync 等元数据操作。 */
     rc = pwos_session_manager_attach(
         vfs->sessions,
         ref->addr,
@@ -396,9 +414,11 @@ static int ensure_attached(
     vfs_lock(vfs);
     if (rc == 0) {
         if (route_ref_matches_locked(vfs, ref) != 0u) {
+            /* attach 期间 route 没变，才能把状态推进到 ATTACHED。 */
             vfs->routes[ref->index].state = PWOS_CLUSTER_VFS_ROUTE_ATTACHED;
             ++vfs->stats.attach_ok;
         } else {
+            /* attach 成功但节点已重启/换地址，不能承认这次 attach。 */
             rc = PWOS_SESSION_ERR_STALE_BOOT;
             ++vfs->stats.attach_fail;
             vfs->stats.last_error = (int32_t)rc;
@@ -441,6 +461,9 @@ static int resolve_path(
             continue;
         }
 
+        /*
+         * 只匹配完整路径段：/mcu1 命中 mcu1，但 /mcu10 不会误命中 mcu1。
+         */
         target_len = strlen(vfs->routes[i].target);
         path_target = path + 1u;
         if (strncmp(path_target, vfs->routes[i].target, target_len) != 0) {
@@ -450,10 +473,12 @@ static int resolve_path(
             continue;
         }
         if (route_is_online(&vfs->routes[i]) == 0u) {
+            /* 名字存在但节点离线，最终返回 NO_ROUTE 而不是 ENOENT。 */
             matched_offline = 1u;
             continue;
         }
 
+        /* 去掉 /mcuN 前缀，把 /mcu1/sys/health 映射为远端 /sys/health。 */
         mapped_path = path_target + target_len;
         if (mapped_path[0] == '\0') {
             mapped_path = "/";
@@ -466,6 +491,7 @@ static int resolve_path(
         memcpy(remote_path, mapped_path, strlen(mapped_path) + 1u);
         route_to_ref(vfs, &vfs->routes[i], out_ref);
         vfs_unlock(vfs);
+        /* 路径解析完成后立即确保该节点 mini9P attach，open/read 之后可复用。 */
         rc = ensure_attached(vfs, out_ref, deadline_ms);
         return rc;
     }
@@ -536,6 +562,10 @@ int pwos_cluster_vfs_sync_from_coordinator(
             continue;
         }
         if (coordinator_has_uid(coordinator, vfs->routes[i].uid) == 0u) {
+            /*
+             * coordinator 快照里没有这个 UID，说明节点离线或被删除。
+             * 保留 target 名称，但让 route 下线并重置对应 session。
+             */
             invalidate_files_for_route(vfs, i);
             if (vfs->routes[i].addr != PWOS_CLUSTER_VFS_UNASSIGNED_ADDR) {
                 pwos_session_manager_reset_node(vfs->sessions, vfs->routes[i].addr);
@@ -650,6 +680,10 @@ int pwos_cluster_vfs_open(
     fd = (uint16_t)(file - vfs->files);
     vfs_unlock(vfs);
 
+    /*
+     * 从这里开始做链路 I/O，不持 VFS 锁；同一节点的 mini9P client 由
+     * session_manager 的 client_lock 串行化。
+     */
     rc = pwos_session_manager_acquire_client(
         vfs->sessions,
         route_ref.addr,
@@ -666,6 +700,7 @@ int pwos_cluster_vfs_open(
     file = &vfs->files[fd];
     if (file->used != 2u || file->generation != file_generation ||
         route_ref_matches_locked(vfs, &route_ref) == 0u) {
+        /* open 过程中节点身份变化，远端 fid 不再可信，本地 fd 直接失效。 */
         reset_file(file);
         rc = PWOS_SESSION_ERR_STALE_BOOT;
     }
@@ -721,12 +756,14 @@ int pwos_cluster_vfs_read(
     route_to_ref(vfs, &vfs->routes[snapshot.route_index], &route_ref);
     if (route_ref.generation != snapshot.route_generation ||
         route_ref_matches_locked(vfs, &route_ref) == 0u) {
+        /* fd 打开后 route 已变化，拒绝继续读旧 remote_fid。 */
         rc = PWOS_SESSION_ERR_STALE_BOOT;
         ++vfs->stats.read_fail;
         vfs->stats.last_error = (int32_t)rc;
         vfs_unlock(vfs);
         return rc;
     }
+    /* 标记 busy，防止同一 fd 并发 I/O 导致 offset 或 remote_fid 状态错乱。 */
     vfs->files[fd].busy = 1u;
     vfs_unlock(vfs);
 
@@ -751,6 +788,7 @@ int pwos_cluster_vfs_read(
     if (vfs->files[fd].used != 1u ||
         vfs->files[fd].generation != snapshot.generation ||
         route_ref_matches_locked(vfs, &route_ref) == 0u) {
+        /* I/O 返回后再校验一次，防止链路等待期间节点重启。 */
         rc = PWOS_SESSION_ERR_STALE_BOOT;
     } else {
         vfs->files[fd].busy = 0u;
@@ -762,6 +800,7 @@ int pwos_cluster_vfs_read(
         return rc;
     }
 
+    /* 顺序读：成功读取多少字节，下一次 offset 就向后推进多少。 */
     vfs->files[fd].offset += *in_out_len;
     ++vfs->stats.read_ok;
     vfs_unlock(vfs);
@@ -801,12 +840,14 @@ int pwos_cluster_vfs_write(
     route_to_ref(vfs, &vfs->routes[snapshot.route_index], &route_ref);
     if (route_ref.generation != snapshot.route_generation ||
         route_ref_matches_locked(vfs, &route_ref) == 0u) {
+        /* 和 read 一样，write 前必须确认 fd 仍指向同一 boot 的同一节点。 */
         rc = PWOS_SESSION_ERR_STALE_BOOT;
         ++vfs->stats.write_fail;
         vfs->stats.last_error = (int32_t)rc;
         vfs_unlock(vfs);
         return rc;
     }
+    /* 写操作也会更新 offset，因此同一个 fd 不能并发写。 */
     vfs->files[fd].busy = 1u;
     vfs_unlock(vfs);
 
@@ -832,6 +873,7 @@ int pwos_cluster_vfs_write(
     if (vfs->files[fd].used != 1u ||
         vfs->files[fd].generation != snapshot.generation ||
         route_ref_matches_locked(vfs, &route_ref) == 0u) {
+        /* 等待远端写入期间节点变化，本地不能继续复用该 fd。 */
         rc = PWOS_SESSION_ERR_STALE_BOOT;
     } else {
         vfs->files[fd].busy = 0u;
@@ -843,6 +885,7 @@ int pwos_cluster_vfs_write(
         return rc;
     }
 
+    /* 顺序写：只推进远端确认写入的字节数。 */
     vfs->files[fd].offset += *out_written;
     ++vfs->stats.write_ok;
     vfs_unlock(vfs);
@@ -875,6 +918,7 @@ int pwos_cluster_vfs_close(
         return rc;
     }
     route_to_ref(vfs, &vfs->routes[snapshot.route_index], &route_ref);
+    /* close 开始后也设置 busy，避免另一个线程同时 read/write 该 fd。 */
     vfs->files[fd].busy = 1u;
     vfs_unlock(vfs);
 
@@ -892,6 +936,7 @@ int pwos_cluster_vfs_close(
 
     vfs_lock(vfs);
     if (vfs->files[fd].generation == snapshot.generation) {
+        /* 无论远端 clunk 成败，只要仍是同一个 fd 槽位，本地都释放掉。 */
         reset_file(&vfs->files[fd]);
     } else {
         rc = PWOS_SESSION_ERR_STALE_BOOT;
@@ -945,6 +990,7 @@ int pwos_cluster_vfs_read_path(
     capacity = *in_out_len;
     *in_out_len = 0u;
 
+    /* 便捷 API：open -> read until EOF/capacity -> close。 */
     rc = pwos_cluster_vfs_open(vfs, path, M9P_OREAD, deadline_ms, &fd);
     if (rc != 0) {
         return rc;
@@ -963,6 +1009,7 @@ int pwos_cluster_vfs_read_path(
     while (total < capacity) {
         uint16_t chunk = (uint16_t)(capacity - total);
 
+        /* 远端返回 0 字节表示 EOF；否则继续读直到调用方缓冲区满。 */
         rc = pwos_cluster_vfs_read(
             vfs, fd, buf + total, &chunk, deadline_ms);
         if (rc != 0) {
@@ -1036,6 +1083,7 @@ static int list_root(
             vfs->routes[i].state == PWOS_CLUSTER_VFS_ROUTE_OFFLINE) {
             continue;
         }
+        /* 根目录不是远端 mini9P 目录，而是主机根据在线 routes 合成的虚拟目录。 */
         memset(&entries[produced], 0, sizeof(entries[produced]));
         entries[produced].qid.type = (uint8_t)(M9P_QID_DIR | M9P_QID_VIRTUAL);
         entries[produced].qid.object_id = (uint32_t)(i + 1u);
@@ -1076,6 +1124,7 @@ int pwos_cluster_vfs_list(
         return list_root(vfs, entries, max_entries, out_count);
     }
 
+    /* 非根目录列表走远端 mini9P：open 目录，循环 read dirent buffer，再 parse。 */
     rc = pwos_cluster_vfs_open(vfs, path, M9P_OREAD, deadline_ms, &fd);
     if (rc != 0) {
         return rc;
@@ -1109,6 +1158,7 @@ int pwos_cluster_vfs_list(
             entries + produced,
             max_entries - produced);
         if (parsed == 0u) {
+            /* read 返回了非空数据却无法解析出 dirent，认为远端目录流损坏。 */
             rc = -(int)M9P_ERR_EIO;
             set_error(vfs, rc);
             break;

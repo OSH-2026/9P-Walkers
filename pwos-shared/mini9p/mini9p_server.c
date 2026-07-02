@@ -584,6 +584,10 @@ static int handle_tattach(struct m9p_server *server,
         ? 1u
         : min_u8(request.requested_inflight, server->max_inflight);
 
+    /*
+     * attach 是 mini9P 会话边界：重新 attach 会隐式清理旧 fid，
+     * 这对应主机侧节点重启/reattach 后不能继续使用旧 remote_fid。
+     */
     m9p_server_reset_session(server);
     server->negotiated_msize = min_u16(requested_msize, server->max_msize);
     server->root_fid = request.fid;
@@ -662,6 +666,7 @@ static int handle_twalk(struct m9p_server *server,
         return build_error_response(frame->tag, M9P_ERR_EFID, response_data, response_cap, response_len);
     }
 
+    /* TWALK 将主机传来的远端路径解析成 server 后端可识别的绝对路径。 */
     rc = resolve_path(source->path, request.path, path, sizeof(path));
     if (rc != 0) {
         return build_error_from_rc(frame->tag, rc, response_data, response_cap, response_len);
@@ -672,6 +677,7 @@ static int handle_twalk(struct m9p_server *server,
         return build_error_from_rc(frame->tag, rc, response_data, response_cap, response_len);
     }
 
+    /* walk 成功后才消耗一个 newfid，后续 TOPEN/TREAD/TWRITE/TCLUNK 都引用它。 */
     target = find_free_fid(server);
     if (target == NULL) {
         return build_error_response(frame->tag, M9P_ERR_EBUSY, response_data, response_cap, response_len);
@@ -810,6 +816,10 @@ static int handle_tread(struct m9p_server *server,
     response_data_cap = response_cap > (M9P_FRAME_OVERHEAD + 2u)
         ? (uint16_t)(response_cap - M9P_FRAME_OVERHEAD - 2u)
         : 0u;
+    /*
+     * 单次 read 实际返回长度受三方限制：
+     * 客户端请求 count、协商 iounit、当前 response buffer 可容纳 payload。
+     */
     cap = min_u16(clamp_iounit(server, entry->iounit), response_data_cap);
     cap = min_u16(cap, request.count);
     count = cap;
@@ -982,6 +992,7 @@ static int handle_tclunk(struct m9p_server *server,
         return build_error_from_rc(frame->tag, rc, response_data, response_cap, response_len);
     }
 
+    /* clunk 是远端 fid 生命周期结束点，对应 cluster_vfs_close()。 */
     clear_fid(entry);
     if (!has_live_fids(server)) {
         server->attached = false;
