@@ -2,7 +2,7 @@
 
 > **日期**: 2026-07-02  
 > **审计范围**: `pwos-master-esp32s3/` + `pwos-master-esp32p4/` 全部 C/C++ 源文件  
-> **共计修改文件**: 12 个 | **修复 Bug**: 28 项 | **重构文件**: 6 个
+> **共计修改文件**: 14 个 | **修复 Bug**: 28 项 | **重构文件**: 8 个
 
 ---
 
@@ -18,6 +18,8 @@
 | 6 | `inference/inference_runtime.h` | S3 + P4 | 全面重构 |
 | 7 | `inference/dist_inference_service.c` | S3 | Bug 修复 ×1 |
 | 8 | `coordinator_runtime/pwos_coordinator_runtime.c` | P4 | Bug 修复 ×5 |
+| 9 | `host_shell/command_service.h` | P4 | 全面重构 (212 行) |
+| 10 | `host_shell/command_service.c` | P4 | 全面重构 (817 行) |
 
 ---
 
@@ -145,12 +147,30 @@ PSRAM < 128KB 时主动 `esp_restart()` 防 OOM 连锁故障。
 | `llm_engine.h` | 116 行, 英文 | **174 行**, 全中文 8 节 | 每个字段维度注释, API 文档 |
 | `inference_runtime.cpp` | 260 行, 少量注释 | **499 行**, 全中文 9 节 | 任务架构图, 逐函数文档 |
 | `inference_runtime.h` | 55 行, 英文 | **107 行**, 全中文 3 节 | 状态机文档, @param 规范 |
+| `command_service.h` | 114 行, 英文 | **212 行**, 全中文 4 节 | 回调类型文档, API 文档 |
+| `command_service.c` | 440 行, 少量注释 | **817 行**, 全中文 12 节 | 15 命令逐函数文档, 架构图 |
 
 ### 重构原则
 - 全部注释中文化，`/* ==== 章节名 ==== */` 清晰分区
 - 移除死代码（`chat` 声明、旧注释、`READY_BIT`）
 - 统一 `static` 修饰（内部函数全部 static）
 - 函数声明/定义按依赖顺序排列
+
+### command_service.c 12 节结构
+```
+第一节:  配置常量           → 缓冲区大小
+第二节:  输出构建器          → output_builder_t + output_append (格式化输出)
+第三节:  字符串工具          → trim_left / trim_right / take_token
+第四节:  错误名称映射        → error_name (session → 9P → fallback)
+第五节:  跨平台延时          → command_sleep_ms (FreeRTOS / POSIX)
+第六节:  文件操作命令        → cat / ls / stat / echo
+第七节:  LLM 推理命令        → llm (本地/远程, 提交→轮询→读取)
+第八节:  故障注入命令        → fault (开发测试用, 防路径穿越)
+第九节:  RPC 命令            → rpc / stream / notify + parse_rpc_deadline
+第十节:  Job 管理命令        → job (委托 job_manager)
+第十一节: 服务初始化          → 回调校验 + 配置拷贝
+第十二节: 命令执行入口        → 15 命令 if-else 分发表
+```
 
 ---
 
