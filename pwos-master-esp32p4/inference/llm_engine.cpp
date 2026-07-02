@@ -30,28 +30,50 @@
 #define TASK_1_BIT (1 << 1)
 #define FORWARD_TASK_1 (1 << 2)
 #define FORWARD_TASK_2 (1 << 3)
-#define READY_BIT (1 << 3)
 #define ALL_SYNC_BITS (TASK_0_BIT | TASK_1_BIT)
 #define ALL_FORWARD_TASKS (FORWARD_TASK_1 | FORWARD_TASK_2)
+
+/* 同步超时：若对端任务卡死，最多等待此时间后主动重启，
+ * 避免永久死锁导致 Task Watchdog 触发不可预测的行为。 */
+#define MATMUL_SYNC_TIMEOUT_MS  2000u
+#define FORWARD_SYNC_TIMEOUT_MS 5000u
+
+/* 超过此阈值的分配不尝试回退到内部 SRAM（ESP32-S3 内部 SRAM 典型只有 512KB，
+ * 大块分配回退几乎必定失败，且碎片化的回退分配会扰乱堆状态）。 */
+#define SAFE_ALLOC_INTERNAL_FALLBACK_LIMIT (32u * 1024u)
 
 template <typename T>
 T* safe_alloc(size_t num_elements) {
     size_t total_size = num_elements * sizeof(T);
-    
-    // 1. 优先强制在外部 8MB 高速 PSRAM 中申请，并且自动清零 (calloc)
+
+    /* 0. 分配前记录当前空闲内存，方便定位 OOM 阶段 */
+    size_t free_psram  = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    if (total_size > free_psram / 2u) {
+        ESP_LOGW("LLM", "大块分配 %.1f KB，当前 PSRAM 空闲 %.1f KB",
+                 (double)total_size / 1024.0, (double)free_psram / 1024.0);
+    }
+
+    /* 1. 优先在 PSRAM 中申请（自动清零） */
     T* ptr = (T*)heap_caps_calloc(num_elements, sizeof(T), MALLOC_CAP_SPIRAM);
-    
-    // 2. 如果 PSRAM 不够，退回到内部 SRAM 申请
-    if (ptr == nullptr) {
+
+    /* 2. 小尺寸分配允许回退到内部 SRAM；大尺寸直接失败（避免耗尽内部 SRAM 导致
+     *    WiFi/LWIP 等关键组件异常）。 */
+    if (ptr == nullptr && total_size <= SAFE_ALLOC_INTERNAL_FALLBACK_LIMIT) {
+        ESP_LOGW("LLM", "PSRAM 不足，%.1f KB 回退到内部 SRAM",
+                 (double)total_size / 1024.0);
         ptr = (T*)heap_caps_calloc(num_elements, sizeof(T), MALLOC_CAP_INTERNAL);
     }
-    
-    // 初始化阶段无法恢复时立即终止，避免带着空指针进入矩阵计算。
+
+    /* 3. 仍然失败 → 记录详细诊断信息后终止 */
     if (ptr == nullptr) {
-        ESP_LOGE("LLM", "内存分配失败，申请大小=%zu", total_size);
+        ESP_LOGE("LLM", "内存分配失败！申请=%.1f KB PSRAM空闲=%.1f KB 内部空闲=%.1f KB",
+                 (double)total_size / 1024.0,
+                 (double)free_psram / 1024.0,
+                 (double)free_internal / 1024.0);
         abort();
     }
-    
+
     return ptr;
 }
 
@@ -118,15 +140,20 @@ void malloc_run_state(RunState *s, Config *p)
 {
     // we calloc instead of malloc to keep valgrind happy
     int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
+    size_t kv_cache_elems = (size_t)p->n_layers * (size_t)p->seq_len * (size_t)kv_dim;
+    size_t kv_cache_bytes = kv_cache_elems * sizeof(v4sf);
+    ESP_LOGI(TAG, "KV cache 大小: %.1f KB (layers=%d seq=%d kv_dim=%d)",
+             (double)kv_cache_bytes / 1024.0, p->n_layers, p->seq_len, kv_dim);
+
     s->x = safe_alloc<v4sf>(p->dim);
     s->xb = safe_alloc<v4sf>(p->dim);
     s->xb2 = safe_alloc<v4sf>(p->dim);
     s->hb = safe_alloc<v4sf>(p->hidden_dim);
     s->hb2 = safe_alloc<v4sf>(p->hidden_dim);
     s->q = safe_alloc<v4sf>(p->dim);
-    s->key_cache = safe_alloc<v4sf>(p->n_layers * p->seq_len * kv_dim);
-    s->value_cache = safe_alloc<v4sf>(p->n_layers * p->seq_len * kv_dim);
-    s->att = safe_alloc<v4sf>(p->n_heads * p->seq_len);
+    s->key_cache = safe_alloc<v4sf>(kv_cache_elems);
+    s->value_cache = safe_alloc<v4sf>(kv_cache_elems);
+    s->att = safe_alloc<v4sf>((size_t)p->n_heads * (size_t)p->seq_len);
     s->logits = safe_alloc<v4sf>(p->vocab_size);
     // ensure all mallocs went fine
     if (!s->x || !s->xb || !s->xb2 || !s->hb || !s->hb2 || !s->q || !s->key_cache || !s->value_cache || !s->att || !s->logits)
@@ -249,14 +276,46 @@ void build_transformer(Transformer *t, char *checkpoint_path)
 
     matmul_params = safe_alloc<MatMulTaskParams>(1);
     forward_params = safe_alloc<ForwardTaskParams>(1);
-    // 将最后一个参数由 1 改为 0（指定运行在 Core 0），并将 2048 调大至 4096
-    xTaskCreatePinnedToCore(matmul_task, "MatMul2", 4096, matmul_params, 19, &matmul_task_2, 0);             // 赶到 Core 0！
-    xTaskCreatePinnedToCore(forward_task, "ForwardTask", 4096, forward_params, 19, &handle_forward_task, 0); // 赶到 Core 0！
+    /* 栈空间从 4096 调大到 6144：matmul_task 和 forward_task 内部有循环局部变量、
+     * softmax 调用链以及 ESP_LOG，原 4KB 在编译器优化不足时可能栈溢出。 */
+    xTaskCreatePinnedToCore(matmul_task, "MatMul2", 6144, matmul_params, 19, &matmul_task_2, 0);
+    xTaskCreatePinnedToCore(forward_task, "ForwardTask", 6144, forward_params, 19, &handle_forward_task, 0);
     ESP_LOGI(TAG, "Created FreeRTOS Tasks");
 }
 
 void free_transformer(Transformer *t)
 {
+    // 先删除 helper 任务，避免它们引用已释放的 semaphore/event group
+    if (matmul_task_2 != NULL) {
+        vTaskDelete(matmul_task_2);
+        matmul_task_2 = NULL;
+    }
+    if (handle_forward_task != NULL) {
+        vTaskDelete(handle_forward_task);
+        handle_forward_task = NULL;
+    }
+    // 释放同步对象
+    if (semaDataReady != NULL) {
+        vSemaphoreDelete(semaDataReady);
+        semaDataReady = NULL;
+    }
+    if (semaForwardDataReady != NULL) {
+        vSemaphoreDelete(semaForwardDataReady);
+        semaForwardDataReady = NULL;
+    }
+    if (xEventGroup != NULL) {
+        vEventGroupDelete(xEventGroup);
+        xEventGroup = NULL;
+    }
+    if (ForwardEventGroup != NULL) {
+        vEventGroupDelete(ForwardEventGroup);
+        ForwardEventGroup = NULL;
+    }
+    free(matmul_params);
+    matmul_params = NULL;
+    free(forward_params);
+    forward_params = NULL;
+
     // close the memory mapping
     if (t->data != MAP_FAILED)
     {
@@ -337,7 +396,12 @@ void matmul_task(void *params)
             }
             //    ESP_LOGI(TAG, "Completed task %s", tName);
             xSemaphoreGive(semaDataReady);
-            xEventGroupSync(xEventGroup, p->task_num, ALL_SYNC_BITS, portMAX_DELAY);
+            EventBits_t bits = xEventGroupSync(xEventGroup, p->task_num, ALL_SYNC_BITS,
+                                               pdMS_TO_TICKS(MATMUL_SYNC_TIMEOUT_MS));
+            if ((bits & ALL_SYNC_BITS) != ALL_SYNC_BITS) {
+                ESP_LOGE(TAG, "matmul_task sync 超时，重启系统");
+                esp_restart();
+            }
         }
     }
 }
@@ -396,7 +460,13 @@ void forward_task(void *params)
             }
             //   ESP_LOGI(TAG, "Completed task %s", tName);
             xSemaphoreGive(semaForwardDataReady);
-            xEventGroupSync(ForwardEventGroup, t_params->task_num, ALL_FORWARD_TASKS, portMAX_DELAY);
+            EventBits_t fwd_bits = xEventGroupSync(ForwardEventGroup, t_params->task_num,
+                                                   ALL_FORWARD_TASKS,
+                                                   pdMS_TO_TICKS(FORWARD_SYNC_TIMEOUT_MS));
+            if ((fwd_bits & ALL_FORWARD_TASKS) != ALL_FORWARD_TASKS) {
+                ESP_LOGE(TAG, "forward_task sync 超时，重启系统");
+                esp_restart();
+            }
         }
     }
 }
@@ -417,14 +487,20 @@ void matmul(v4sf *xout, v4sf *x, v4sf *w, int n, int d)
         }
         xout[i] = val;
     }
-    if (xSemaphoreTake(semaDataReady, portMAX_DELAY) == pdTRUE)
+    if (xSemaphoreTake(semaDataReady, pdMS_TO_TICKS(MATMUL_SYNC_TIMEOUT_MS)) == pdTRUE)
     {
-        xEventGroupSync(xEventGroup,
+        EventBits_t bits = xEventGroupSync(xEventGroup,
                         TASK_0_BIT,
                         ALL_SYNC_BITS,
-                        portMAX_DELAY);
-
+                        pdMS_TO_TICKS(MATMUL_SYNC_TIMEOUT_MS));
+        if ((bits & ALL_SYNC_BITS) != ALL_SYNC_BITS) {
+            ESP_LOGE(TAG, "matmul sync 超时：对端任务可能已死锁，重启系统");
+            esp_restart();
+        }
         xEventGroupClearBits(xEventGroup, ALL_SYNC_BITS);
+    } else {
+        ESP_LOGE(TAG, "matmul 等待 helper 超时，重启系统");
+        esp_restart();
     }
     //   ESP_LOGI(TAG, "Completed MatMul tasks");
 }
@@ -546,52 +622,59 @@ v4sf *forward(Transformer *transformer, int token, int pos)
                 }
             }
         }
-        if (xSemaphoreTake(semaForwardDataReady, portMAX_DELAY) == pdTRUE)
+        if (xSemaphoreTake(semaForwardDataReady, pdMS_TO_TICKS(FORWARD_SYNC_TIMEOUT_MS)) == pdTRUE)
         {
 
-            xEventGroupSync(ForwardEventGroup,
+            EventBits_t fwd_bits = xEventGroupSync(ForwardEventGroup,
                             FORWARD_TASK_2,
                             ALL_FORWARD_TASKS,
-                            portMAX_DELAY);
+                            pdMS_TO_TICKS(FORWARD_SYNC_TIMEOUT_MS));
 
+            if ((fwd_bits & ALL_FORWARD_TASKS) != ALL_FORWARD_TASKS) {
+                ESP_LOGE(TAG, "forward attention sync 超时，重启系统");
+                esp_restart();
+            }
             xEventGroupClearBits(ForwardEventGroup, ALL_FORWARD_TASKS);
+        } else {
+            ESP_LOGE(TAG, "forward 等待 helper 超时，重启系统");
+            esp_restart();
+        }
 
-            // final matmul to get the output of the attention
-            matmul(s->xb2, s->xb, w->wo + l * dim * dim, dim, dim);
+        // final matmul to get the output of the attention
+        matmul(s->xb2, s->xb, w->wo + l * dim * dim, dim, dim);
 
-            // residual connection back into x
-            for (int i = 0; i < dim; i++)
-            {
-                x[i] += s->xb2[i];
-            }
+        // residual connection back into x
+        for (int i = 0; i < dim; i++)
+        {
+            x[i] += s->xb2[i];
+        }
 
-            // ffn rmsnorm
-            rmsnorm(s->xb, x, w->rms_ffn_weight + l * dim, dim);
+        // ffn rmsnorm
+        rmsnorm(s->xb, x, w->rms_ffn_weight + l * dim, dim);
 
-            // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
-            // first calculate self.w1(x) and self.w3(x)
-            matmul(s->hb, s->xb, w->w1 + l * dim * hidden_dim, dim, hidden_dim);
-            matmul(s->hb2, s->xb, w->w3 + l * dim * hidden_dim, dim, hidden_dim);
+        // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
+        // first calculate self.w1(x) and self.w3(x)
+        matmul(s->hb, s->xb, w->w1 + l * dim * hidden_dim, dim, hidden_dim);
+        matmul(s->hb2, s->xb, w->w3 + l * dim * hidden_dim, dim, hidden_dim);
 
-            // SwiGLU non-linearity
-            for (int i = 0; i < hidden_dim; i++)
-            {
-                v4sf val = s->hb[i];
-                // silu(x)=x*σ(x), where σ(x) is the logistic sigmoid
-                val *= (1.0f / (1.0f + expf(-val)));
-                // elementwise multiply with w3(x)
-                val *= s->hb2[i];
-                s->hb[i] = val;
-            }
+        // SwiGLU non-linearity
+        for (int i = 0; i < hidden_dim; i++)
+        {
+            v4sf val = s->hb[i];
+            // silu(x)=x*σ(x), where σ(x) is the logistic sigmoid
+            val *= (1.0f / (1.0f + expf(-val)));
+            // elementwise multiply with w3(x)
+            val *= s->hb2[i];
+            s->hb[i] = val;
+        }
 
-            // final matmul to get the output of the ffn
-            matmul(s->xb, s->hb, w->w2 + l * dim * hidden_dim, hidden_dim, dim);
+        // final matmul to get the output of the ffn
+        matmul(s->xb, s->hb, w->w2 + l * dim * hidden_dim, hidden_dim, dim);
 
-            // residual connection
-            for (int i = 0; i < dim; i++)
-            {
-                x[i] += s->xb[i];
-            }
+        // residual connection
+        for (int i = 0; i < dim; i++)
+        {
+            x[i] += s->xb[i];
         }
     }
 
@@ -747,7 +830,8 @@ void encode(Tokenizer *t, char *text, int8_t bos, int8_t eos, int *tokens, int *
 
     // create a temporary buffer that will store merge candidates of always two consecutive tokens
     // *2 for concat, +1 for null terminator +2 for UTF8 (in case max_token_length is 1)
-    char *str_buffer = safe_alloc<char>((t->max_token_length * 2 + 1 + 2));
+    const size_t str_buf_size = (size_t)t->max_token_length * 2u + 1u + 2u;
+    char *str_buffer = safe_alloc<char>(str_buf_size);
     size_t str_len = 0;
 
     // start at 0 tokens
@@ -833,7 +917,13 @@ void encode(Tokenizer *t, char *text, int8_t bos, int8_t eos, int *tokens, int *
         for (int i = 0; i < (*n_tokens - 1); i++)
         {
             // check if we can merge the pair (tokens[i], tokens[i+1])
-            sprintf(str_buffer, "%s%s", t->vocab[tokens[i]], t->vocab[tokens[i + 1]]);
+            int written = snprintf(str_buffer, str_buf_size, "%s%s",
+                                   t->vocab[tokens[i]], t->vocab[tokens[i + 1]]);
+            if (written < 0 || (size_t)written >= str_buf_size) {
+                /* 合并后字符串超过缓冲区——tokenizer 文件可能损坏，
+                 * 跳过此合并，继续尝试其他 pair。 */
+                continue;
+            }
             int id = str_lookup(str_buffer, t->sorted_vocab, t->vocab_size);
             if (id != -1 && t->vocab_scores[id] > best_score)
             {
@@ -1100,11 +1190,17 @@ void generate(
         pos++;
 
         /* token 1 是 </s>（EOS）。stories260K 模型很小，容易过早输出 EOS。
-         * 回退 pos 重试同一位置——sampler 每次用不同随机种子，不会死循环。 */
+         * 回退 pos 重试同一位置——sampler 每次用不同随机种子，不会死循环。
+         * 但必须防止 pos 退到负数，否则 forward() 中 key_cache 索引越界导致
+         * 堆内存破坏 → 单片机重启。 */
         if (next == 1)
         {
-            pos--;
-            continue;
+            if (pos > 0) {
+                pos--;
+                continue;
+            }
+            /* pos == 0 时无法回退，放弃本 token 换成安全的 token 0 (<unk>) */
+            next = 0;
         }
 
         // print the token as string, decode it with the Tokenizer object
